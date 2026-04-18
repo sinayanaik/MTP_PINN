@@ -1,0 +1,45 @@
+Torque Analysis — Bulk Run Report
+Generated: 2026-03-28 16:32:27
+
+======================================================================
+  Run folder: 28032026_eps0.0628_c0.181-0.287_v0.000-0.300
+  Files:      124
+  OK:         124
+  Failed:     0
+  Time:       100s (0.8s avg)
+  Output:     /home/san/Desktop/MTP_PINN/infer_torque/28032026_eps0.0628_c0.181-0.287_v0.000-0.300/
+  Summary:    /home/san/Desktop/MTP_PINN/infer_torque/28032026_eps0.0628_c0.181-0.287_v0.000-0.300/global_summary.json
+  Samples:    470529
+
+  Per-joint model quality (median RNEA/Load  |  median NRMSE):
+    J1 (yaw)  : RNEA/Load=0.0664  good=0.0%  NRMSE=52.2%
+    J2        : RNEA/Load=0.9456  good=93.5%  NRMSE=37.9%
+    J3        : RNEA/Load=1.0138  good=100.0%  NRMSE=42.6%
+    J4        : RNEA/Load=0.3049  good=2.4%  NRMSE=55.1%
+    J5        : RNEA/Load=0.0425  good=0.0%  NRMSE=63.0%
+    J6 (tool) : RNEA/Load=0.0002  good=0.0%  NRMSE=100.0%
+
+  Shape-wise median NRMSE (active joints J1–J5):
+    Shape               J     1  J     2  J     3  J     4  J     5
+    ----------------------------------------------------------
+    circle              48.2%    37.4%    36.6%    62.3%    66.7%
+    ellipse             45.3%    38.0%    40.2%    56.2%    62.4%
+    helix               47.0%    40.0%    39.1%    60.1%    67.0%
+    lissajous           54.9%    37.6%    41.7%    59.0%    69.8%
+    parabola            52.9%    42.8%    46.2%    53.3%    58.3%
+    rectangle           50.0%    43.0%    46.7%    53.4%    60.9%
+    regular_polygon     55.2%    34.0%    48.3%    62.6%    56.3%
+    sine_wave           56.7%    35.6%    41.1%    52.7%    63.1%
+    spiral              42.0%    37.7%    44.2%    58.6%    60.4%
+    square              55.0%    38.5%    48.6%    50.6%    62.9%
+    triangle            52.0%    29.5%    44.6%    58.6%    62.6%
+
+  Trajectory-type median NRMSE (active joints J1–J5):
+    TrajType               J     1  J     2  J     3  J     4  J     5
+    ----------------------------------------------------------
+    cubic_poly          54.9%    36.9%    41.4%    53.8%    69.0%
+    quintic_poly        69.0%    41.0%    41.0%    67.8%    79.2%
+    ruckig              46.3%    37.0%    45.0%    52.5%    58.6%
+    trapezoidal         49.4%    41.2%    36.2%    47.2%    53.6%
+    unknown             42.5%    95.3%    46.2%    41.3%    68.5%
+======================================================================

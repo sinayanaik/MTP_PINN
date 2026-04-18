@@ -1,0 +1,233 @@
+flowchart TD
+
+subgraph S0 Configuration
+A[config.py]
+A1[Stores paths constants calibration values smoothing settings friction values plot settings]
+A --> A1
+end
+
+subgraph S1 Input_Data
+B[Raw JSON logs]
+B1[Contain time commanded motion actual motion load voltage current end effector data metadata]
+C[data_loader.py]
+C1[Reads one JSON file and returns arrays and metadata dictionaries]
+B --> B1 --> C --> C1
+end
+
+subgraph S2 Preprocessing
+D[utils.py ticks_to_radians]
+D1[Converts encoder ticks to joint angles in radians using direction and center offset]
+E[utils.py fix_timestamps]
+E1[Fixes duplicate or non increasing timestamps]
+F[utils.py numerical_velocity]
+F1[Computes joint velocity from position and time then smooths it]
+G[utils.py numerical_acceleration]
+G1[Computes joint acceleration from velocity and time then smooths it]
+C1 --> D --> D1
+C1 --> E --> E1
+D1 --> F --> F1 --> G --> G1
+end
+
+subgraph S3 Torque_Measurements
+H[torque.py torque_from_load_raw]
+H1[Converts servo load register and voltage into raw torque in servo frame]
+I[torque.py torque_from_load]
+I1[Applies joint direction mapping and converts load torque into URDF frame]
+J[torque.py torque_from_current]
+J1[Converts motor current into estimated torque using torque constant]
+C1 --> H --> H1 --> I --> I1
+C1 --> J --> J1
+end
+
+subgraph S4 Robot_Model
+K[torque.py build_pinocchio_model]
+K1[Processes xacro and builds URDF model in Pinocchio]
+K2[Loads kinematic tree joint structure masses centers of mass and inertias]
+K3[Applies global mass scaling to link masses and inertias]
+K4[Optionally adds extra masses]
+A --> K
+K --> K1 --> K2
+K --> K3
+K --> K4
+end
+
+subgraph S5 Analytical_Torque
+L[torque.py torque_from_urdf]
+L1[Uses actual joint angles]
+L2[Uses numerical velocity and acceleration]
+L3[Runs RNEA at every timestep]
+L4[Outputs full analytical torque]
+M[torque.py torque_gravity_only]
+M1[Runs RNEA with zero velocity and zero acceleration]
+M2[Outputs gravity only torque]
+D1 --> L
+F1 --> L
+G1 --> L
+K2 --> L
+K3 --> L
+L --> L1
+L --> L2
+L --> L3
+L --> L4
+D1 --> M
+K2 --> M
+K3 --> M
+M --> M1 --> M2
+end
+
+subgraph S6 Friction_Model
+N[torque.py smooth_sign]
+N1[Uses tanh shape to avoid discontinuity near zero velocity]
+O[torque.py torque_friction]
+O1[Computes coulomb friction plus viscous friction from joint velocity]
+F1 --> N --> N1 --> O --> O1
+A --> O
+end
+
+subgraph S7 Single_File_Pipeline
+P[main.py]
+P1[Loads one log file]
+P2[Converts actual positions to radians]
+P3[Builds Pinocchio model]
+P4[Computes load torque]
+P5[Computes URDF analytical torque]
+P6[Computes gravity only torque]
+P7[Computes friction torque]
+P8[Combines rigid body torque and friction]
+P9[Computes residual between measured torque and analytical torque]
+C --> P
+D --> P
+K --> P
+I --> P
+L --> P
+M --> P
+O --> P
+P --> P1
+P --> P2
+P --> P3
+P --> P4
+P --> P5
+P --> P6
+P --> P7
+P --> P8
+P --> P9
+end
+
+subgraph S8 Diagnostics
+Q[diagnostics.py]
+Q1[Checks Pinocchio joint order against logged joint mapping]
+Q2[Prints masses centers of mass and inertias]
+Q3[Checks gravity torque at sample poses]
+Q4[Checks joint angle ranges]
+Q5[Checks timestamp quality]
+Q6[Checks velocity and acceleration magnitudes]
+Q7[Checks raw load and voltage ranges]
+Q8[Checks current sign against load sign]
+Q9[Compares torque magnitudes across methods]
+P --> Q
+Q --> Q1
+Q --> Q2
+Q --> Q3
+Q --> Q4
+Q --> Q5
+Q --> Q6
+Q --> Q7
+Q --> Q8
+Q --> Q9
+end
+
+subgraph S9 Plotting
+R[plots.py]
+R1[Plots measured torque against URDF torque and URDF plus friction]
+R2[Plots residual that remains after analytical model]
+R3[Plots gravity only torque against full RNEA]
+R4[Plots joint angles velocities accelerations raw signals and end effector motion]
+P --> R
+R --> R1
+R --> R2
+R --> R3
+R --> R4
+end
+
+subgraph S10 Mass_Calibration
+S[calibrate_v2.py]
+S1[Uses gravity only torque to calibrate global mass scale]
+S2[Tests sign conventions for load torque mapping]
+S3[Fits one global scale using joints with strongest gravity signal]
+S4[Reports implied physical density and compares hypotheses]
+M --> S
+I --> S
+S --> S1
+S --> S2
+S --> S3
+S --> S4
+end
+
+subgraph S11 Friction_Calibration
+T[calibrate_friction.py]
+T1[Builds friction signal as measured torque minus URDF torque]
+T2[Runs velocity statistics and correlation diagnostics]
+T3[Uses regime analysis for direct estimates]
+T4[Uses asymmetry analysis to separate friction from gravity bias]
+T5[Uses epsilon sweep with bias aware least squares]
+T6[Uses nonlinear fitting with physical bounds]
+T7[Checks consistency across many trajectories]
+T8[Synthesizes final recommended friction parameters]
+I --> T
+L --> T
+S --> T
+T --> T1
+T --> T2
+T --> T3
+T --> T4
+T --> T5
+T --> T6
+T --> T7
+T --> T8
+end
+
+subgraph S12 Bulk_Processing
+U[bulk_analyze.py]
+U1[Finds all JSON files]
+U2[Builds model once]
+U3[Processes each file through the analytical torque pipeline]
+U4[Generates one plot per file]
+U5[Builds one global summary JSON with aggregate statistics]
+V[plots_bulk.py]
+V1[Provides headless save only plotting functions for batch runs]
+U --> U1
+U --> U2
+U --> U3
+U --> U4
+U --> U5
+U --> V
+V --> V1
+end
+
+subgraph S13 Package_File
+W[__init__.py]
+W1[Marks Torque Analysis as a Python package]
+W --> W1
+end
+
+subgraph S14 Core_Concept
+X[Simple analytical model]
+X1[Uses only rigid body inverse dynamics from URDF]
+X2[Misses gearbox friction mass mismatch and unmodeled effects]
+Y[Improved analytical model]
+Y1[Adds friction model on top of rigid body torque]
+Y2[Reduces systematic velocity dependent error]
+Z[Residual for learning]
+Z1[What remains after subtracting analytical model from measured torque]
+Z2[Contains unmodeled dynamics calibration error and noise]
+L --> X
+X --> X1
+X --> X2
+O --> Y
+L --> Y
+Y --> Y1
+Y --> Y2
+P --> Z
+Z --> Z1
+Z --> Z2
+end

@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<robot name="urdf_kikobot_description_v1" xmlns="http://www.ros.org">
+  <!-- Minimal SRDF for MoveIt Setup Assistant to define virtual joint -->
+  <virtual_joint name="world_joint" type="fixed" parent_frame="world" child_link="base_link"/>
+
+  <!-- Disable collision checking between adjacent links in kinematic chain -->
+  <disable_collisions link1="base_link" link2="shoulder_joint_1" reason="Adjacent"/>
+  <disable_collisions link1="shoulder_joint_1" link2="elbow_joint_1" reason="Adjacent"/>
+  <disable_collisions link1="elbow_joint_1" link2="wrist_1_1" reason="Adjacent"/>
+  <disable_collisions link1="wrist_1_1" link2="wrist_2_1" reason="Adjacent"/>
+  <disable_collisions link1="wrist_2_1" link2="wrist_3_1" reason="Adjacent"/>
+  <disable_collisions link1="wrist_3_1" link2="end_effector_1" reason="Adjacent"/>
+  
+  <!-- Disable collision checking between close non-adjacent links (by design) -->
+  <disable_collisions link1="base_link" link2="elbow_joint_1" reason="Never"/>
+  <disable_collisions link1="wrist_2_1" link2="end_effector_1" reason="Never"/>
+  <disable_collisions link1="wrist_1_1" link2="wrist_3_1" reason="Default"/>
+  
+  <!-- Note: tooltip link has no collision geometry, so no pairs needed -->
+</robot>

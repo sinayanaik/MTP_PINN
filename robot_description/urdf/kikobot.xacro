@@ -1,0 +1,354 @@
+<?xml version="1.0" ?>
+<robot name="kikobot" xmlns:xacro="http://ros.org/wiki/xacro">
+
+<xacro:include filename="materials.xacro" />
+
+<link name="world" />
+<joint name="world_joint" type="fixed">
+  <parent link="world" />
+  <child link="base_link" />
+  <origin xyz="0 0 0" rpy="0 0 0" />
+</joint>
+
+<link name="base_link">
+  <inertial>
+    <origin xyz="0.003411847404905988 0.0003910038603105255 0.0316923242999685" rpy="0 0 0"/>
+    <mass value="1.7062291432573238"/>
+    <inertia ixx="0.002831" iyy="0.002886" izz="0.00316" ixy="-2e-06" iyz="6e-06" ixz="4.7e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="shoulder_joint_1">
+  <inertial>
+    <origin xyz="-0.004032489425425431 4.4079584916860385e-05 0.06499184784876534" rpy="0 0 0"/>
+    <mass value="0.7619266756957181"/>
+    <inertia ixx="0.000615" iyy="0.000678" izz="0.000293" ixy="-0.0" iyz="2e-06" ixz="6.3e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="4.9e-05 0.000138 -0.050856" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/shoulder_joint_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="4.9e-05 0.000138 -0.050856" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/shoulder_joint_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="elbow_joint_1">
+  <inertial>
+    <origin xyz="-0.05544883912138275 -3.444961820380085e-06 0.08385595815704319" rpy="0 0 0"/>
+    <mass value="1.1883577386797737"/>
+    <inertia ixx="0.00479" iyy="0.005141" izz="0.000798" ixy="2e-06" iyz="-5e-06" ixz="0.000376"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.01965 0.000176 -0.137744" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/elbow_joint_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.01965 0.000176 -0.137744" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/elbow_joint_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="wrist_1_1">
+  <inertial>
+    <origin xyz="0.058760409806501254 2.604988089004691e-06 0.08535035849242295" rpy="0 0 0"/>
+    <mass value="1.1108368501072639"/>
+    <inertia ixx="0.004294" iyy="0.00452" izz="0.000637" ixy="2e-06" iyz="5e-06" ixz="-0.000309"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.066486 0.000111 -0.284734" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/wrist_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.066486 0.000111 -0.284734" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/wrist_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="wrist_2_1">
+  <inertial>
+    <origin xyz="-0.049822057619057315 7.370383515729526e-05 0.003073395957063574" rpy="0 0 0"/>
+    <mass value="0.6674819559158766"/>
+    <inertia ixx="0.00024" iyy="0.000451" izz="0.000406" ixy="-3e-06" iyz="0.0" ixz="3.9e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.01935 0.000175 -0.431747" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/wrist_2_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.01935 0.000175 -0.431747" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/wrist_2_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="wrist_3_1">
+  <inertial>
+    <origin xyz="-0.0037361160469512045 -1.5160932154582429e-05 0.04965446952725411" rpy="0 0 0"/>
+    <mass value="0.7493992906308058"/>
+    <inertia ixx="0.000445" iyy="0.00058" izz="0.000381" ixy="0.0" iyz="-2e-06" ixz="3.9e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.086495 0.000348 -0.45029" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/wrist_3_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.086495 0.000348 -0.45029" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/wrist_3_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="end_effector_1">
+  <inertial>
+    <origin xyz="-0.026309276724266084 0.00021112832590368028 -1.6639945410457102e-06" rpy="0 0 0"/>
+    <mass value="0.1883404088166293"/>
+    <inertia ixx="5.8e-05" iyy="4.7e-05" izz="4.7e-05" ixy="-0.0" iyz="0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.104738 9.7e-05 -0.513295" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/end_effector_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.104738 9.7e-05 -0.513295" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://robot_description/meshes/end_effector_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<joint name="revolute_1" type="revolute">
+  <origin xyz="-4.9e-05 -0.000138 0.050856" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="shoulder_joint_1"/>
+  <axis xyz="0.0 0.0 1.0"/>
+  <limit upper="2.879793" lower="-2.879793" effort="100" velocity="100"/>
+</joint>
+
+<joint name="revolute_2" type="revolute">
+  <origin xyz="-0.019601 -3.8e-05 0.086888" rpy="0 0 0"/>
+  <parent link="shoulder_joint_1"/>
+  <child link="elbow_joint_1"/>
+  <axis xyz="-1.0 0.0 0.0"/>
+  <limit upper="2.617994" lower="-1.745329" effort="100" velocity="100"/>
+</joint>
+
+<joint name="revolute_3" type="revolute">
+  <origin xyz="-0.046836 6.5e-05 0.14699" rpy="0 0 0"/>
+  <parent link="elbow_joint_1"/>
+  <child link="wrist_1_1"/>
+  <axis xyz="-1.0 -0.0 0.0"/>
+  <limit upper="2.443461" lower="-2.443461" effort="100" velocity="100"/>
+</joint>
+
+<joint name="revolute_4" type="revolute">
+  <origin xyz="0.047136 -6.4e-05 0.147013" rpy="0 0 0"/>
+  <parent link="wrist_1_1"/>
+  <child link="wrist_2_1"/>
+  <axis xyz="1.0 0.0 0.0"/>
+  <limit upper="2.443461" lower="-2.443461" effort="100" velocity="100"/>
+</joint>
+
+<joint name="revolute_5" type="revolute">
+  <origin xyz="-0.067145 -0.000173 0.018543" rpy="0 0 0"/>
+  <parent link="wrist_2_1"/>
+  <child link="wrist_3_1"/>
+  <axis xyz="-0.0 -0.000206 1.0"/>
+  <limit upper="2.443461" lower="-2.443461" effort="100" velocity="100"/>
+</joint>
+
+<joint name="revolute_6" type="revolute">
+  <origin xyz="-0.018243 0.000251 0.063005" rpy="0 0 0"/>
+  <parent link="wrist_3_1"/>
+  <child link="end_effector_1"/>
+  <axis xyz="-0.999962 0.008727 2e-06"/>
+  <limit upper="3.054326" lower="-3.054326" effort="100" velocity="100"/>
+</joint>
+
+<link name="tooltip">
+  <inertial>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <mass value="0.001"/>
+    <inertia ixx="1e-08" iyy="1e-08" izz="1e-08" ixy="0" iyz="0" ixz="0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <sphere radius="0.008"/>
+    </geometry>
+    <material name="tooltip_green">
+      <color rgba="0 1 0 0.9"/>
+    </material>
+  </visual>
+</link>
+
+<joint name="tooltip_joint" type="fixed">
+  <origin xyz="-0.06 0 0" rpy="0 0 0"/>
+  <parent link="end_effector_1"/>
+  <child link="tooltip"/>
+</joint>
+
+<!-- Fixed transmissions with snake_case naming -->
+<transmission name="revolute_1_tran">
+  <type>transmission_interface/SimpleTransmission</type>
+  <joint name="revolute_1">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+  </joint>
+  <actuator name="revolute_1_actr">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+  </actuator>
+</transmission>
+
+<transmission name="revolute_2_tran">
+  <type>transmission_interface/SimpleTransmission</type>
+  <joint name="revolute_2">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+  </joint>
+  <actuator name="revolute_2_actr">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+  </actuator>
+</transmission>
+
+<transmission name="revolute_3_tran">
+  <type>transmission_interface/SimpleTransmission</type>
+  <joint name="revolute_3">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+  </joint>
+  <actuator name="revolute_3_actr">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+  </actuator>
+</transmission>
+
+<transmission name="revolute_4_tran">
+  <type>transmission_interface/SimpleTransmission</type>
+  <joint name="revolute_4">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+  </joint>
+  <actuator name="revolute_4_actr">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+  </actuator>
+</transmission>
+
+<transmission name="revolute_5_tran">
+  <type>transmission_interface/SimpleTransmission</type>
+  <joint name="revolute_5">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+  </joint>
+  <actuator name="revolute_5_actr">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+  </actuator>
+</transmission>
+
+<transmission name="revolute_6_tran">
+  <type>transmission_interface/SimpleTransmission</type>
+  <joint name="revolute_6">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+  </joint>
+  <actuator name="revolute_6_actr">
+    <hardwareInterface>hardware_interface/EffortJointInterface</hardwareInterface>
+    <mechanicalReduction>1</mechanicalReduction>
+  </actuator>
+</transmission>
+
+<!-- Gazebo properties -->
+<xacro:property name="body_color" value="Gazebo/Silver" />
+
+<gazebo>
+  <plugin name="control" filename="libgazebo_ros_control.so"/>
+</gazebo>
+<gazebo reference="base_link">
+  <material>${body_color}</material>
+  <mu1>0.2</mu1>
+  <mu2>0.2</mu2>
+  <self_collide>true</self_collide>
+  <gravity>true</gravity>
+</gazebo>
+
+<gazebo reference="shoulder_joint_1">
+  <material>${body_color}</material>
+  <mu1>0.2</mu1>
+  <mu2>0.2</mu2>
+  <self_collide>true</self_collide>
+</gazebo>
+
+<gazebo reference="elbow_joint_1">
+  <material>${body_color}</material>
+  <mu1>0.2</mu1>
+  <mu2>0.2</mu2>
+  <self_collide>true</self_collide>
+</gazebo>
+
+<gazebo reference="wrist_1_1">
+  <material>${body_color}</material>
+  <mu1>0.2</mu1>
+  <mu2>0.2</mu2>
+  <self_collide>true</self_collide>
+</gazebo>
+
+<gazebo reference="wrist_2_1">
+  <material>${body_color}</material>
+  <mu1>0.2</mu1>
+  <mu2>0.2</mu2>
+  <self_collide>true</self_collide>
+</gazebo>
+
+<gazebo reference="wrist_3_1">
+  <material>${body_color}</material>
+  <mu1>0.2</mu1>
+  <mu2>0.2</mu2>
+  <self_collide>true</self_collide>
+</gazebo>
+
+<gazebo reference="end_effector_1">
+  <material>${body_color}</material>
+  <mu1>0.2</mu1>
+  <mu2>0.2</mu2>
+  <self_collide>true</self_collide>
+</gazebo>
+
+</robot>

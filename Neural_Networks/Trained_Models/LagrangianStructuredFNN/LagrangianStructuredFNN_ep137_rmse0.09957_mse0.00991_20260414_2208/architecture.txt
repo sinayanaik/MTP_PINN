@@ -1,0 +1,74 @@
+Model: LagrangianStructuredFNN
+Params: 826,285
+
+Hyperparameters:
+  n_joints: 5
+  inertia_layers: [256, 512, 256]
+  coriolis_layers: [256, 512, 256]
+  gravity_layers: [256, 512, 256]
+  friction_layers: [128, 128]
+  dropout: 0.1
+  activation: tanh
+  lambda_spd: 0.01
+  lambda_friction: 0.01
+
+PyTorch repr:
+LagrangianStructuredFNN(
+  (M_net): Sequential(
+    (0): Linear(in_features=5, out_features=256, bias=True)
+    (1): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+    (2): Tanh()
+    (3): Dropout(p=0.1, inplace=False)
+    (4): Linear(in_features=256, out_features=512, bias=True)
+    (5): LayerNorm((512,), eps=1e-05, elementwise_affine=True)
+    (6): Tanh()
+    (7): Dropout(p=0.1, inplace=False)
+    (8): Linear(in_features=512, out_features=256, bias=True)
+    (9): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+    (10): Tanh()
+    (11): Dropout(p=0.1, inplace=False)
+    (12): Linear(in_features=256, out_features=15, bias=True)
+  )
+  (C_net): Sequential(
+    (0): Linear(in_features=10, out_features=256, bias=True)
+    (1): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+    (2): Tanh()
+    (3): Dropout(p=0.1, inplace=False)
+    (4): Linear(in_features=256, out_features=512, bias=True)
+    (5): LayerNorm((512,), eps=1e-05, elementwise_affine=True)
+    (6): Tanh()
+    (7): Dropout(p=0.1, inplace=False)
+    (8): Linear(in_features=512, out_features=256, bias=True)
+    (9): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+    (10): Tanh()
+    (11): Dropout(p=0.1, inplace=False)
+    (12): Linear(in_features=256, out_features=5, bias=True)
+  )
+  (g_net): Sequential(
+    (0): Linear(in_features=5, out_features=256, bias=True)
+    (1): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+    (2): Tanh()
+    (3): Dropout(p=0.1, inplace=False)
+    (4): Linear(in_features=256, out_features=512, bias=True)
+    (5): LayerNorm((512,), eps=1e-05, elementwise_affine=True)
+    (6): Tanh()
+    (7): Dropout(p=0.1, inplace=False)
+    (8): Linear(in_features=512, out_features=256, bias=True)
+    (9): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+    (10): Tanh()
+    (11): Dropout(p=0.1, inplace=False)
+    (12): Linear(in_features=256, out_features=5, bias=True)
+  )
+  (tau_calib): TauEquationCalibration()
+  (f_net): Sequential(
+    (0): Linear(in_features=5, out_features=128, bias=True)
+    (1): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+    (2): Tanh()
+    (3): Dropout(p=0.1, inplace=False)
+    (4): Linear(in_features=128, out_features=128, bias=True)
+    (5): LayerNorm((128,), eps=1e-05, elementwise_affine=True)
+    (6): Tanh()
+    (7): Dropout(p=0.1, inplace=False)
+    (8): Linear(in_features=128, out_features=10, bias=True)
+  )
+)

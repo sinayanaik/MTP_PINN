@@ -1,0 +1,34 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Joint Mapping Configuration
+# Maps physical ST3215 servo IDs to URDF joint names with corrections.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# All arrays are parallel — index i in each array describes joint i.
+#
+#   servo_ids     : Physical servo ID on the ST3215 bus
+#   joint_names   : Corresponding URDF joint name
+#   offsets_deg   : Additive offset AFTER direction flip (degrees)
+#   directions    : +1 or -1 — flips servo rotation to match URDF convention
+#   ticks_centers : Servo tick value that corresponds to 0 radians
+#   ticks_mins    : Minimum allowed command tick for safe deployment
+#   ticks_maxs    : Maximum allowed command tick for safe deployment
+#
+# Servo ticks: 0–4095, center = 2048, resolution = 360°/4096 ≈ 0.088°/tick
+# Safe command window: 20°–340° → 228–3868 ticks
+# ─────────────────────────────────────────────────────────────────────────────
+
+servo_reader:
+  ros__parameters:
+    port: "/dev/ttyACM0"
+    servo_ids: [1, 2, 3, 4, 5, 6]
+    read_rate_hz: 0.0  # 0 = unlimited (max bus speed); >0 = rate-limited (Hz)
+
+servo_to_joint_state:
+  ros__parameters:
+    servo_ids:     [1,    2,    3,    4,    5,    6]
+    joint_names:   ["revolute_1", "revolute_2", "revolute_3", "revolute_4", "revolute_5", "revolute_6"]
+    offsets_deg:   [0.0,  0.0,  0.0,  0.0,  0.0,  0.0]
+    directions:    [-1,   -1,   1,    1,    -1,   -1]
+    ticks_centers: [2048, 2048, 2048, 2048, 2048, 2048]
+    ticks_mins:    [228,  228,  228,  228,  228,  228]
+    ticks_maxs:    [3868, 3868, 3868, 3868, 3868, 3868]

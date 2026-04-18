@@ -1,0 +1,25 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+Torque_Analysis/.obsidian
+Torque_Analysis/__pycache__
+.obsidian
+Neural_Networks/.torch_compile_cache
+Neural_Networks/Trained_Models/._train_cache/
+__pycache__
