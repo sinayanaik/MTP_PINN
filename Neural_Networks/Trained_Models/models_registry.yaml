@@ -1,6 +1,102 @@
-total_models: 50
-last_updated: '2026-04-15T01:02:10.203367'
+total_models: 51
+last_updated: '2026-04-18T23:22:52.255799'
 models:
+- model_type: PhysicsRegularizedFNN
+  run_id: PhysicsRegularizedFNN_ep116_rmse0.10435_pw0.1_frac1_lr3e-4_wd0.005_do0.1_bs512_hl256-512-256_20260418_2322
+  run_dir: /home/san/Desktop/MTP_PINN/Neural_Networks/Trained_Models/PhysicsRegularizedFNN/PhysicsRegularizedFNN_ep116_rmse0.10435_pw0.1_frac1_lr3e-4_wd0.005_do0.1_bs512_hl256-512-256_20260418_2322
+  trained_at: '2026-04-18T23:22:52.255701'
+  model_path: /home/san/Desktop/MTP_PINN/Neural_Networks/Trained_Models/PhysicsRegularizedFNN/PhysicsRegularizedFNN_ep116_rmse0.10435_pw0.1_frac1_lr3e-4_wd0.005_do0.1_bs512_hl256-512-256_20260418_2322/model.pt
+  training:
+    time_seconds: 347.9
+    time_formatted: 5m 47s
+    epochs_ran: 116
+    epochs_max: 500
+    stopped_early: true
+    final_train_loss: 0.064495
+    final_val_loss: 0.1858607
+  hardware:
+    device: cuda:NVIDIA GeForce RTX 3050 Laptop GPU
+    torch_version: 2.5.1+cu124
+  data:
+    num_train_samples: 272465
+    num_val_samples: 53779
+    num_test_samples: 43093
+  hyperparams:
+    batch_size: 512
+    epochs: 500
+    learning_rate: 0.0003
+    optimizer: adamw
+    lr_scheduler: warmup_cosine
+    weight_decay: 0.005
+    dropout: 0.1
+    early_stopping: true
+    early_stop_metric: val_rmse
+    patience: 80
+    min_delta: 0.0001
+    activation: silu
+    feature_noise_std: 0.02
+    data_train_fraction: 1.0
+    data_train_seed: 0
+    grad_clip_norm: 5.0
+    hidden_layers:
+    - 256
+    - 512
+    - 256
+    phi_lr_ratio: 0.1
+    physics_weight: 0.1
+    physics_warmup_fraction: 0.05
+    _n_train_samples: 272465
+    stride: 1
+    torch_compile: true
+  metrics:
+    avg_rmse_mean: 0.09685101360082626
+    avg_rmse_pooled: 0.10434904147732628
+    avg_r2_overall: 0.898209910727546
+    avg_r2_mean: 0.862824559211731
+    avg_nrmse_mean: 0.07794217020273209
+    avg_mse_mean: 0.0108883585780859
+    avg_pearson_mean: 0.9295910343368442
+    per_joint_rmse:
+    - 0.08232442289590836
+    - 0.1616622507572174
+    - 0.10567934811115265
+    - 0.04175473749637604
+    - 0.09283433854579926
+    per_joint_r2:
+    - 0.8578873872756958
+    - 0.9082673788070679
+    - 0.9033440947532654
+    - 0.8504174947738647
+    - 0.7942061424255371
+    test_rmse_mean: 0.090046226978302
+    test_rmse_pooled: 0.09809523900189812
+    test_r2_overall: 0.8907008697865066
+    test_nrmse_mean: 0.07465340197086334
+    test_mse_mean: 0.00962259341031313
+  val_metrics:
+    rmse_pooled: 0.10910180061995035
+    rmse_mean: 0.10187171399593353
+    r2_overall: 0.9005068924073651
+    r2_mean: 0.8460538983345032
+    nrmse_mean: 0.086702860891819
+    per_joint_rmse:
+    - 0.09079811722040176
+    - 0.16575483977794647
+    - 0.10912682116031647
+    - 0.04385889694094658
+    - 0.09981989115476608
+  test_metrics:
+    rmse_pooled: 0.09809523900189812
+    rmse_mean: 0.090046226978302
+    r2_overall: 0.8907008697865066
+    r2_mean: 0.866040050983429
+    nrmse_mean: 0.07465340197086334
+    per_joint_rmse:
+    - 0.0703345313668251
+    - 0.1564079225063324
+    - 0.10121588408946991
+    - 0.03897102177143097
+    - 0.08330178260803223
 - model_type: DecomposedStructuredPINNFNN
   run_id: DecomposedStructuredPINNFNN_ep235_rmse0.09667_mse0.00934_20260415_0102
   run_dir: /home/san/Desktop/MTP_PINN/Neural_Networks/Trained_Models/DecomposedStructuredPINNFNN/DecomposedStructuredPINNFNN_ep235_rmse0.09667_mse0.00934_20260415_0102
