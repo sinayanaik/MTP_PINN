@@ -3,7 +3,6 @@ numpy==2.4.4
 pandas==3.0.1
 pin
 PyYAML==6.0.3
-rich==14.3.3
 scipy==1.17.1
 torch==2.6.0+cu124
 xacro==2.1.1

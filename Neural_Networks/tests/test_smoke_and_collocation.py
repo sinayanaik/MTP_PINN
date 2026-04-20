@@ -1,4 +1,4 @@
-"""Smoke tests for the two-model registry (CPU)."""
+"""Smoke tests for packaged torque models (CPU)."""
 
 from __future__ import annotations
 
@@ -6,45 +6,23 @@ import unittest
 
 import torch
 
-from Neural_Networks.apps.hp_registry import get_default_hp
-from Neural_Networks.apps.builder import build_model
-from Neural_Networks.models import MODEL_REGISTRY, PHYSICS_INPUT_MODELS
+from Neural_Networks.models import BlackBoxFNN, reduce_physics_to_total
 
 
 class TestSmokeModels(unittest.TestCase):
-    def test_forward_each_registered_model(self):
-        device = torch.device("cpu")
-        for name in MODEL_REGISTRY:
-            with self.subTest(model=name):
-                hp = get_default_hp(name)
-                m = build_model(name, hp, device)
-                m.eval()
-                feat = torch.randn(4, 15)
-                phy = torch.randn(4, 20)
+    def test_blackbox_forward_from_models(self):
+        m = BlackBoxFNN(hidden_layers=[16, 16], dropout=0.0)
+        m.eval()
+        feat = torch.randn(4, 15)
+        phy = torch.randn(4, 20)
+        with torch.no_grad():
+            out = m(feat, phy)
+        self.assertEqual(out.shape, (4, 5))
 
-                with torch.no_grad():
-                    if name in PHYSICS_INPUT_MODELS:
-                        out = m(feat, phy)
-                    else:
-                        out = m(feat)
-                self.assertEqual(out.shape[-1], 5)
-
-
-class TestPhysicsRegularizedCalibBackward(unittest.TestCase):
-    def test_tau_calib_backward(self):
-        """Calibration + data loss backward on tiny batch."""
-        from Neural_Networks.models import PhysicsRegularizedFNN
-
-        m = PhysicsRegularizedFNN(n_joints=5, hidden_layers=[32, 32], dropout=0.0)
-        m.train()
-        x = torch.randn(3, 15, requires_grad=False)
-        tau_hat = m(x)
-        tau_p = torch.randn(3, 20)
-        losses = m.compute_loss(tau_hat, torch.randn(3, 5), tau_p)
-        loss = losses["data"] + losses["physics"]
-        loss.backward()
-        self.assertIsNotNone(m.net[0].weight.grad)
-        self.assertIsNotNone(m.tau_calib.raw_scale.grad)
+    def test_physics_sum_shape(self):
+        phy = torch.randn(4, 20)
+        s = reduce_physics_to_total(phy)
+        self.assertEqual(s.shape, (4, 5))
 
 
 if __name__ == "__main__":
