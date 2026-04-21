@@ -21,7 +21,7 @@ _NN_ROOT = Path(__file__).resolve().parent.parent
 # ------------------------------------------------------------------
 TRAIN_DATA_RUN_DIR = str(
     _NN_ROOT / "train_data"
-    / "run_0419_1310_qraw_d25p3i_ddL_mraw_a1_R_70v15t15_f1p0t1p0_48205f"
+    / "run_0419_1338_qraw_d25p3i_ddL_mraw_a1_R_70v15t15_f1p0t1p0_f6a3df"
 )
 
 MODELS_DIR = str(_NN_ROOT / "Trained_Models" / "ResidualCorrectionFNN")

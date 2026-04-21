@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -61,8 +61,20 @@ def _is_valid_dataset(p: Path) -> bool:
     return all((p / s).is_dir() for s in ("train", "val", "test"))
 
 
-def run_training(job: TrainJob, *, log: logging.Logger | None = None) -> int:
-    """Train one model; return 0 on success, 1 on invalid dataset."""
+def run_training(
+    job: TrainJob,
+    *,
+    log: logging.Logger | None = None,
+    progress_callback: Callable[[int, int, float, int, int], None] | None = None,
+) -> int:
+    """Train one model; return 0 on success, 1 on invalid dataset.
+
+    Args:
+        progress_callback: optional callable invoked after every epoch with
+            signature ``(epoch, total_epochs, val_rmse_phys, patience_counter,
+            patience)``.  When provided, per-epoch ``log.info`` lines are
+            suppressed so an external progress bar can own the display.
+    """
     log = log or logger
     if not _is_valid_dataset(Path(job.run_dir)):
         log.error(
@@ -226,7 +238,10 @@ def run_training(job: TrainJob, *, log: logging.Logger | None = None) -> int:
                 "snapshot epoch=%d  best_epoch=%d  val_rmse_phys=%.5f",
                 epoch, best_epoch_num, _val_rmse_phys,
             )
-        if epoch == 1 or epoch % _print_every == 0 or epoch == epochs:
+        # ── Progress callback (e.g. tqdm bar update) ────────────────────────
+        if progress_callback is not None:
+            progress_callback(epoch, epochs, _val_rmse_phys, patience_counter, patience)
+        elif epoch == 1 or epoch % _print_every == 0 or epoch == epochs:
             if train_l_data_m is not None:
                 _corr_tag = ""
                 if _corr_mags is not None:
