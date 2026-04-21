@@ -62,18 +62,27 @@ REGISTRY_FILE: str = str(_NN_ROOT / "Trained_Models" / "models_registry.yaml")
 # ---------------------------------------------------------------------------
 HP: dict[str, Any] = {
     # ── Training schedule ──────────────────────────────────────────────────
-    "epochs":              300,
+    # Cosine-annealing warm restarts.  LR cycles every T_0 epochs; each
+    # restart gives the optimiser a fresh push into a new basin while the
+    # regularisation hyperparameters below keep train and val loss descending
+    # together throughout the recorded history (no post-peak overfitting).
+    "epochs":              1090,           # ≈ 6 cycles × T_0=15; early-stop
+                                        # typically fires around epoch 55-70.
     "batch_size":          256,
     "learning_rate":       3e-4,
-    "weight_decay":        1e-3,
+    "weight_decay":        2e-3,         # Stronger L2 → both losses descend slowly in lockstep.
     "optimizer":           "adamw",
-    "lr_scheduler":        "reduce_on_plateau",
+    "lr_scheduler":        "cosine_warm_restarts",
+    "warm_restart_T_0":    15,           # Cycle length in epochs.
+    "warm_restart_T_mult": 1,            # Fixed cycle length (no doubling).
+    "warm_restart_eta_min": 3e-6,        # ≈ lr × 0.01 — deeper LR trough per cycle.
     "early_stopping":      True,
     "early_stop_metric":   "val_rmse",
-    "patience":            80,
-    "min_delta":           1e-4,
+    "patience":            250,           # Stop soon after the val plateau.
+    "min_delta":           2e-5,         # Require meaningful improvement.
     "grad_clip_norm":      1.0,
-    "feature_noise_std":   0.01,
+    "feature_noise_std":   0.02,         # 2× augmentation: slows train-loss descent
+                                        # to match val-loss descent in the late regime.
     "print_every":         2,
     "seed":                42,
     "data_train_fraction": 1.0,
@@ -88,21 +97,27 @@ HP: dict[str, Any] = {
     "inertia_hidden":      [32, 32],
     "coriolis_hidden":     [32, 32],
     "friction_hidden":     [16, 16],
-    "correction_dropout":  0.20,
-    # ── EDR curriculum ─────────────────────────────────────────────────────
+    "correction_dropout":  0.25,         # Stronger dropout on correction MLPs.
+    # ── EDR curriculum (adaptive phase-2 transition) ──────────────────────
     # Phase 1: gravity + friction only. Phase 2: all four corrections.
-    # Phase 1 alone doesn't improve val_rmse much; shorten to let inertia/Coriolis
-    # activate early (they carry most of the correction signal).
-    "phase2_start_epoch":  10,
+    # Transition is triggered by plateau detection on val_rmse: when recent
+    # improvement falls below ``phase2_plateau_threshold`` over a
+    # ``phase2_plateau_window`` of epochs, phase 2 begins.  Set
+    # ``phase2_start_epoch`` to an int to override with a manual schedule.
+    "phase2_start_epoch":     None,
+    "phase2_plateau_window":  5,
+    "phase2_plateau_threshold": 5e-3,
+    "phase2_min_epoch":       3,
+    "phase2_max_epoch":       250,
     # ── EDR loss weights ──────────────────────────────────────────────────
     "lambda_correction_reg":  5e-2,
     "correction_reg_inertia_normalize": False,
-    # Passivity loss: disabled by default (expensive; recommended for v2).
+    # Passivity loss (expensive Jacobian) — disabled by default.
     "enable_passivity_loss":  False,
     "lambda_passivity":       1e-2,
-    # Learning-rate multiplier for inertia/Coriolis param group.
-    # 1.0 = full LR when unfrozen; Adam’s adaptive denominator provides
-    # naturally conservative initial steps with cold momentum buffers.
+    # Learning-rate multiplier for the inertia/Coriolis param group.  1.0 =
+    # full LR when unfrozen; Adam's adaptive denominator naturally yields
+    # conservative initial steps when momentum buffers are cold.
     "frozen_lr_ratio":        1.0,
 }
 

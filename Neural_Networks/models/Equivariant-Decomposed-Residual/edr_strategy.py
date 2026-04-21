@@ -116,7 +116,15 @@ DEFAULT_EXHAUSTIVE_EDR: dict[str, Any] = {
     "inertia_hidden":         [64, 64],
     "coriolis_hidden":        [64, 64],
     "friction_hidden":        [32, 32],
-    "phase2_start_epoch":     18,        # Switch to phase 2 (~guide: after gravity+friction).
+    # Phase-2 curriculum: adaptive plateau detection on val_rmse.
+    # If ``phase2_start_epoch`` is set (int > 0), it forces the transition at
+    # that epoch (back-compat / manual override).  If set to None, the
+    # transition is triggered adaptively when phase-1 val_rmse plateaus.
+    "phase2_start_epoch":     None,
+    "phase2_plateau_window":  5,        # Rolling window over which to measure improvement.
+    "phase2_plateau_threshold": 5e-3,   # Relative improvement threshold (0.5%).
+    "phase2_min_epoch":       3,        # Never trigger before this epoch (noise at start).
+    "phase2_max_epoch":       25,       # Safety fallback: force transition no later than this.
     "lambda_correction_reg":  5e-3,      # Correction magnitude regularisation weight.
     "correction_reg_inertia_normalize": True,  # Scale ||δM||_F² by 1/n² vs vector terms.
     "correction_dropout":     0.08,      # Dropout after hidden activations (0 = off).
@@ -125,6 +133,83 @@ DEFAULT_EXHAUSTIVE_EDR: dict[str, Any] = {
     "frozen_lr_ratio":        0.7,       # LR multiplier for inertia/Coriolis group (phase 1 and 2).
     "print_every":            10,        # Pipeline: log epoch INFO every N epochs (see pipeline.py).
 }
+
+
+# ===========================================================================
+# Adaptive phase-2 plateau detection (pure function — easily unit-tested)
+# ===========================================================================
+
+def _should_transition_to_phase2(
+    val_rmse_history: list[float],
+    hp: dict[str, Any],
+    current_epoch: int,
+    current_phase: int,
+) -> tuple[bool, str]:
+    """Decide whether the training loop should switch from phase 1 to phase 2.
+
+    The decision is based on the recent val_rmse history.  Phase 2 is triggered
+    when either (a) the sliding-window relative improvement falls below a
+    threshold, or (b) a safety-fallback epoch cap is reached.
+
+    Parameters
+    ----------
+    val_rmse_history:
+        Ordered list of val_rmse observations, oldest first.  Typically one
+        entry per completed training epoch.
+    hp:
+        Hyperparameter dict.  Recognised keys:
+        - ``phase2_start_epoch``      — if an int, forces transition at that epoch (override).
+        - ``phase2_plateau_window``   — sliding-window size W (default 5).
+        - ``phase2_plateau_threshold``— relative improvement threshold (default 5e-3).
+        - ``phase2_min_epoch``        — never trigger before this epoch (default 3).
+        - ``phase2_max_epoch``        — safety fallback: force at this epoch (default 25).
+    current_epoch:
+        The 1-based epoch index that is about to start.  The history should
+        contain one entry per already-completed epoch (so len(history) =
+        current_epoch - 1 at the top of epoch ``current_epoch``).
+    current_phase:
+        The model's current phase.  No transition is recommended if already
+        in phase 2.
+
+    Returns
+    -------
+    (should_transition, reason) — reason is a short human-readable string.
+    """
+    if current_phase != 1:
+        return (False, "already in phase 2")
+
+    # Manual override: phase2_start_epoch forces a fixed schedule.
+    override = hp.get("phase2_start_epoch")
+    if override is not None:
+        if current_epoch >= int(override):
+            return (True, f"manual override (phase2_start_epoch={int(override)})")
+        return (False, "before manual phase2_start_epoch")
+
+    min_epoch = int(hp.get("phase2_min_epoch", 3))
+    max_epoch = int(hp.get("phase2_max_epoch", 25))
+    window    = int(hp.get("phase2_plateau_window", 5))
+    threshold = float(hp.get("phase2_plateau_threshold", 5e-3))
+
+    # Safety fallback — force transition at max_epoch even without plateau.
+    if current_epoch >= max_epoch:
+        return (True, f"safety fallback at max_epoch={max_epoch}")
+
+    # Minimum length guard — avoid triggering on early-epoch noise.
+    if current_epoch < min_epoch:
+        return (False, f"before min_epoch={min_epoch}")
+
+    # Need at least ``window+1`` points to measure improvement across W epochs.
+    if len(val_rmse_history) < window + 1:
+        return (False, f"not enough history (need {window + 1}, have {len(val_rmse_history)})")
+
+    old = val_rmse_history[-(window + 1)]
+    new = val_rmse_history[-1]
+    if old <= 0.0:
+        return (False, "non-positive reference val_rmse")
+    rel_improvement = (old - new) / old
+    if rel_improvement < threshold:
+        return (True, f"plateau: rel_improvement={rel_improvement:.4f} < {threshold}")
+    return (False, f"still improving: rel_improvement={rel_improvement:.4f}")
 
 # Hyperparameter keys to embed in the run ID string.
 RUN_ID_KEYS_EDR: list[tuple[str, str]] = [
@@ -365,18 +450,22 @@ def _train_epoch_edr(
         term if enabled).  The shared pipeline logs ``mean_l_data`` /
         ``mean_l_corr`` when present.
     """
-    # ── Phase switching ───────────────────────────────────────────────────
-    phase2_start = int(hp.get("phase2_start_epoch", 15))
-    if epoch == phase2_start and model.phase == 1:
+    # ── Adaptive phase-2 transition (plateau detection) ──────────────────
+    should_switch, reason = _should_transition_to_phase2(
+        val_rmse_history=model.val_rmse_history,
+        hp=hp,
+        current_epoch=epoch,
+        current_phase=model.phase,
+    )
+    if should_switch:
         model.set_phase(2)
-        # Give inertia/Coriolis the same LR as gravity/friction.
-        # Adam's adaptive denominator naturally provides conservative initial
-        # steps when momentum buffers are cold — no need to reduce LR further.
+        # Give inertia/Coriolis the same LR as gravity/friction.  Adam's
+        # adaptive denominator naturally yields conservative initial steps
+        # when momentum buffers are cold.
         base_lr = optimizer.param_groups[0]["lr"]
         optimizer.param_groups[1]["lr"] = base_lr
-        # Clear stale Adam state for the newly unfrozen params so they start
-        # fresh instead of using momentum estimates accumulated from near-zero
-        # gradients during phase 1.
+        # Clear stale Adam state for newly unfrozen params so they start
+        # fresh rather than with momentum from near-zero phase-1 gradients.
         for param in (
             list(model.inertia_net.parameters())
             + list(model.coriolis_net.parameters())
@@ -384,9 +473,9 @@ def _train_epoch_edr(
             if param in optimizer.state:
                 del optimizer.state[param]
         logger.info(
-            "EDR curriculum: switching to phase 2 at epoch %d "
-            "(inertia + Coriolis corrections now trainable, LR=%.2e, Adam state reset).",
-            epoch, base_lr,
+            "EDR curriculum: switching to phase 2 at epoch %d — %s "
+            "(LR=%.2e, Adam state reset).",
+            epoch, reason, base_lr,
         )
 
     model.train()
@@ -406,6 +495,12 @@ def _train_epoch_edr(
     total_gnorm = 0.0
     total_sse   = 0.0
     total_elem  = 0
+    # Per-component correction-magnitude telemetry (for interpretability).
+    # All are batch-mean scalars accumulated across the epoch.
+    total_mag_g    = 0.0   # mean |δg| over batch+joints
+    total_mag_M    = 0.0   # mean Frobenius ||δM||_F over batch
+    total_mag_C_qd = 0.0   # mean |δC·q̇| over batch+joints
+    total_mag_f    = 0.0   # mean |δτ_f| over batch+joints
     n_batches   = len(loader)
 
     optimizer.zero_grad(set_to_none=True)
@@ -433,21 +528,14 @@ def _train_epoch_edr(
         tau_C = physics[:, 2*n:3*n]
         tau_f = physics[:, 3*n:4*n]
 
-        if model._use_trig_features:
-            q_raw = q * model.q_std + model.q_mean
-            sin_q = torch.sin(q_raw)
-            cos_q = torch.cos(q_raw)
-            q_aug = torch.cat([q, sin_q, cos_q], dim=-1)
-            delta_g = model.gravity_net(q_aug)
-            coriolis_input = torch.cat([q, sin_q, cos_q, qd], dim=-1)
-        else:
-            delta_g = model.gravity_net(q)
-            coriolis_input = torch.cat([q, qd], dim=-1)
+        # Build correction-network inputs via the model's single-source helper.
+        inputs = model.build_correction_inputs(q, qd)
+        delta_g      = model.gravity_net(inputs["gravity_input"])
         # Compute δM as the full (B, n, n) matrix for Frobenius-norm regularisation,
         # then apply it to q̈ for the torque contribution.  One forward pass, two uses.
         delta_M      = model.inertia_net.compute_delta_M(q)             # (B, n, n)
         delta_M_qdd  = torch.bmm(delta_M, qdd.unsqueeze(-1)).squeeze(-1) # (B, n)
-        delta_C_qd   = model.coriolis_net(coriolis_input, qd)
+        delta_C_qd   = model.coriolis_net(inputs["coriolis_input"], qd)
         delta_tau_f  = model.friction_net(qd)
 
         tau_hat = (
@@ -496,16 +584,34 @@ def _train_epoch_edr(
             d = tau_hat.detach() - target
             total_sse  += float((d * d).sum().item())
             total_elem += d.numel()
+            # Per-component magnitudes (detached — pure telemetry, no grad).
+            total_mag_g    += float(delta_g.detach().abs().mean().item())
+            total_mag_M    += float(
+                torch.sqrt((delta_M.detach() ** 2).sum(dim=(-2, -1))).mean().item()
+            )
+            total_mag_C_qd += float(delta_C_qd.detach().abs().mean().item())
+            total_mag_f    += float(delta_tau_f.detach().abs().mean().item())
 
     train_rmse = math.sqrt(total_sse / max(1, total_elem))
     mean_l_data = total_l_data / n_batches
     mean_l_corr = total_l_corr / n_batches
+    # Per-component correction-magnitude epoch means.
+    mean_mag_g    = total_mag_g / n_batches
+    mean_mag_M    = total_mag_M / n_batches
+    mean_mag_C_qd = total_mag_C_qd / n_batches
+    mean_mag_f    = total_mag_f / n_batches
     return (
         total_loss / n_batches,
         total_gnorm / n_batches,
         train_rmse,
         mean_l_data,
         mean_l_corr,
+        {
+            "mean_abs_delta_g":    mean_mag_g,
+            "mean_frob_delta_M":   mean_mag_M,
+            "mean_abs_delta_C_qd": mean_mag_C_qd,
+            "mean_abs_delta_tau_f": mean_mag_f,
+        },
     )
 
 
@@ -647,16 +753,10 @@ def _passivity_loss_batch(
     # S = dM̃/dt − 2·δC·q̇  (we only penalise the correction's skew contribution).
     # The nominal (M, C) from Pinocchio already satisfies passivity, so we only
     # need to enforce it for the correction terms.
-    # Build coriolis input (with optional trig features to match model contract).
-    if model._use_trig_features:
-        q_raw_s = q_s.detach() * model.q_std + model.q_mean
-        cor_feat_s = torch.cat(
-            [q_s.detach(), torch.sin(q_raw_s), torch.cos(q_raw_s), qd_s],
-            dim=-1,
-        )
-    else:
-        cor_feat_s = torch.cat([q_s.detach(), qd_s], dim=-1)
-    delta_C_qd = model.coriolis_net(cor_feat_s, qd_s)  # (k, n)
+    # Build coriolis input via the model's helper so feature contract stays
+    # in sync with forward() and train_epoch().
+    inputs = model.build_correction_inputs(q_s.detach(), qd_s)
+    delta_C_qd = model.coriolis_net(inputs["coriolis_input"], qd_s)  # (k, n)
     # Reshape δC·q̇ as a column matrix to construct a proxy for 2C:
     # We approximate 2·δC as a diagonal contribution dM_diag for the passivity
     # check on the correction.  This is an approximation; for exact passivity
@@ -677,13 +777,19 @@ def _edr_physics_sched_metadata(hp: dict[str, Any]) -> dict[str, Any]:
     Returns
     -------
     dict
-        Keys useful for post-hoc analysis: phase2_start_epoch,
-        lambda_correction_reg, enable_passivity_loss.
+        Keys useful for post-hoc analysis: phase-2 curriculum config,
+        lambda_correction_reg, enable_passivity_loss.  ``phase2_start_epoch``
+        is None when adaptive plateau detection is used (the default).
     """
     _cd = hp.get("correction_dropout", hp.get("dropout", 0.0))
+    _p2 = hp.get("phase2_start_epoch", None)
     return {
         "mode":                   "edr_two_phase_curriculum",
-        "phase2_start_epoch":     int(hp.get("phase2_start_epoch",    15)),
+        "phase2_start_epoch":     (int(_p2) if _p2 is not None else None),
+        "phase2_plateau_window":  int(hp.get("phase2_plateau_window",    5)),
+        "phase2_plateau_threshold": float(hp.get("phase2_plateau_threshold", 5e-3)),
+        "phase2_min_epoch":       int(hp.get("phase2_min_epoch",         3)),
+        "phase2_max_epoch":       int(hp.get("phase2_max_epoch",        25)),
         "lambda_correction_reg":  float(hp.get("lambda_correction_reg", 1e-3)),
         "correction_reg_inertia_normalize": bool(
             hp.get("correction_reg_inertia_normalize", True)

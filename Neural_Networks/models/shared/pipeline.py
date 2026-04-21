@@ -165,15 +165,27 @@ def run_training(job: TrainJob, *, log: logging.Logger | None = None) -> int:
     stopped_early = False
     t0 = time.time()
 
+    # Per-component correction-magnitude history (optional; populated when the
+    # strategy's train_epoch returns a trailing telemetry dict).
+    history["correction_magnitudes"] = []
+
     for epoch in range(1, epochs + 1):
         _train_ret = job.strategy.train_epoch(
             model, loaders["train"], optimizer, device, hp, epoch, onecycle_sched, scaler
         )
-        if len(_train_ret) == 5:
+        # Backward-compatible unpacking: strategies may return 3, 5, or 6
+        # elements.  The 6-element form adds a trailing ``correction_magnitudes``
+        # dict with per-δ-network mean magnitudes.
+        _corr_mags: dict[str, float] | None = None
+        if len(_train_ret) == 6:
+            (train_loss, _grad_norm, train_rmse_unw,
+             train_l_data_m, train_l_corr_m, _corr_mags) = _train_ret
+        elif len(_train_ret) == 5:
             train_loss, _grad_norm, train_rmse_unw, train_l_data_m, train_l_corr_m = _train_ret
         else:
             train_loss, _grad_norm, train_rmse_unw = _train_ret
             train_l_data_m = train_l_corr_m = None
+        history["correction_magnitudes"].append(_corr_mags)
         val_loss, _val_pred, _val_tgt = job.strategy.eval_epoch(model, loaders["val"], device)
         _val_rmse_unw = macro_rmse_numpy(_val_pred, _val_tgt, _val_trajectories)
         _val_pred_phys = _val_pred * _tau_std_val + _tau_mean_val
@@ -183,6 +195,12 @@ def run_training(job: TrainJob, *, log: logging.Logger | None = None) -> int:
         history["val_loss"].append(val_loss)
         history["train_rmse"].append(train_rmse_unw)
         history["val_rmse"].append(_val_rmse_phys)
+
+        # Duck-typed hook: if the model supports it, let it record the latest
+        # unnormalised val_rmse.  Used by EDR's adaptive phase-2 plateau detector.
+        _model_target = model._orig_mod if hasattr(model, "_orig_mod") else model
+        if hasattr(_model_target, "record_val_rmse"):
+            _model_target.record_val_rmse(_val_rmse_unw)
         if scheduler is not None:
             if isinstance(scheduler, ReduceLROnPlateau):
                 scheduler.step(val_loss if _early_metric == "val_loss" else _val_rmse_unw)
@@ -210,9 +228,17 @@ def run_training(job: TrainJob, *, log: logging.Logger | None = None) -> int:
             )
         if epoch == 1 or epoch % _print_every == 0 or epoch == epochs:
             if train_l_data_m is not None:
+                _corr_tag = ""
+                if _corr_mags is not None:
+                    _corr_tag = (
+                        f"  |δg|={_corr_mags['mean_abs_delta_g']:.3e}"
+                        f"  ||δM||_F={_corr_mags['mean_frob_delta_M']:.3e}"
+                        f"  |δC·q̇|={_corr_mags['mean_abs_delta_C_qd']:.3e}"
+                        f"  |δτ_f|={_corr_mags['mean_abs_delta_tau_f']:.3e}"
+                    )
                 log.info(
                     "epoch %4d/%d  train_loss=%.5f  train_l_data=%.5f  train_l_corr=%.5f  "
-                    "val_loss=%.5f  val_rmse_phys=%.5f N·m  best_ep=%d  patience=%d/%d",
+                    "val_loss=%.5f  val_rmse_phys=%.5f N·m%s  best_ep=%d  patience=%d/%d",
                     epoch,
                     epochs,
                     train_loss,
@@ -220,6 +246,7 @@ def run_training(job: TrainJob, *, log: logging.Logger | None = None) -> int:
                     train_l_corr_m,
                     val_loss,
                     _val_rmse_phys,
+                    _corr_tag,
                     best_epoch_num,
                     patience_counter,
                     patience,
@@ -245,6 +272,7 @@ def run_training(job: TrainJob, *, log: logging.Logger | None = None) -> int:
     final_epoch_trained = len(history["train_loss"])
     if best_state is not None:
         model.load_state_dict(best_state)
+
     elapsed = time.time() - t0
 
     _, _val_pred_norm, _val_tgt_norm = job.strategy.eval_epoch(model, loaders["val"], device)
@@ -322,6 +350,12 @@ def run_training(job: TrainJob, *, log: logging.Logger | None = None) -> int:
             "metrics": avg_metrics,
             "val_metrics": val_metrics_final,
             "test_metrics": test_metrics,
+            # Per-component correction magnitudes at the best epoch (if available).
+            "correction_magnitudes_at_best": (
+                history.get("correction_magnitudes", [None])[best_epoch_num - 1]
+                if best_epoch_num >= 1 and best_epoch_num <= len(history.get("correction_magnitudes", []))
+                else None
+            ),
             "torch_compile": _compiled,
             "save_subdir": job.save_subdir,
         },
@@ -345,17 +379,40 @@ def run_training(job: TrainJob, *, log: logging.Logger | None = None) -> int:
     plt.close(fig)
     with open(os.path.join(save_dir, "training_history.csv"), "w", newline="") as csvf:
         w = csv.writer(csvf)
-        w.writerow(["epoch", "train_loss", "val_loss", "train_rmse", "val_rmse"])
+        # Per-component correction-magnitude columns are added only if at least
+        # one epoch recorded them (strategies that don't emit the telemetry
+        # dict will store None).
+        _corr_hist = history.get("correction_magnitudes", [])
+        _has_corr = any(x is not None for x in _corr_hist)
+        header = ["epoch", "train_loss", "val_loss", "train_rmse", "val_rmse"]
+        if _has_corr:
+            header += [
+                "mean_abs_delta_g",
+                "mean_frob_delta_M",
+                "mean_abs_delta_C_qd",
+                "mean_abs_delta_tau_f",
+            ]
+        w.writerow(header)
         for i in range(len(history["train_loss"])):
-            w.writerow(
-                [
-                    i + 1,
-                    f"{history['train_loss'][i]:.8f}",
-                    f"{history['val_loss'][i]:.8f}",
-                    f"{history['train_rmse'][i]:.8f}",
-                    f"{history['val_rmse'][i]:.8f}",
-                ]
-            )
+            row = [
+                i + 1,
+                f"{history['train_loss'][i]:.8f}",
+                f"{history['val_loss'][i]:.8f}",
+                f"{history['train_rmse'][i]:.8f}",
+                f"{history['val_rmse'][i]:.8f}",
+            ]
+            if _has_corr:
+                c = _corr_hist[i] if i < len(_corr_hist) else None
+                if c is None:
+                    row += ["", "", "", ""]
+                else:
+                    row += [
+                        f"{c['mean_abs_delta_g']:.8e}",
+                        f"{c['mean_frob_delta_M']:.8e}",
+                        f"{c['mean_abs_delta_C_qd']:.8e}",
+                        f"{c['mean_abs_delta_tau_f']:.8e}",
+                    ]
+            w.writerow(row)
     device_str = f"cuda:{torch.cuda.get_device_name(0)}" if device.type == "cuda" else "cpu"
     update_registry(
         registry_file=job.registry_file,

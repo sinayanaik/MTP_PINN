@@ -7,7 +7,11 @@ from typing import Any
 
 import torch
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
+from torch.optim.lr_scheduler import (
+    CosineAnnealingWarmRestarts,
+    LambdaLR,
+    ReduceLROnPlateau,
+)
 
 
 def build_optimizer_default(model: torch.nn.Module, hp: dict[str, Any]) -> torch.optim.Optimizer:
@@ -47,6 +51,20 @@ def build_scheduler(optimizer, hp: dict[str, Any], n_train_batches: int):
         return LambdaLR(optimizer, _warmup_cosine_lambda)
     if sched_name == "reduce_on_plateau":
         return ReduceLROnPlateau(optimizer, patience=25, factor=0.5, min_lr=lr * 0.01, threshold=1e-4)
+    if sched_name == "cosine_warm_restarts":
+        # Cosine annealing with warm restarts.  LR cycles between ``lr`` (at the
+        # start of each cycle) and ``eta_min`` (at the end), restarting every
+        # ``T_0`` epochs (optionally doubling via ``T_mult``).
+        T_0     = int(hp.get("warm_restart_T_0",    20))
+        T_mult  = int(hp.get("warm_restart_T_mult", 1))
+        eta_min = float(hp.get("warm_restart_eta_min", lr * 0.03))
+        if T_0 < 1:
+            raise ValueError(f"warm_restart_T_0 must be ≥ 1, got {T_0}")
+        if T_mult < 1:
+            raise ValueError(f"warm_restart_T_mult must be ≥ 1, got {T_mult}")
+        return CosineAnnealingWarmRestarts(
+            optimizer, T_0=T_0, T_mult=T_mult, eta_min=eta_min
+        )
     if sched_name == "onecycle":
         from torch.optim.lr_scheduler import OneCycleLR
 

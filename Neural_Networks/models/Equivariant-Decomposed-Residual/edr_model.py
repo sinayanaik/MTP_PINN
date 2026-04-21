@@ -143,20 +143,34 @@ class EDRModel(nn.Module):
         correction_dropout = float(correction_dropout)
 
         # Normalization stats for reconstructing raw joint angles (sin/cos features).
+        # When q_mean/q_std are provided, trig features are enabled and the
+        # gravity/Coriolis networks receive sin(q_raw), cos(q_raw) as additional
+        # physics-informed inputs.
         if q_mean is not None:
             self.register_buffer("q_mean", torch.tensor(q_mean, dtype=torch.float32))
             self.register_buffer("q_std", torch.tensor(q_std, dtype=torch.float32))
-            self._use_trig_features = True
+            self._has_trig_features = True
         else:
             self.register_buffer("q_mean", torch.zeros(n_joints))
             self.register_buffer("q_std", torch.ones(n_joints))
-            self._use_trig_features = False
+            self._has_trig_features = False
 
+        # Velocity-product dimensionality (upper-triangular entries of q̇⊗q̇).
+        # These encode Christoffel-symbol structure τ_C,i = Σ_jk Γ_ijk(q)·q̇_j·q̇_k.
+        _vel_prod_dim = self.n_joints * (self.n_joints + 1) // 2
         # Gravity input dim: n_joints (plain) or 3*n_joints (q + sin + cos).
-        _gravity_in_dim = self.n_joints * 3 if self._use_trig_features else self.n_joints
-        # Coriolis input dim: 2*n_joints (plain [q,qd]) or 4*n_joints
-        # ([q, sin(q_raw), cos(q_raw), qd]).
-        _coriolis_in_dim = self.n_joints * 4 if self._use_trig_features else self.n_joints * 2
+        _gravity_in_dim = self.n_joints * 3 if self._has_trig_features else self.n_joints
+        # Coriolis input dim: [q, qd, vel_prod] or [q, sin(q), cos(q), qd, vel_prod].
+        _coriolis_in_dim = (
+            (self.n_joints * 4 if self._has_trig_features else self.n_joints * 2)
+            + _vel_prod_dim
+        )
+        # Cached index pairs for extracting upper-triangular q̇⊗q̇ entries.
+        # These are private implementation details; external callers should use
+        # ``build_correction_inputs`` instead of accessing them directly.
+        _up_i, _up_j = torch.triu_indices(self.n_joints, self.n_joints)
+        self.register_buffer("_vprod_i", _up_i, persistent=False)
+        self.register_buffer("_vprod_j", _up_j, persistent=False)
 
         # Store configuration for checkpointing / analysis tools.
         self.hparams: dict = {
@@ -167,7 +181,7 @@ class EDRModel(nn.Module):
             "friction_hidden": list(friction_hidden),
             "activation":      activation,
             "correction_dropout": correction_dropout,
-            "use_trig_features": self._use_trig_features,
+            "use_trig_features": self._has_trig_features,
         }
 
         # ── Four structurally-constrained correction networks ──────────────
@@ -200,8 +214,80 @@ class EDRModel(nn.Module):
 
         # Curriculum phase tracker (1 or 2).  Updated by set_phase().
         self._phase: int = 1
+        # Rolling history of val_rmse (unnormalised/macro) observed during
+        # training.  Populated via ``record_val_rmse()`` by the training loop;
+        # consumed by the adaptive phase-2 plateau detector in edr_strategy.
+        # Not a torch buffer — this is runtime-only training state.
+        self._val_rmse_history: list[float] = []
         # Apply phase-1 frozen state immediately after construction.
         self.set_phase(1)
+
+    # -----------------------------------------------------------------------
+    # Public API — feature construction and introspection
+    # -----------------------------------------------------------------------
+
+    @property
+    def use_trig_features(self) -> bool:
+        """Whether this model uses sin(q_raw)/cos(q_raw) as physics-informed features.
+
+        Enabled when q_mean and q_std were provided at construction time.
+        """
+        return self._has_trig_features
+
+    @property
+    def q_normalization(self) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Joint-position normalization stats (mean, std) if trig features are on.
+
+        Returns None when the model was built without q_mean/q_std — in that
+        case the gravity network receives only the normalised q.
+        """
+        if not self._has_trig_features:
+            return None
+        return (self.q_mean, self.q_std)
+
+    def build_correction_inputs(
+        self,
+        q: torch.Tensor,
+        qd: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Build all feature tensors consumed by the correction networks.
+
+        Single source of truth for the feature contract between EDRModel and
+        external code (e.g. the training loop and passivity-loss helper).
+
+        Parameters
+        ----------
+        q:
+            Normalised joint positions, shape (B, n_joints).
+        qd:
+            Normalised joint velocities, shape (B, n_joints).
+
+        Returns
+        -------
+        dict with keys:
+            ``gravity_input``   : feature tensor for self.gravity_net.
+            ``coriolis_input``  : feature tensor for self.coriolis_net.
+            ``velocity_products``: upper-triangular entries of q̇⊗q̇, shape (B, n(n+1)/2).
+            ``q_raw``           : reconstructed raw joint angles if trig features
+                                  are enabled, else None.
+        """
+        vel_prod = qd[:, self._vprod_i] * qd[:, self._vprod_j]
+        if self._has_trig_features:
+            q_raw = q * self.q_std + self.q_mean
+            sin_q = torch.sin(q_raw)
+            cos_q = torch.cos(q_raw)
+            gravity_input = torch.cat([q, sin_q, cos_q], dim=-1)
+            coriolis_input = torch.cat([q, sin_q, cos_q, qd, vel_prod], dim=-1)
+        else:
+            q_raw = None
+            gravity_input = q
+            coriolis_input = torch.cat([q, qd, vel_prod], dim=-1)
+        return {
+            "gravity_input":      gravity_input,
+            "coriolis_input":     coriolis_input,
+            "velocity_products":  vel_prod,
+            "q_raw":              q_raw,
+        }
 
     # -----------------------------------------------------------------------
     # Two-phase curriculum control
@@ -251,6 +337,24 @@ class EDRModel(nn.Module):
     def phase(self) -> int:
         """Current curriculum phase (1 or 2)."""
         return self._phase
+
+    # -----------------------------------------------------------------------
+    # Validation-metric history (consumed by adaptive phase-2 plateau detector)
+    # -----------------------------------------------------------------------
+
+    def record_val_rmse(self, rmse: float) -> None:
+        """Append a validation-RMSE observation to the rolling history.
+
+        The training pipeline calls this after each validation evaluation.
+        The history is consumed by the adaptive phase-2 transition logic
+        in ``edr_strategy._should_transition_to_phase2``.
+        """
+        self._val_rmse_history.append(float(rmse))
+
+    @property
+    def val_rmse_history(self) -> list[float]:
+        """Read-only view of recorded validation RMSEs (in order of observation)."""
+        return list(self._val_rmse_history)
 
     # -----------------------------------------------------------------------
     # Forward pass
@@ -346,29 +450,14 @@ class EDRModel(nn.Module):
         tau_C = physics[:, _PHYS_C_START: _PHYS_C_END]      # (B, n)
         tau_f = physics[:, _PHYS_F_START: _PHYS_F_END]      # (B, n)
 
+        # ── Build all correction-network inputs via the single-source helper ──
+        inputs = self.build_correction_inputs(q, qd)
+
         # ── Compute structured corrections ───────────────────────────────────
-        # δg(q):  gravity correction (always active)
-        if self._use_trig_features:
-            q_raw = q * self.q_std + self.q_mean
-            sin_q = torch.sin(q_raw)
-            cos_q = torch.cos(q_raw)
-            q_aug = torch.cat([q, sin_q, cos_q], dim=-1)
-            delta_g = self.gravity_net(q_aug)                # (B, n)
-        else:
-            delta_g = self.gravity_net(q)                    # (B, n)
-
-        # δM(q)·q̈: inertia correction (frozen in phase 1)
-        delta_M_qdd = self.inertia_net(q, qdd)              # (B, n)
-
-        # δC(q,q̇)·q̇: Coriolis correction (frozen in phase 1)
-        if self._use_trig_features:
-            coriolis_input = torch.cat([q, sin_q, cos_q, qd], dim=-1)
-        else:
-            coriolis_input = torch.cat([q, qd], dim=-1)
-        delta_C_qd = self.coriolis_net(coriolis_input, qd)  # (B, n)
-
-        # δτ_f(q̇): friction correction (always active)
-        delta_tau_f = self.friction_net(qd)                  # (B, n)
+        delta_g     = self.gravity_net(inputs["gravity_input"])          # (B, n)
+        delta_M_qdd = self.inertia_net(q, qdd)                            # (B, n)
+        delta_C_qd  = self.coriolis_net(inputs["coriolis_input"], qd)    # (B, n)
+        delta_tau_f = self.friction_net(qd)                               # (B, n)
 
         # ── Assemble corrected prediction ─────────────────────────────────
         # τ̂ = (τ_g + δg) + (τ_M + δM·q̈) + (τ_C + δC·q̇) + (τ_f + δτ_f)

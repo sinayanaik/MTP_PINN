@@ -42,6 +42,7 @@ from edr_corrections import (  # noqa: E402
     correction_parameter_summary,
 )
 from edr_model import EDRModel  # noqa: E402
+from edr_strategy import _should_transition_to_phase2  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Test configuration
@@ -544,8 +545,9 @@ class TestEDRModelProperties:
         """Coriolis vanishing at q̇=0 holds through assembled model."""
         q  = _rand(_BATCH, _N_JOINTS)
         qd = torch.zeros(_BATCH, _N_JOINTS)
-        feat = torch.cat([q, qd], dim=-1)
-        out = self.model.coriolis_net(feat, qd)
+        # Use the model's public feature-construction API — the same one forward() uses.
+        inputs = self.model.build_correction_inputs(q, qd)
+        out = self.model.coriolis_net(inputs["coriolis_input"], qd)
         max_abs = out.abs().max().item()
         assert max_abs < 1e-7, (
             f"CoriolisCorrection via EDRModel at q̇=0: max output = {max_abs:.2e}"
@@ -651,6 +653,128 @@ class TestEDRModelWithTrigFeatures:
         )
 
     def test_trig_features_flag(self) -> None:
-        assert self.model._use_trig_features is True
+        """The public use_trig_features property reflects whether norm stats were supplied."""
+        assert self.model.use_trig_features is True
+        assert self.model.q_normalization is not None
+        q_mean, q_std = self.model.q_normalization
+        assert q_mean.shape == (_N_JOINTS,) and q_std.shape == (_N_JOINTS,)
+
         model_no_trig = EDRModel(n_joints=_N_JOINTS)
-        assert model_no_trig._use_trig_features is False
+        assert model_no_trig.use_trig_features is False
+        assert model_no_trig.q_normalization is None
+
+
+# ===========================================================================
+# Pure-function tests: adaptive phase-2 plateau detection
+# ===========================================================================
+
+
+class TestShouldTransitionToPhase2:
+    """Exhaustively exercise the plateau-detection pure function."""
+
+    _HP_DEFAULT = {
+        "phase2_plateau_window":    5,
+        "phase2_plateau_threshold": 5e-3,
+        "phase2_min_epoch":         3,
+        "phase2_max_epoch":         25,
+    }
+
+    def test_no_transition_in_phase_2(self) -> None:
+        """If we're already in phase 2, never recommend another transition."""
+        should, _ = _should_transition_to_phase2([0.1]*10, self._HP_DEFAULT, 30, current_phase=2)
+        assert should is False
+
+    def test_manual_override_triggers(self) -> None:
+        """When phase2_start_epoch is set (int), it wins over adaptive logic."""
+        hp = {"phase2_start_epoch": 7}
+        assert _should_transition_to_phase2([], hp, 6, 1) == (False,  "before manual phase2_start_epoch") or \
+               _should_transition_to_phase2([], hp, 6, 1)[0] is False
+        should, reason = _should_transition_to_phase2([], hp, 7, 1)
+        assert should is True
+        assert "manual override" in reason
+
+    def test_before_min_epoch_holds(self) -> None:
+        """Never trigger before min_epoch regardless of history."""
+        hist = [0.10, 0.099, 0.0985]   # clearly plateauing
+        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 2, 1)
+        assert should is False
+        assert "min_epoch" in reason
+
+    def test_insufficient_history(self) -> None:
+        """If we don't yet have window+1 points of history, defer."""
+        hist = [0.09, 0.088, 0.087]    # only 3 points, window=5 → need 6
+        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 4, 1)
+        assert should is False
+        assert "not enough history" in reason
+
+    def test_still_improving_no_trigger(self) -> None:
+        """If val_rmse is still dropping >=0.5% over window, don't transition."""
+        # 10% improvement over 5 epochs — well above 0.5% threshold.
+        hist = [0.100, 0.098, 0.096, 0.094, 0.092, 0.090]
+        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 7, 1)
+        assert should is False
+        assert "still improving" in reason
+
+    def test_plateau_triggers(self) -> None:
+        """Flat val_rmse over window → transition triggers."""
+        hist = [0.090, 0.0900, 0.0900, 0.0900, 0.0900, 0.0900]
+        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 7, 1)
+        assert should is True
+        assert "plateau" in reason
+
+    def test_slight_improvement_below_threshold_triggers(self) -> None:
+        """Improvement below 0.5% counts as plateau."""
+        hist = [0.0900, 0.0899, 0.0898, 0.0898, 0.0898, 0.08982]  # ~0.02%
+        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 7, 1)
+        assert should is True
+
+    def test_safety_fallback_fires_at_max_epoch(self) -> None:
+        """At phase2_max_epoch, always force transition even if still improving."""
+        # Still rapidly improving, but at epoch == max_epoch.
+        hist = [0.10, 0.09, 0.08, 0.07, 0.06, 0.05]
+        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 25, 1)
+        assert should is True
+        assert "safety fallback" in reason
+
+    def test_non_positive_reference_guards(self) -> None:
+        """Degenerate val_rmse=0 in history must not divide by zero."""
+        hist = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 7, 1)
+        assert should is False
+        assert "non-positive" in reason
+
+
+# ===========================================================================
+# Friction smooth-abs gradient test (T3.2)
+# ===========================================================================
+
+
+class TestFrictionSmoothGradient:
+    """Verify the friction network is differentiable at qd = 0 (smooth |qd|)."""
+
+    def test_gradient_finite_at_zero(self) -> None:
+        torch.manual_seed(_SEED)
+        net = FrictionCorrection(n_joints=_N_JOINTS, hidden_sizes=(16, 16))
+        qd = torch.zeros(1, _N_JOINTS, requires_grad=True)
+        out = net(qd)
+        loss = out.sum()
+        loss.backward()
+        assert qd.grad is not None
+        assert torch.isfinite(qd.grad).all(), (
+            "Friction gradient at q̇=0 is non-finite — smooth |q̇| approximation "
+            "is broken."
+        )
+        # Since δτ_f(0) = 0 · h(|0|) = 0 and δτ_f = q̇ · h(|q̇|), the gradient
+        # at q̇=0 equals h(√ε) — small but finite, not NaN/Inf.
+
+    def test_odd_symmetry_with_smooth_abs(self) -> None:
+        """Smooth |q̇| must preserve exact odd symmetry of δτ_f."""
+        torch.manual_seed(_SEED)
+        net = FrictionCorrection(n_joints=_N_JOINTS, hidden_sizes=(16, 16))
+        qd = _rand(_BATCH, _N_JOINTS)
+        out_pos = net(qd)
+        out_neg = net(-qd)
+        max_violation = (out_pos + out_neg).abs().max().item()
+        assert max_violation < _ATOL_EXACT, (
+            f"Smooth-abs friction violates odd symmetry: max |f(qd)+f(-qd)| = {max_violation:.2e}"
+        )

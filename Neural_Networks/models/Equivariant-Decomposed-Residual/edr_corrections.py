@@ -36,6 +36,14 @@ import torch.nn as nn
 # safe normalisation.  Below this threshold the Coriolis output is zeroed.
 _QVEL_EPS: float = 1e-6
 
+# Smoothing constant for the friction |q̇| approximation.  Using
+# ``sqrt(q̇² + eps)`` instead of ``|q̇|`` makes the friction correction
+# differentiable at q̇ = 0 (its derivative → 0 as q̇ → 0) and matches the
+# smooth Stribeck-curve behaviour of real friction near stick-slip transitions.
+# Value is small enough that ``sqrt(q̇² + eps) ≈ |q̇|`` to within 0.1% when
+# |q̇| > 0.03 rad/s (the ε regime only applies very close to zero velocity).
+_FRICTION_ABS_EPS: float = 1e-6
+
 # Supported nonlinear activations (string → class).
 _ACTIVATION_MAP: dict[str, type[nn.Module]] = {
     "tanh":       nn.Tanh,
@@ -314,21 +322,21 @@ class InertiaCorrection(nn.Module):
 
     Mathematical form
     -----------------
-    A_θ(q)  = matrix from MLP output (n_joints × (n_joints+1) / 2 entries)
-    δM(q)   = (A + A^T) / 2   (symmetric by construction, but unconstrained in sign)
-    contribution to torque = δM(q) @ q̈
+    An MLP produces n*(n+1)/2 free parameters representing the independent
+    entries of a symmetric n×n matrix.  These are scattered directly into
+    both symmetric positions (lower + upper triangle; diagonal written once)
+    to produce δM(q) exactly symmetric by construction:
 
-    The (A + A^T)/2 parameterisation guarantees exact symmetry for every
-    parameter configuration and every input q, while allowing the correction
-    to be positive, negative, or indefinite.  This lets the network both
-    increase and decrease effective inertia per configuration.
+        δM(q)_ij = δM(q)_ji    for all i, j
 
+    The correction can be positive, negative, or indefinite — this lets the
+    network both increase and decrease effective inertia per configuration.
     The total effective inertia M + δM remains positive-definite as long as
     |δM| is small relative to M, which the regularisation loss enforces.
 
-    Architecture: MLP with 2 hidden layers producing n_tri = n*(n+1)/2
-    lower-triangular entries, then symmetrised.  ~500 parameters for
-    n_joints=5, hidden_size=32.
+    Architecture: MLP with 2 hidden layers producing n*(n+1)/2 entries,
+    scattered into a symmetric n×n matrix.  ~500 parameters for n_joints=5,
+    hidden_size=32.
 
     Parameters
     ----------
@@ -376,6 +384,11 @@ class InertiaCorrection(nn.Module):
     def _q_to_delta_M(self, q: torch.Tensor) -> torch.Tensor:
         """Map joint positions to the symmetric inertia correction matrix.
 
+        The MLP produces n*(n+1)/2 free parameters representing the independent
+        entries of a symmetric matrix.  These are scattered directly into both
+        the lower and upper triangles; the diagonal is double-written with the
+        same value (equivalent to a single write — symmetry is preserved).
+
         Parameters
         ----------
         q:
@@ -387,17 +400,16 @@ class InertiaCorrection(nn.Module):
             Symmetric correction matrices, shape (B, n_joints, n_joints).
         """
         B = q.shape[0]
-        # MLP → lower-triangular entries, shape (B, n_tri).
         tri_entries = self.net(q)   # (B, n_tri)
-        # Allocate A as zeros, then scatter lower-triangular entries.
-        A = torch.zeros(
+        delta_M = torch.zeros(
             B, self.n_joints, self.n_joints,
             dtype=q.dtype,
             device=q.device,
         )
-        A[:, self._tri_rows, self._tri_cols] = tri_entries
-        # δM = (A + A^T) / 2  ⟹  symmetric by construction, unconstrained sign.
-        delta_M = (A + A.transpose(1, 2)) / 2.0     # (B, n, n)
+        # Scatter into both symmetric positions.  Diagonal (rows==cols) gets
+        # written twice with the same value — a no-op for correctness.
+        delta_M[:, self._tri_rows, self._tri_cols] = tri_entries
+        delta_M[:, self._tri_cols, self._tri_rows] = tri_entries
         return delta_M
 
     def forward(self, q: torch.Tensor, qdd: torch.Tensor) -> torch.Tensor:
@@ -627,12 +639,15 @@ class FrictionCorrection(nn.Module):
             δτ_f, shape (B, n_joints).  Satisfies δτ_f(−q̇) = −δτ_f(q̇) exactly.
         """
         _assert_tensor(qd, "qd [FrictionCorrection]", self.n_joints)
-        # Even function: |q̇|.
-        abs_qd = torch.abs(qd)                 # (B, n_joints)
+        # Smooth even function of q̇: sqrt(q̇² + ε) ≈ |q̇|, but differentiable
+        # at q̇ = 0.  Its derivative d/dq̇ sqrt(q̇² + ε) = q̇/sqrt(q̇² + ε) → 0
+        # smoothly as q̇ → 0, matching the Stribeck-curve behaviour of real
+        # friction near stick-slip transitions.
+        abs_qd = torch.sqrt(qd * qd + _FRICTION_ABS_EPS)   # (B, n_joints)
         # MLP produces an even (non-negative-input) scale.
-        h = self.net(abs_qd)                   # (B, n_joints)
-        # Odd product: q̇ × h(|q̇|).
-        delta_tau_f = qd * h                   # (B, n_joints)  — odd by construction
+        h = self.net(abs_qd)                                # (B, n_joints)
+        # Odd product: q̇ × h(|q̇|) — odd because q̇ is odd and h is even.
+        delta_tau_f = qd * h                                # (B, n_joints)
         _assert_output_finite(delta_tau_f, "delta_tau_f")
         return delta_tau_f
 
