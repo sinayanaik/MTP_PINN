@@ -722,6 +722,7 @@ def _run_one_trial(
     """
     import gc
     import os
+    import platform
 
     _pq = _POOL_PROGRESS_QUEUE
     if _pq is None:
@@ -730,10 +731,13 @@ def _run_one_trial(
     plan     = ResourcePlan(**plan_dict)
     n_g      = int(plan.n_gpus)
     gpu_id   = int(worker_slot) % n_g if n_g > 0 else -1
-    if n_g > 0:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    else:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    # On Windows, setting CUDA_VISIBLE_DEVICES from a spawned child process is
+    # unreliable and can cause DeviceAssert errors; the CUDA driver manages it.
+    if platform.system() != "Windows":
+        if n_g > 0:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
     import torch
     _configure_grid_child_logging()
@@ -853,9 +857,12 @@ def _wait_for_memory(log: logging.Logger) -> None:
     def _ok() -> bool:
         vm   = psutil.virtual_memory()
         swap = psutil.swap_memory()
+        # On Windows, swap_memory().total is 0 when the pagefile is disabled;
+        # treat that as 0 GB used so the check never false-blocks.
+        swap_used_gb = swap.used / 1e9 if swap.total > 0 else 0.0
         return (
             vm.available / 1e9 >= MIN_FREE_RAM_GB
-            and swap.used / 1e9 <= SWAP_THRESHOLD_GB
+            and swap_used_gb <= SWAP_THRESHOLD_GB
         )
 
     if _ok():
@@ -923,6 +930,7 @@ def _run_sequential(
     n_skip = 0
     n_fail = 0
 
+    import platform
     cuda_ok = plan.n_gpus > 0 and torch.cuda.is_available()
 
     # ── Thread and device setup ────────────────────────────────────────────
@@ -930,13 +938,15 @@ def _run_sequential(
     torch.set_num_interop_threads(max(1, min(4, plan.torch_threads // 2)))
 
     if cuda_ok:
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        if platform.system() != "Windows":
+            os.environ["CUDA_VISIBLE_DEVICES"] = "0"
         torch.cuda.set_device(0)
         torch.set_float32_matmul_precision("high")
         os.environ["NN_NUM_WORKERS"] = str(plan.dl_workers_per_trial)
         _device_label = "GPU 0"
     else:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        if platform.system() != "Windows":
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
         os.environ.pop("NN_NUM_WORKERS", None)
         _device_label = "CPU"
 
