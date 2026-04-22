@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import gc
 import logging
 import math
 import os
@@ -26,10 +27,16 @@ from Neural_Networks.models.shared.artifacts import (
     update_registry,
 )
 from Neural_Networks.models.shared.checkpointing import (
+    apply_model_training_extras,
     build_run_id,
     dump_yaml,
     exhaustive_hparams,
+    load_training_state,
     save_checkpoints,
+    save_training_state,
+    set_rng_state_bundle,
+    TRAINING_STATE_NAME,
+    TRAINING_STATE_SCHEMA,
 )
 from Neural_Networks.models.shared.metrics_numpy import compute_metrics, macro_rmse_numpy
 from Neural_Networks.models.shared.optim import build_scheduler
@@ -59,6 +66,20 @@ def _is_valid_dataset(p: Path) -> bool:
     if not meta.is_file():
         return False
     return all((p / s).is_dir() for s in ("train", "val", "test"))
+
+
+def _gc_every_epoch_enabled(hp: dict[str, Any]) -> bool:
+    if bool(hp.get("gc_every_epoch", False)):
+        return True
+    v = str(os.environ.get("NN_GC_EVERY_EPOCH", "")).strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _dataset_memmap_enabled(hp: dict[str, Any]) -> bool:
+    if bool(hp.get("dataset_memmap", False)):
+        return True
+    v = str(os.environ.get("NN_DATASET_MEMMAP", "")).strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 
 def run_training(
@@ -93,6 +114,8 @@ def run_training(
         device = torch.device("cpu")
 
     hp = job.hp
+    _use_memmap = _dataset_memmap_enabled(hp)
+    _run_gc = _gc_every_epoch_enabled(hp)
     _seed = int(hp.get("seed", 42))
     torch.manual_seed(_seed)
     np.random.seed(_seed)
@@ -102,16 +125,26 @@ def run_training(
 
     pin_memory = device.type == "cuda"
     _ncpu = os.cpu_count() or 4
-    _ram_gb = psutil.virtual_memory().total / 1e9
-    _max_workers = 4 if _ram_gb < 20 else 8
+    _vm = psutil.virtual_memory()
+    _ram_total_gb = _vm.total / 1e9
+    # Low-RAM: cap dataloader fan-out to reduce duplicate RSS (workers × prefetch).
+    _low_ram = _ram_total_gb < 32.0
+    _max_workers = 2 if _low_ram else (4 if _ram_total_gb < 20.0 else 8)
     _nw_env = os.environ.get("NN_NUM_WORKERS", "").strip()
-    num_workers = (
-        max(0, int(_nw_env))
-        if _nw_env.isdigit()
-        else (max(2, min(_max_workers, _ncpu // 2)) if device.type == "cuda" else 0)
-    )
+    if _nw_env.isdigit():
+        num_workers = max(0, int(_nw_env))
+    elif device.type == "cuda":
+        if _low_ram:
+            num_workers = min(2, max(1, _ncpu // 2))
+        else:
+            num_workers = max(2, min(_max_workers, _ncpu // 2))
+    else:
+        num_workers = 0
     _pf_env = os.environ.get("NN_PREFETCH", "").strip()
-    _prefetch = max(2, int(_pf_env)) if _pf_env.isdigit() else (6 if _ram_gb < 20 else 10)
+    if _pf_env.isdigit():
+        _prefetch = max(2, int(_pf_env))
+    else:
+        _prefetch = 2 if _low_ram else (6 if _ram_total_gb < 20.0 else 10)
 
     loaders = make_dataloaders(
         run_dir=job.run_dir,
@@ -126,6 +159,7 @@ def run_training(
         drop_last=True,
         data_train_fraction=float(hp.get("data_train_fraction", 1.0)),
         data_train_seed=int(hp.get("data_train_seed", hp.get("_grid_seed", 0)) or 0),
+        use_memmap=_use_memmap,
     )
 
     model = job.strategy.make_model(device, hp)
@@ -181,7 +215,55 @@ def run_training(
     # strategy's train_epoch returns a trailing telemetry dict).
     history["correction_magnitudes"] = []
 
-    for epoch in range(1, epochs + 1):
+    seg_ep = int(hp.get("segment_epochs", 0) or 0)
+    resume_path = str(hp.get("resume_from", "") or "").strip()
+    seg_path = str(hp.get("segment_save_path", "") or "").strip() or os.path.join(
+        job.models_dir, "_in_progress", TRAINING_STATE_NAME
+    )
+    start_epoch = 1
+    if resume_path and os.path.isfile(resume_path):
+        st = load_training_state(resume_path, str(device))
+        if int(st.get("schema", 0) or 0) < int(TRAINING_STATE_SCHEMA):
+            log.error("Unrecognised training state schema in %s", resume_path)
+            return 1
+        model.load_state_dict(st["model_state"])
+        optimizer.load_state_dict(st["optimizer_state"])
+        if scheduler is not None and st.get("scheduler_state") is not None:
+            scheduler.load_state_dict(st["scheduler_state"])
+        if onecycle_sched is not None and st.get("onecycle_state") is not None:
+            onecycle_sched.load_state_dict(st["onecycle_state"])
+        if scaler is not None and st.get("scaler_state") is not None:
+            scaler.load_state_dict(st["scaler_state"])
+        h_in = st.get("history", {})
+        for k in ("train_loss", "val_loss", "train_rmse", "val_rmse", "correction_magnitudes"):
+            if k in h_in:
+                history[k] = list(h_in[k])
+        _bst = st.get("best_state")
+        if _bst is not None:
+            best_state = {kk: (vv.to(device) if torch.is_tensor(vv) else vv) for kk, vv in _bst.items()}
+        best_epoch_num = int(st.get("best_epoch_num", 0))
+        patience_counter = int(st.get("patience_counter", 0))
+        best_val_loss = float(st.get("best_val_loss", math.inf))
+        best_val_rmse = float(st.get("best_val_rmse", math.inf))
+        best_val_loss_track = float(st.get("best_val_loss_track", math.inf))
+        best_val_rmse_phys = float(st.get("best_val_rmse_phys", math.inf))
+        set_rng_state_bundle(st.get("rng"))
+        apply_model_training_extras(model, st.get("model_extras"))
+        start_epoch = int(st.get("next_epoch", 1))
+        if start_epoch < 1 or start_epoch > epochs:
+            log.error("Invalid resume next_epoch %s (target epochs=%d)", st.get("next_epoch"), epochs)
+            return 1
+        log.info("Resuming training from %s at epoch %d (target %d).", resume_path, start_epoch, epochs)
+
+    if seg_ep > 0:
+        epoch_end = min(start_epoch + seg_ep - 1, epochs)
+    else:
+        epoch_end = epochs
+    if start_epoch > epoch_end:
+        log.error("No epochs to run: start=%d  end=%d (segment_epochs=%d)", start_epoch, epoch_end, seg_ep)
+        return 1
+
+    for epoch in range(start_epoch, epoch_end + 1):
         _train_ret = job.strategy.train_epoch(
             model, loaders["train"], optimizer, device, hp, epoch, onecycle_sched, scaler
         )
@@ -241,7 +323,7 @@ def run_training(
         # ── Progress callback (e.g. tqdm bar update) ────────────────────────
         if progress_callback is not None:
             progress_callback(epoch, epochs, _val_rmse_phys, patience_counter, patience)
-        elif epoch == 1 or epoch % _print_every == 0 or epoch == epochs:
+        elif epoch == 1 or epoch % _print_every == 0 or epoch == epochs or epoch == epoch_end:
             if train_l_data_m is not None:
                 _corr_tag = ""
                 if _corr_mags is not None:
@@ -279,9 +361,47 @@ def run_training(
                     patience_counter,
                     patience,
                 )
+        if _run_gc:
+            gc.collect()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
         if use_early_stop and patience_counter >= patience:
             stopped_early = True
             break
+
+    if (
+        seg_ep > 0
+        and (not stopped_early)
+        and epoch_end < epochs
+    ):
+        _sg = os.path.dirname(os.path.abspath(seg_path))
+        if _sg:
+            os.makedirs(_sg, exist_ok=True)
+        save_training_state(
+            seg_path,
+            next_epoch=epoch_end + 1,
+            epochs_max=epochs,
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            onecycle_sched=onecycle_sched,
+            scaler=scaler,
+            history=history,
+            best_state=best_state,
+            best_epoch_num=best_epoch_num,
+            patience_counter=patience_counter,
+            best_val_loss=best_val_loss,
+            best_val_rmse=best_val_rmse,
+            best_val_loss_track=best_val_loss_track,
+            best_val_rmse_phys=best_val_rmse_phys,
+            stopped_early=False,
+        )
+        log.info(
+            "Segment complete — saved resume state to %s (next epoch %d / %d). "
+            "Re-run with resume_from= that path to continue.",
+            seg_path, epoch_end + 1, epochs,
+        )
+        return 0
 
     final_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
     final_epoch_trained = len(history["train_loss"])

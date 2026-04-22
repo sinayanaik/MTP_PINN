@@ -18,10 +18,12 @@ Analyse results afterwards with::
 
 Parallelism strategy
 --------------------
-* GPU machines  : one trial per GPU, ``n_workers = n_gpus`` concurrent trials.
-  Each worker acquires an exclusive GPU slot from a shared queue, sets
-  CUDA_VISIBLE_DEVICES, runs the full training loop (AMP + torch.compile),
-  then releases the slot.  DataLoader workers are divided fairly across GPUs.
+* GPU machines  : ``multiprocessing.Pool`` with ``maxtasksperchild=1`` so each
+  trial runs in a **fresh** process (OS reclaims all memory after every trial).
+  Each trial sets ``CUDA_VISIBLE_DEVICES`` from its UI slot *before* importing
+  ``torch``.  Several concurrent slots may map to the same GPU when the pool
+  is larger than ``n_gpus``; admission control budgets VRAM.  AMP and
+  ``torch.compile`` follow your hyperparameters.
 * CPU machines  : single in-process worker (no subprocess overhead; all CPU
   cores available to PyTorch; a memory governor pauses before each trial if
   RAM or swap pressure exceeds configured thresholds).
@@ -43,15 +45,17 @@ import itertools
 import logging
 import multiprocessing as mp
 import os
-import queue
 import sys
+import threading
 import time
+import warnings
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-import torch
+# Do NOT `import torch` at module level: child processes set
+# ``CUDA_VISIBLE_DEVICES`` at the start of ``_run_one_trial`` before importing torch.
 from tqdm import tqdm
 
 # ============================================================================
@@ -91,24 +95,329 @@ REGISTRY_FILE: str   = str(_NN_ROOT / "Trained_Models_Grid" / "models_registry.y
 
 # ============================================================================
 # ── RESOURCE GOVERNOR ────────────────────────────────────────────────────────
-#    Prevents system freeze on memory-constrained machines.
-#    Trials pause (MEMORY_POLL_INTERVAL seconds) until ALL conditions clear.
+#    probe_resources() probes RAM / VRAM / CPU at startup and derives the
+#    optimal n_concurrent, thread counts, and DataLoader workers automatically.
+#    Per-trial memory costs are estimated analytically from hidden layer sizes
+#    and batch size; RESOURCE_TARGET (70 %) keeps 30 % headroom for the OS.
 # ============================================================================
 
-# PyTorch intra-op thread count per process (0 = auto: n_cpu // n_workers).
-CPU_THREADS: int = 0
+# Fraction of each resource (RAM, VRAM, CPU) the grid search may consume.
+# Applied to *currently free* resources, not total — so 0.80 is safe.
+RESOURCE_TARGET: float = 0.80
 
-# Pause when used RAM fraction exceeds this (0–1 scale).
-MAX_MEMORY_FRACTION: float = 0.85
+# Hard cap — on large clusters use scheduler array jobs instead.
+MAX_CONCURRENT: int = 8
 
-# Pause when available RAM falls below this (GB).
-MIN_FREE_RAM_GB: float = 2.0
-
-# Pause when swap used exceeds this (GB).
+# Memory governor thresholds — pause before a trial if violated.
+MIN_FREE_RAM_GB:   float = 2.0
 SWAP_THRESHOLD_GB: float = 1.0
+MEM_POLL_INTERVAL: float = 5.0
 
-# Seconds to sleep between re-checks when throttling.
-MEMORY_POLL_INTERVAL: float = 5.0
+# ============================================================================
+# ── RESOURCE PLAN ────────────────────────────────────────────────────────────
+# ============================================================================
+
+@dataclass
+class TrialMemEst:
+    """Analytical memory footprint estimate for one trial."""
+    vram_gb:     float   # expected GPU VRAM consumption (incl. CUDA ctx overhead)
+    ram_gb:      float   # expected host RAM consumption (incl. torch base RSS)
+    param_count: int     # total trainable parameters
+
+
+@dataclass
+class ResourcePlan:
+    """Derived execution plan from the system resource probe."""
+    n_gpus:               int
+    n_concurrent:         int    # parallel trials (hard upper bound for the pool)
+    dl_workers_per_trial: int    # DataLoader worker processes per trial
+    torch_threads:        int    # PyTorch intra-op threads per trial process
+    compile_mode:         str    # torch.compile mode
+    use_compile:          bool   # False for local (compile > 10-epoch training)
+    use_amp:              bool
+    ram_total_gb:         float
+    ram_free_gb:          float
+    vram_total_gb:        float
+    cpu_logical:          int
+    cpu_physical:         int
+    bottleneck:           str
+    cuda_ctx_gb:          float  # measured CUDA context overhead per process
+    torch_base_ram_gb:    float  # measured Python+torch RSS per fresh worker
+
+
+# ── MODEL DIMENSION CONSTANTS (mirror loader.py / torque_models.py) ──────────
+_N_INPUTS:  int = 15   # q(5) + qd(5) + qdd(5)
+_N_OUTPUTS: int = 5    # τ per joint
+
+
+def _count_params(
+    hidden_layers: list[int],
+    in_dim: int = 15,
+    out_dim: int = 5,
+    extra: int = 0,
+) -> int:
+    """Count trainable parameters for a build_mlp-style network.
+
+    Architecture (matches torque_models.build_mlp):
+        hidden layer i: Linear(in→out) + LayerNorm(out) + Activation + Dropout
+        output layer:   Linear(h_last→out_dim)
+
+    ``extra`` covers arch-specific additions, e.g. PhysicsReg tau_scale/bias.
+    """
+    dims  = [in_dim] + list(hidden_layers) + [out_dim]
+    total = 0
+    for i, (a, b) in enumerate(zip(dims, dims[1:])):
+        total += a * b + b      # Linear: weight (a×b) + bias (b)
+        if i < len(dims) - 2:   # hidden layers only
+            total += 2 * b      # LayerNorm: weight (b) + bias (b)
+    return total + extra
+
+
+def _measure_cuda_ctx_gb(device: int = 0) -> float:
+    """Measure the one-time CUDA context overhead for a fresh process.
+
+    Allocates a 1-element tensor to trigger context initialisation, reads
+    the VRAM delta via torch.cuda.mem_get_info(), then frees the tensor.
+    Returns the overhead in GB.  Falls back to 0.35 GB if CUDA is
+    unavailable or the delta looks too small (context already warm).
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        return 0.0
+    try:
+        torch.cuda.empty_cache()
+        free_before, _ = torch.cuda.mem_get_info(device)
+        t = torch.zeros(1, device=f"cuda:{device}")
+        free_after, _  = torch.cuda.mem_get_info(device)
+        del t
+        torch.cuda.empty_cache()
+        delta_gb = (free_before - free_after) / 1e9
+        return delta_gb if delta_gb > 0.05 else 0.35   # context already warm
+    except Exception:
+        return 0.35
+
+
+def _measure_torch_base_ram_gb() -> float:
+    """Measure the RSS of a freshly spawned Python+torch worker process.
+
+    Spawns a subprocess that imports psutil and torch, touches a tiny
+    tensor, then prints its RSS.  This captures the per-worker base RAM
+    overhead (interpreter + PyTorch + CUDA init) that the governor budgets
+    for every spawned trial process.  Falls back to 0.5 GB on failure.
+    """
+    import subprocess
+    script = (
+        "import psutil, torch; "
+        "torch.zeros(1, device='cuda' if torch.cuda.is_available() else 'cpu'); "
+        "print(psutil.Process().memory_info().rss)"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=60,
+        )
+        rss_bytes = int(result.stdout.strip())
+        gb = rss_bytes / 1e9
+        return gb if 0.1 < gb < 8.0 else 0.5
+    except Exception:
+        return 0.5
+
+
+def _estimate_trial_mem(
+    hp: dict,
+    arch: str,
+    cuda_ctx_gb: float,
+    torch_base_ram_gb: float,
+) -> TrialMemEst:
+    """Analytically estimate GPU VRAM and host RAM for one trial.
+
+    Formula (float32 = 4 bytes throughout — conservative upper bound; real
+    AMP activations are fp16 so this never under-estimates):
+
+        P        = trainable parameter count
+        model    = P × 4 B
+        grads    = P × 4 B
+        adam     = P × 2 × 4 B      (exp_avg + exp_avg_sq)
+        act      = Σ(h_i) × B × 4 × 2  (fwd + bwd activation cache)
+        io_buf   = B × (N_in + N_out) × 4
+        raw      = (model + grads + adam + act + io_buf) × 1.5
+                    ↑ ×1.5: CUDA allocator fragmentation / cache headroom
+        vram_gb  = raw / 1e9 + cuda_ctx_gb         (one context per process)
+        ram_gb   = raw / 1e9 + torch_base_ram_gb    (CPU master copy + interp)
+
+    PhysicsRegularizedFNN adds 2×N_OUTPUTS extra params (tau_scale, tau_bias).
+    """
+    _F  = 4   # bytes per float32
+    hl  = hp.get("hidden_layers", [256, 512, 256])
+    bs  = int(hp.get("batch_size", 512))
+    extra  = 2 * _N_OUTPUTS if arch == "physreg" else 0
+    P      = _count_params(hl, in_dim=_N_INPUTS, out_dim=_N_OUTPUTS, extra=extra)
+
+    model_b = P * _F
+    grad_b  = P * _F
+    adam_b  = P * 2 * _F
+    act_b   = sum(hl) * bs * _F * 2
+    io_b    = bs * (_N_INPUTS + _N_OUTPUTS) * _F
+
+    raw_b = (model_b + grad_b + adam_b + act_b + io_b) * 1.5
+    return TrialMemEst(
+        vram_gb     = raw_b / 1e9 + cuda_ctx_gb,
+        ram_gb      = raw_b / 1e9 + torch_base_ram_gb,
+        param_count = P,
+    )
+
+
+def probe_resources(log: logging.Logger, trials: list[dict]) -> ResourcePlan:
+    """Measure system resources and derive the optimal execution plan.
+
+    Per-trial memory costs are computed analytically from hidden layer sizes
+    and batch size, calibrated by one-time measurements of the CUDA context
+    overhead and the Python+torch worker RSS.  The admission loop in main()
+    uses per-trial estimates to decide when to actually submit each trial,
+    so n_concurrent here is just the hard upper bound for the worker pool.
+
+    GPU memory sharing
+    ------------------
+    When n_concurrent > n_gpus, several worker *processes* are pinned to the
+    same physical GPU (``CUDA_VISIBLE_DEVICES`` is fixed at worker start).
+    The driver multiplexes VRAM — each process is a real separate training
+    job; admission control budgets worst-case per-trial VRAM accordingly.
+    """
+    import psutil
+    import statistics
+    import torch
+
+    n_trials = len(trials)
+
+    # ── One-time overhead measurements ───────────────────────────────────────
+    cuda_ctx_gb       = _measure_cuda_ctx_gb()
+    torch_base_ram_gb = _measure_torch_base_ram_gb()
+    log.info("  CUDA ctx overhead : %.3f GB  (measured)", cuda_ctx_gb)
+    log.info("  Torch worker base : %.3f GB RAM  (measured)", torch_base_ram_gb)
+
+    # ── Per-trial estimates ───────────────────────────────────────────────────
+    all_ests  = [
+        _estimate_trial_mem(t["hp"], t["arch"], cuda_ctx_gb, torch_base_ram_gb)
+        for t in trials
+    ]
+    vram_vals = sorted(e.vram_gb for e in all_ests)
+    ram_vals  = sorted(e.ram_gb  for e in all_ests)
+    log.info(
+        "  Trial VRAM est  : min=%.3f  med=%.3f  max=%.3f GB",
+        vram_vals[0], statistics.median(vram_vals), vram_vals[-1],
+    )
+    log.info(
+        "  Trial RAM  est  : min=%.3f  med=%.3f  max=%.3f GB",
+        ram_vals[0],  statistics.median(ram_vals),  ram_vals[-1],
+    )
+
+    # ── RAM ──────────────────────────────────────────────────────────────────
+    vm           = psutil.virtual_memory()
+    ram_total_gb = vm.total / 1e9
+    ram_free_gb  = vm.available / 1e9
+    n_from_ram   = max(1, int(ram_free_gb * RESOURCE_TARGET / max(ram_vals[-1], 0.1)))
+
+    # ── CPU ──────────────────────────────────────────────────────────────────
+    cpu_logical  = os.cpu_count() or 4
+    try:
+        cpu_physical = psutil.cpu_count(logical=False) or cpu_logical
+    except Exception:
+        cpu_physical = cpu_logical
+    n_from_cpu = max(1, int(cpu_logical * RESOURCE_TARGET) // 2)
+
+    # ── GPU (use *free* VRAM, not total) ─────────────────────────────────────
+    n_gpus     = torch.cuda.device_count()
+    vram_total = 0.0
+    vram_free  = 0.0
+    if n_gpus > 0:
+        vram_total = sum(
+            torch.cuda.get_device_properties(i).total_memory
+            for i in range(n_gpus)
+        ) / 1e9
+        vram_free = sum(
+            torch.cuda.mem_get_info(i)[0] for i in range(n_gpus)
+        ) / 1e9
+    worst_vram  = vram_vals[-1] if vram_vals else 0.5
+    n_from_vram = max(1, int(vram_free * RESOURCE_TARGET / worst_vram)) if n_gpus > 0 else 1
+
+    # ── Concurrency decision ──────────────────────────────────────────────────
+    if n_gpus == 0:
+        n_concurrent = 1
+        bottleneck   = "CPU-only — sequential in-process"
+    else:
+        n_concurrent = max(1, min(n_from_ram, n_from_vram, n_from_cpu, n_trials, MAX_CONCURRENT))
+        if n_from_ram <= n_from_vram and n_from_ram <= n_from_cpu:
+            bottleneck = (
+                f"RAM ({ram_free_gb:.1f} GB free → {n_from_ram} slots "
+                f"at max {ram_vals[-1]:.2f} GB each)"
+            )
+        elif n_from_vram <= n_from_cpu:
+            bottleneck = (
+                f"VRAM ({vram_free:.1f} GB free → {n_from_vram} slots "
+                f"at max {worst_vram:.2f} GB each)"
+            )
+        else:
+            bottleneck = f"CPU ({cpu_logical} logical → {n_from_cpu} slots at 2 threads min)"
+
+    # ── Per-trial allocations ─────────────────────────────────────────────────
+    torch_threads = max(1, int(cpu_logical * RESOURCE_TARGET) // max(1, n_concurrent))
+    if n_gpus == 0:
+        dl_workers = 0    # CPU mode: workers spawn OMP threads → oversubscription storm
+    else:
+        dl_workers = max(0, min(4, cpu_logical // max(1, n_concurrent) - torch_threads // 2))
+
+    # ── Compile / AMP ─────────────────────────────────────────────────────────
+    # Disable torch.compile for local: compile time (5–30 s) >> 10 training epochs.
+    use_compile  = n_gpus > 0 and MODE != "local"
+    compile_mode = "max-autotune" if MODE == "hpc" else "default"
+    use_amp      = n_gpus > 0
+
+    plan = ResourcePlan(
+        n_gpus=n_gpus,
+        n_concurrent=n_concurrent,
+        dl_workers_per_trial=dl_workers,
+        torch_threads=torch_threads,
+        compile_mode=compile_mode,
+        use_compile=use_compile,
+        use_amp=use_amp,
+        ram_total_gb=ram_total_gb,
+        ram_free_gb=ram_free_gb,
+        vram_total_gb=vram_total,
+        cpu_logical=cpu_logical,
+        cpu_physical=cpu_physical,
+        bottleneck=bottleneck,
+        cuda_ctx_gb=cuda_ctx_gb,
+        torch_base_ram_gb=torch_base_ram_gb,
+    )
+
+    log.info("── Resource probe ────────────────────────────────────────────────")
+    log.info("  RAM      : %.1f GB total   %.1f GB free", ram_total_gb, ram_free_gb)
+    log.info("  CPU      : %d logical   %d physical cores", cpu_logical, cpu_physical)
+    if n_gpus > 0:
+        for i in range(n_gpus):
+            props  = torch.cuda.get_device_properties(i)
+            free_i = torch.cuda.mem_get_info(i)[0] / 1e9
+            log.info(
+                "  GPU %-2d   : %s   %.1f GB total  %.1f GB free",
+                i, props.name, props.total_memory / 1e9, free_i,
+            )
+        log.info(
+            "  VRAM     : %.1f GB free  (worst-case trial %.2f GB)",
+            vram_free, worst_vram,
+        )
+    else:
+        log.info("  GPU      : none (CPU mode)")
+    log.info("  Bottleneck: %s", bottleneck)
+    log.info("  → n_concurrent      = %d trial(s) in parallel", n_concurrent)
+    log.info("  → torch_threads     = %d per trial", torch_threads)
+    log.info("  → dl_workers        = %d per trial", dl_workers)
+    log.info("  → use_compile       = %s", use_compile)
+    log.info("  → AMP               = %s", use_amp)
+    log.info("─────────────────────────────────────────────────────────────────")
+
+    return plan
+
 
 # ============================================================================
 # ── FIXED HYPER-PARAMETERS ───────────────────────────────────────────────────
@@ -358,48 +667,65 @@ def _print_combo_table(trials: list[dict[str, Any]]) -> None:
 
 
 # ============================================================================
-# ── WORKER FUNCTION (runs in a spawned subprocess) ───────────────────────────
+# ── WORKER FUNCTION (spawned; fresh process per trial with Pool maxtasksperchild=1) ─
 # ============================================================================
+#
+# ``multiprocessing.Queue`` must NOT be passed as ``apply_async`` arguments under
+# the *spawn* start method (pickle error: "only be shared through inheritance").
+# It is injected once per worker via ``Pool(..., initializer=..., initargs=(q,))``.
 
-# Module-level GPU queue reference — set once per worker process by the
-# ProcessPoolExecutor initializer.  Must be declared at module level so that
-# _run_one_trial can access it after spawn re-imports this module.
-_GPU_QUEUE: "mp.Queue | None" = None
-
-
-def _worker_init(gpu_queue: "mp.Queue", n_workers_total: int) -> None:
-    """Called once per worker process.  Binds the GPU semaphore queue and
-    pins PyTorch intra-op thread count so no worker over-subscribes the CPU."""
-    global _GPU_QUEUE
-    _GPU_QUEUE = gpu_queue
-    import torch as _torch
-    _ncpu = os.cpu_count() or 4
-    _threads = CPU_THREADS if CPU_THREADS > 0 else max(1, _ncpu // max(1, n_workers_total))
-    _torch.set_num_threads(_threads)
-    _torch.set_num_interop_threads(max(1, min(4, _threads // 2)))
-    if _torch.cuda.is_available():
-        _torch.set_float32_matmul_precision("high")   # enable TF32 on Ampere+ GPUs
-    # INFO-level so per-epoch progress lines from pipeline.py reach the terminal.
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+_POOL_PROGRESS_QUEUE: "mp.Queue | None" = None
 
 
-def _run_one_trial(trial: dict) -> dict[str, Any]:
-    """Train one model configuration.
+def _pool_progress_init(progress_queue: "mp.Queue") -> None:
+    """Pool worker initializer: cache the main-process progress queue handle."""
+    global _POOL_PROGRESS_QUEUE
+    _POOL_PROGRESS_QUEUE = progress_queue
 
-    Acquires an exclusive GPU slot, trains, and releases the slot.
-    Returns a result dict with at minimum: status, arch, hp, gpu_id.
+
+def _configure_grid_child_logging() -> None:
+    warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
+    for _ln in (
+        "", "Neural_Networks", "Neural_Networks.loader",
+        "Neural_Networks.models.shared.pipeline", "Neural_Networks.robot_physics",
+    ):
+        logging.getLogger(_ln).setLevel(logging.WARNING)
+
+
+def _run_one_trial(
+    trial: dict,
+    worker_slot: int,
+    plan_dict: dict,
+) -> dict[str, Any]:
+    """Train one model on GPU ``worker_slot % n_gpus``; env set before ``import torch``.
+
+    ``plan_dict`` is a plain ``dict`` from ``ResourcePlan`` (picklable).  Each
+    call may run in a new process (``maxtasksperchild=1``) so the OS reclaims
+    all memory when the run finishes.  Progress updates use
+    ``_POOL_PROGRESS_QUEUE`` (set in ``_pool_progress_init``).
     """
+    import gc
     import os
-    import torch
-    global _GPU_QUEUE
 
-    # ── Acquire a GPU slot ───────────────────────────────────────────────────
-    gpu_id: int = _GPU_QUEUE.get()
-    if gpu_id >= 0:
+    _pq = _POOL_PROGRESS_QUEUE
+    if _pq is None:
+        raise RuntimeError("grid worker missing progress queue (pool initializer not run)")
+
+    plan     = ResourcePlan(**plan_dict)
+    n_g      = int(plan.n_gpus)
+    gpu_id   = int(worker_slot) % n_g if n_g > 0 else -1
+    if n_g > 0:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     else:
-        # CPU mode: hide all GPUs to guarantee CPU execution
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+    import torch
+    _configure_grid_child_logging()
+    torch.set_num_threads(plan.torch_threads)
+    torch.set_num_interop_threads(max(1, min(4, plan.torch_threads // 2)))
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
 
     arch        = trial["arch"]
     model_type  = trial["model_type"]
@@ -412,32 +738,18 @@ def _run_one_trial(trial: dict) -> dict[str, Any]:
     try:
         # ── Skip-existing check ──────────────────────────────────────────────
         if SKIP_EXISTING and _find_existing_run(Path(models_dir), model_type, hp):
+            _pq.put(("done", worker_slot, "skip"))
             return {"status": "skipped", "arch": arch, "hp": hp, "gpu_id": gpu_id}
 
         # ── Hardware-specific settings ───────────────────────────────────────
         cuda_ok = torch.cuda.is_available() and gpu_id >= 0
-        if cuda_ok:
-            # max-autotune on HPC for maximum throughput; default on local
-            hp["torch_compile"]      = True
-            hp["torch_compile_mode"] = "max-autotune" if MODE == "hpc" else "default"
-        else:
-            hp["torch_compile"]      = False
-            hp["torch_compile_mode"] = "default"
+        hp["torch_compile"]      = plan.use_compile and cuda_ok
+        hp["torch_compile_mode"] = plan.compile_mode
 
-        # DataLoader CPU share — GPU mode only.
-        # CPU mode: unset NN_NUM_WORKERS entirely so pipeline.py uses its own
-        # safe default of 0 DataLoader workers.  Setting it to n_cpu would
-        # spawn n_cpu subprocesses each launching a full OMP thread pool,
-        # causing catastrophic oversubscription and system freeze.
-        n_cpu = os.cpu_count() or 4
-        if cuda_ok:
-            # Divide available cores fairly across concurrent GPU workers.
-            total_gpu_slots = int(os.environ.get("_GRID_N_WORKERS", "1"))
-            fair_nw = max(1, n_cpu // max(1, total_gpu_slots))
-            os.environ["NN_NUM_WORKERS"] = str(fair_nw)
-        else:
-            # CPU mode: pipeline.py's default (0 workers) is the correct value.
-            os.environ.pop("NN_NUM_WORKERS", None)
+        # ``multiprocessing.Pool`` workers are *daemon* processes; they cannot
+        # spawn DataLoader worker children ("daemonic processes are not allowed
+        # to have children").  Always load batches in-process here.
+        os.environ["NN_NUM_WORKERS"] = "0"
 
         # ── Build and run the training job ───────────────────────────────────
         # Late imports: the spawn context re-runs this module but must not
@@ -465,7 +777,24 @@ def _run_one_trial(trial: dict) -> dict[str, Any]:
             strategy=_strategy_map[arch],
             run_help=run_help,
         )
-        rc = run_training(job)
+
+        # Notify main process: trial starting on this slot.
+        _pq.put((
+            "start", worker_slot,
+            _hp_desc(arch, hp), int(hp.get("epochs", 5000)),
+        ))
+
+        def _cb(
+            epoch: int, total_ep: int, val_rmse: float,
+            pat_ctr: int, pat_max: int,
+        ) -> None:
+            _pq.put((
+                "progress", worker_slot,
+                epoch, total_ep, val_rmse, pat_ctr, pat_max,
+            ))
+
+        rc = run_training(job, progress_callback=_cb)
+        _pq.put(("done", worker_slot, "ok" if rc == 0 else "failed"))
         return {
             "status": "ok" if rc == 0 else "failed",
             "arch":   arch,
@@ -475,6 +804,8 @@ def _run_one_trial(trial: dict) -> dict[str, Any]:
 
     except Exception as exc:
         import traceback
+        if _POOL_PROGRESS_QUEUE is not None:
+            _POOL_PROGRESS_QUEUE.put(("done", worker_slot, "error"))
         return {
             "status": "error",
             "arch":   arch,
@@ -483,8 +814,14 @@ def _run_one_trial(trial: dict) -> dict[str, Any]:
             "error":  f"{exc}\n{traceback.format_exc()}",
         }
     finally:
-        # Always release the GPU slot so other workers can proceed.
-        _GPU_QUEUE.put(gpu_id)
+        # Long-lived workers retain CUDA allocator caches; clear between trials
+        # so the next run does not stack VRAM and trigger OOM at the system level.
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+        except Exception:
+            pass
 
 
 # ============================================================================
@@ -492,14 +829,9 @@ def _run_one_trial(trial: dict) -> dict[str, Any]:
 # ============================================================================
 
 def _wait_for_memory(log: logging.Logger) -> None:
-    """Block until system memory pressure drops below configured thresholds.
+    """Block until RAM and swap pressure drop below configured thresholds.
 
-    Three independent conditions must ALL pass before returning:
-      1. RAM used fraction ≤ MAX_MEMORY_FRACTION
-      2. Available RAM ≥ MIN_FREE_RAM_GB
-      3. Swap used ≤ SWAP_THRESHOLD_GB
-
-    Polls every MEMORY_POLL_INTERVAL seconds; emits one warning per wait cycle.
+    Polls every MEM_POLL_INTERVAL seconds; emits one warning per wait cycle.
     """
     import psutil
 
@@ -507,8 +839,7 @@ def _wait_for_memory(log: logging.Logger) -> None:
         vm   = psutil.virtual_memory()
         swap = psutil.swap_memory()
         return (
-            vm.percent / 100.0 <= MAX_MEMORY_FRACTION
-            and vm.available / 1e9 >= MIN_FREE_RAM_GB
+            vm.available / 1e9 >= MIN_FREE_RAM_GB
             and swap.used / 1e9 <= SWAP_THRESHOLD_GB
         )
 
@@ -518,12 +849,12 @@ def _wait_for_memory(log: logging.Logger) -> None:
     vm   = psutil.virtual_memory()
     swap = psutil.swap_memory()
     log.warning(
-        "Memory pressure: RAM %.0f%% used  %.1f GB free  swap %.1f GB — "
-        "pausing %.0f s before next trial",
-        vm.percent, vm.available / 1e9, swap.used / 1e9, MEMORY_POLL_INTERVAL,
+        "Memory pressure: %.1f GB RAM free  %.1f GB swap used — "
+        "pausing %.0f s ...",
+        vm.available / 1e9, swap.used / 1e9, MEM_POLL_INTERVAL,
     )
     while not _ok():
-        time.sleep(MEMORY_POLL_INTERVAL)
+        time.sleep(MEM_POLL_INTERVAL)
 
 
 # ============================================================================
@@ -553,10 +884,9 @@ def _hp_desc(arch: str, hp: dict) -> str:
 
 def _run_sequential(
     trials: list[dict[str, Any]],
+    plan: ResourcePlan,
     log: logging.Logger,
     t_start: float,
-    *,
-    gpu_id: int = -1,
 ) -> tuple[int, int, int]:
     """Run all trials in-process, one at a time (CPU or single-GPU).
 
@@ -569,35 +899,30 @@ def _run_sequential(
     ProcessPoolExecutor is *not* used — no subprocess spawn, no VRAM
     contention, and the memory governor can act between every trial.
 
-    Args:
-        gpu_id: GPU index to use (≥0), or -1 for CPU-only.
-
     Returns (n_ok, n_skip, n_fail).
     """
+    import torch
+
     total  = len(trials)
     n_ok   = 0
     n_skip = 0
     n_fail = 0
 
-    cuda_ok = gpu_id >= 0 and torch.cuda.is_available()
+    cuda_ok = plan.n_gpus > 0 and torch.cuda.is_available()
 
     # ── Thread and device setup ────────────────────────────────────────────
-    _ncpu    = os.cpu_count() or 4
-    _threads = CPU_THREADS if CPU_THREADS > 0 else _ncpu
-    torch.set_num_threads(_threads)
-    torch.set_num_interop_threads(max(1, min(4, _threads // 2)))
+    torch.set_num_threads(plan.torch_threads)
+    torch.set_num_interop_threads(max(1, min(4, plan.torch_threads // 2)))
 
     if cuda_ok:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-        torch.cuda.set_device(0)   # after masking, the target GPU is always 0
-        torch.set_float32_matmul_precision("high")   # enable TF32 on Ampere+ GPUs
-        # Fair DataLoader workers: use half the CPUs for IO, leave rest for torch
-        fair_nw = max(2, min(4, _ncpu // 2))
-        os.environ["NN_NUM_WORKERS"] = str(fair_nw)
-        _device_label = f"GPU {gpu_id}"
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        torch.cuda.set_device(0)
+        torch.set_float32_matmul_precision("high")
+        os.environ["NN_NUM_WORKERS"] = str(plan.dl_workers_per_trial)
+        _device_label = "GPU 0"
     else:
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
-        os.environ.pop("NN_NUM_WORKERS", None)   # pipeline.py safe default: 0
+        os.environ.pop("NN_NUM_WORKERS", None)
         _device_label = "CPU"
 
     os.environ["_GRID_N_WORKERS"] = "1"
@@ -605,10 +930,11 @@ def _run_sequential(
     # ── Silence pipeline per-epoch INFO scroll ─────────────────────────────
     logging.getLogger("Neural_Networks.models.shared.pipeline").setLevel(logging.WARNING)
     logging.getLogger("Neural_Networks").setLevel(logging.WARNING)
+    warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
     log.info(
         "Sequential mode — device=%s  threads=%d  %d trials",
-        _device_label, _threads, total,
+        _device_label, plan.torch_threads, total,
     )
 
     # Late import after CUDA_VISIBLE_DEVICES is set
@@ -644,12 +970,8 @@ def _run_sequential(
             continue
 
         # ── Hardware HP overrides ──────────────────────────────────────────
-        if cuda_ok:
-            hp["torch_compile"]      = True
-            hp["torch_compile_mode"] = "max-autotune" if MODE == "hpc" else "default"
-        else:
-            hp["torch_compile"]      = False
-            hp["torch_compile_mode"] = "default"
+        hp["torch_compile"]      = plan.use_compile and cuda_ok
+        hp["torch_compile_mode"] = plan.compile_mode
 
         # ── Per-trial epoch progress bar ───────────────────────────────────
         epochs_total = int(hp.get("epochs", 5000))
@@ -734,6 +1056,8 @@ def _run_sequential(
 # ============================================================================
 
 def main() -> None:
+    import torch  # not at module top — workers must not import torch before their initializer sets ``CUDA_VISIBLE_DEVICES``.
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -769,92 +1093,291 @@ def main() -> None:
         os.makedirs(os.path.join(MODELS_DIR_ROOT, save_subdir), exist_ok=True)
     os.makedirs(os.path.join(MODELS_DIR_ROOT, "analysis"), exist_ok=True)
 
-    # ── Detect hardware ──────────────────────────────────────────────────────
-    n_gpus = torch.cuda.device_count()
-    if n_gpus > 0:
-        n_workers = n_gpus
-        log.info("CUDA: %d GPU(s) — running %d concurrent trial(s)", n_gpus, n_workers)
-        for i in range(n_gpus):
-            props = torch.cuda.get_device_properties(i)
-            log.info("  GPU %d: %s  (%.0f GB VRAM)", i, props.name, props.total_memory / 1024**3)
-    else:
-        n_workers = 1
-        log.info("No CUDA GPUs — running on CPU (sequential, resource-governed)")
-
-    # ── Launch grid search ───────────────────────────────────────────────────
+    # ── Probe resources and build execution plan ─────────────────────────────
+    plan    = probe_resources(log, trials)
     t_start = time.time()
 
-    if n_workers == 1:
-        # ── Single-device path: in-process sequential (CPU or 1 GPU) ─────────
-        # No subprocess spawn: no VRAM contention, no torch re-import overhead,
-        # memory governor can act between every trial, tqdm bars work cleanly.
-        gpu_id = 0 if n_gpus > 0 else -1
-        n_ok, n_skip, n_fail = _run_sequential(trials, log, t_start, gpu_id=gpu_id)
+    if plan.n_concurrent == 1:
+        # ── Sequential path: in-process, tqdm epoch bars per trial ──────────────
+        # Used for: CPU-only machines, or GPU with VRAM too tight for 2 trials.
+        n_ok, n_skip, n_fail = _run_sequential(trials, plan, log, t_start)
 
     else:
-        # ── Multi-GPU path: one spawned process per GPU ───────────────────────
-        # Only reached when n_gpus > 1.  Each process owns one GPU exclusively.
+        # ── Parallel path: dynamic admission control ─────────────────────────
+        # Budget is measured ONCE before any worker is spawned, so persistent
+        # idle-worker CUDA contexts don't shrink the budget between batches.
+        # Concurrency is purely budget-driven — no artificial floor or target
+        # count.  MAX_CONCURRENT is the only hard ceiling.
         n_ok   = 0
         n_skip = 0
         n_fail = 0
 
-        os.environ["_GRID_N_WORKERS"] = str(n_workers)
+        import psutil as _psutil
+
+        # ── Static admission budgets (80% of free resources right now) ────────
+        if plan.n_gpus > 0:
+            vram_budget_gb = torch.cuda.mem_get_info(0)[0] / 1e9 * RESOURCE_TARGET
+        else:
+            vram_budget_gb = float("inf")
+        ram_budget_gb = _psutil.virtual_memory().available / 1e9 * RESOURCE_TARGET
+
+        # Pool size: hard cap is MAX_CONCURRENT; practical cap from resource est.
+        pool_size = min(MAX_CONCURRENT, plan.n_concurrent, total)
+
+        log.info(
+            "  Admission budget : VRAM=%.2f GB  RAM=%.2f GB  (%.0f%% of free)",
+            vram_budget_gb if vram_budget_gb < 1e9 else 0.0,
+            ram_budget_gb, RESOURCE_TARGET * 100,
+        )
+        log.info("  Worker pool size : %d", pool_size)
+
+        plan_dict = asdict(plan)
+        os.environ["_GRID_N_WORKERS"] = str(pool_size)
 
         ctx: mp.context.SpawnContext = mp.get_context("spawn")
-        gpu_queue: mp.Queue = ctx.Queue()
-        for i in range(n_gpus):
-            gpu_queue.put(i)
+        progress_queue: mp.Queue = ctx.Queue()
+        # One UI slot 0..pool_size-1 per concurrent trial; recycled when a run ends.
+        free_slots:     mp.Queue = ctx.Queue()
+        for _i in range(pool_size):
+            free_slots.put(_i)
 
-        log.info("Submitting %d trials to ProcessPoolExecutor (max_workers=%d) ...",
-                 total, n_workers)
+        log.info(
+            "Launching Pool — %d processes  maxtasksperchild=1  (%d GPU(s)) ...",
+            pool_size, plan.n_gpus,
+        )
 
-        with ProcessPoolExecutor(
-            max_workers=n_workers,
-            mp_context=ctx,
-            initializer=_worker_init,
-            initargs=(gpu_queue, n_workers),
-        ) as executor:
-            future_map = {executor.submit(_run_one_trial, t): t for t in trials}
+        # ── Per-slot tqdm bars ────────────────────────────────────────────────
+        _w = len(str(total))
+        slot_bars = [
+            tqdm(
+                total=1,
+                desc=f"[{i + 1}/{pool_size}] waiting...",
+                position=i,
+                leave=True,
+                dynamic_ncols=True,
+                bar_format="{desc}  {bar}  {n_fmt}/{total_fmt} ep  {postfix}",
+            )
+            for i in range(pool_size)
+        ]
+        done_bar = tqdm(
+            total=total,
+            desc="overall",
+            position=pool_size,
+            leave=True,
+            dynamic_ncols=True,
+            bar_format="{desc}  {bar}  {n_fmt}/{total_fmt} trials  [{elapsed}<{remaining}]  {postfix}",
+        )
 
-            for idx, fut in enumerate(as_completed(future_map), 1):
-                orig_trial = future_map[fut]
-                elapsed = time.time() - t_start
-                eta     = (elapsed / idx) * (total - idx) if idx > 0 else 0.0
-                try:
-                    result = fut.result()
-                except Exception as exc:
-                    n_fail += 1
-                    log.error(
-                        "[%d/%d] EXCEPTION  arch=%-9s  %s  err=%s",
-                        idx, total, orig_trial["arch"], _hp_short(orig_trial["hp"]), exc,
+        # ── Background drain thread ───────────────────────────────────────────
+        def _drain() -> None:
+            while True:
+                msg = progress_queue.get()
+                if msg is None:
+                    break
+                kind = msg[0]
+                slot = msg[1]
+                bar  = slot_bars[slot]
+                if kind == "start":
+                    _, slot, desc, total_ep = msg
+                    bar.reset(total=total_ep)
+                    bar.set_description_str(
+                        f"[{slot + 1}/{pool_size}] {desc[:62]}"
                     )
-                    continue
-
-                status = result.get("status", "?")
-                gpu    = result.get("gpu_id", "?")
-
-                if status == "ok":
-                    n_ok += 1
-                    log.info(
-                        "[%d/%d] OK       gpu=%-2s arch=%-9s  %s  elapsed=%s  ETA=%s",
-                        idx, total, gpu, result["arch"],
-                        _hp_short(result["hp"]),
-                        _fmt_time(elapsed), _fmt_time(eta),
+                    bar.set_postfix_str("starting...", refresh=True)
+                elif kind == "progress":
+                    _, slot, epoch, total_ep, val_rmse, pat_ctr, pat_max = msg
+                    delta = epoch - bar.n
+                    if delta > 0:
+                        bar.update(delta)
+                    bar.set_postfix_str(
+                        f"rmse={val_rmse:.4f} N·m  pat={pat_ctr}/{pat_max}",
+                        refresh=True,
                     )
-                elif status == "skipped":
-                    n_skip += 1
-                    log.info(
-                        "[%d/%d] SKIPPED  arch=%-9s  %s",
-                        idx, total, result["arch"], _hp_short(result["hp"]),
-                    )
+                elif kind == "done":
+                    _, slot, status = msg
+                    mark = {"ok": "OK ", "skip": "SKIP", "failed": "FAIL", "error": "ERR"}.get(status, status)
+                    bar.set_postfix_str(f"→ {mark}", refresh=True)
+
+        drain_thread = threading.Thread(target=_drain, daemon=True)
+        drain_thread.start()
+
+        # ── Per-trial estimates; list sorted largest-VRAM-first ───────────────
+        trial_ests = [
+            _estimate_trial_mem(
+                t["hp"], t["arch"], plan.cuda_ctx_gb, plan.torch_base_ram_gb
+            )
+            for t in trials
+        ]
+        # Pending: list of (trial_dict, TrialMemEst), largest first so pop()
+        # from the end gives the smallest (used in deadlock guard).
+        pending: list = sorted(
+            zip(trials, trial_ests),
+            key=lambda x: x[1].vram_gb,
+            reverse=True,
+        )
+
+        # in_flight[0] = estimated VRAM in use, in_flight[1] = estimated RAM.
+        # Compared against the STATIC budgets; no real-time re-querying inside
+        # the loop so idle worker CUDA contexts don't shrink the budget.
+        in_flight = [0.0, 0.0]
+
+        def _try_fill(pool, submitted: dict) -> None:
+            """Move trials from *pending* into the pool; budget + free UI slots may cap."""
+            import queue as _q
+            still: list = []
+            idx = 0
+            n = len(pending)
+            while idx < n:
+                trial_t, est_t = pending[idx]
+                if (
+                    (in_flight[0] + est_t.vram_gb) <= vram_budget_gb
+                    and (in_flight[1] + est_t.ram_gb) <= ram_budget_gb
+                    and len(submitted) < pool_size
+                ):
+                    try:
+                        _slot = free_slots.get_nowait()
+                    except _q.Empty:
+                        still.extend(pending[idx:])
+                        break
+                    _ar = pool.apply_async(_run_one_trial, (trial_t, _slot, plan_dict))
+                    submitted[_ar] = (trial_t, est_t, _slot)
+                    in_flight[0] += est_t.vram_gb
+                    in_flight[1] += est_t.ram_gb
                 else:
-                    n_fail += 1
+                    still.append((trial_t, est_t))
+                idx += 1
+            else:
+                pending[:] = still
+                return
+            pending[:] = still
+
+        def _process_result(
+            ares,
+            orig_trial: dict,
+            est_done: "TrialMemEst",
+            free_ui_slot: int,
+            done_n: int,
+            elapsed: float,
+        ) -> None:
+            in_flight[0] = max(0.0, in_flight[0] - est_done.vram_gb)
+            in_flight[1] = max(0.0, in_flight[1] - est_done.ram_gb)
+            free_slots.put(free_ui_slot)
+            eta = (elapsed / done_n) * (total - done_n) if done_n > 0 else 0.0
+            try:
+                result = ares.get()
+            except Exception as exc:
+                n_fail_ref[0] += 1
+                done_bar.update(1)
+                done_bar.set_postfix_str(
+                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]}",
+                    refresh=True,
+                )
+                tqdm.write(
+                    f"  [EXC ]  {orig_trial['arch']}  "
+                    f"{_hp_short(orig_trial['hp'])}  err={exc}"
+                )
+                return
+
+            status = result.get("status", "?")
+            gpu    = result.get("gpu_id", "?")
+            done_bar.update(1)
+
+            if status == "ok":
+                n_ok_ref[0] += 1
+                done_bar.set_postfix_str(
+                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]}",
+                    refresh=True,
+                )
+                tqdm.write(
+                    f"  [ OK ]  gpu={gpu}  {result['arch']}  "
+                    f"{_hp_short(result['hp'])}  "
+                    f"elapsed={_fmt_time(elapsed)}  ETA={_fmt_time(eta)}"
+                )
+            elif status == "skipped":
+                n_skip_ref[0] += 1
+                done_bar.set_postfix_str(
+                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]}",
+                    refresh=True,
+                )
+                tqdm.write(
+                    f"  [SKIP]  {result['arch']}  {_hp_short(result['hp'])}"
+                )
+            else:
+                n_fail_ref[0] += 1
+                done_bar.set_postfix_str(
+                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]}",
+                    refresh=True,
+                )
+                tqdm.write(
+                    f"  [FAIL]  gpu={gpu}  {result['arch']}  "
+                    f"{_hp_short(result['hp'])}  "
+                    f"err={result.get('error','?')[:200]}"
+                )
+
+        # Use single-element lists so nested closures can mutate them.
+        n_ok_ref   = [0]
+        n_skip_ref = [0]
+        n_fail_ref = [0]
+        done_n     = 0
+
+        with ctx.Pool(
+            processes=pool_size,
+            maxtasksperchild=1,
+            initializer=_pool_progress_init,
+            initargs=(progress_queue,),
+        ) as pool:
+            # AsyncResult → (trial_dict, TrialMemEst, ui_slot)
+            submitted: dict = {}
+
+            _try_fill(pool, submitted)
+
+            if not submitted and pending:
+                trial_t, est_t = pending.pop()   # smallest (end of sorted list)
+                log.warning(
+                    "Budget too tight — force-submitting smallest trial "
+                    "(est. vram=%.2f GB  ram=%.2f GB)",
+                    est_t.vram_gb, est_t.ram_gb,
+                )
+                _fslot = free_slots.get()
+                ar = pool.apply_async(_run_one_trial, (trial_t, _fslot, plan_dict))
+                submitted[ar] = (trial_t, est_t, _fslot)
+                in_flight[0] += est_t.vram_gb
+                in_flight[1] += est_t.ram_gb
+
+            while submitted:
+                _ready = [a for a in list(submitted.keys()) if a.ready()]
+                if not _ready:
+                    time.sleep(0.005)
+                else:
+                    for ar in _ready:
+                        o_t, est_d, fslot = submitted.pop(ar)
+                        done_n += 1
+                        elapsed = time.time() - t_start
+                        _process_result(ar, o_t, est_d, fslot, done_n, elapsed)
+                _try_fill(pool, submitted)
+                if not submitted and pending:
+                    trial_t, est_t = pending.pop()   # smallest
                     log.warning(
-                        "[%d/%d] FAILED   gpu=%-2s arch=%-9s  %s  error=%s",
-                        idx, total, gpu, result["arch"],
-                        _hp_short(result["hp"]),
-                        result.get("error", "unknown")[:200],
+                        "Budget too tight — force-submitting smallest trial "
+                        "(est. vram=%.2f GB  ram=%.2f GB)",
+                        est_t.vram_gb, est_t.ram_gb,
                     )
+                    _fslot = free_slots.get()
+                    ar = pool.apply_async(_run_one_trial, (trial_t, _fslot, plan_dict))
+                    submitted[ar] = (trial_t, est_t, _fslot)
+                    in_flight[0] += est_t.vram_gb
+                    in_flight[1] += est_t.ram_gb
+
+        n_ok   = n_ok_ref[0]
+        n_skip = n_skip_ref[0]
+        n_fail = n_fail_ref[0]
+
+        # Stop drain thread and close all bars cleanly.
+        progress_queue.put(None)
+        drain_thread.join(timeout=3)
+        for bar in slot_bars:
+            bar.close()
+        done_bar.close()
 
     # ── Final summary ────────────────────────────────────────────────────────
     elapsed_total = time.time() - t_start

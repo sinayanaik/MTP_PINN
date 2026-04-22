@@ -182,6 +182,26 @@ def _load_csv(split_dir: str, filename: str) -> np.ndarray:
     return np.loadtxt(path, delimiter=",", skiprows=1, dtype=np.float32)
 
 
+def _npy_name_from_csv(filename: str) -> str:
+    return os.path.splitext(filename)[0] + ".npy"
+
+
+def _load_csv_or_npy(
+    split_dir: str, csv_filename: str, *, use_memmap: bool
+) -> np.ndarray:
+    """Load a column file: prefer ``.npy`` (optional memory-mapped) if present.
+
+    When ``use_memmap`` is True and ``<stem>.npy`` exists next to the CSV, load
+    with ``numpy.load(..., mmap_mode='r')`` to avoid holding the full array in
+    resident RAM.  Otherwise fall back to CSV via ``_load_csv`` (in-memory
+    float32).  See ``Neural_Networks.tools.convert_run_csv_to_npy``.
+    """
+    npy_path = os.path.join(split_dir, _npy_name_from_csv(csv_filename))
+    if use_memmap and os.path.isfile(npy_path):
+        return np.load(npy_path, mmap_mode="r")
+    return _load_csv(split_dir, csv_filename)
+
+
 # =============================================================================
 # PYTORCH DATASET
 # =============================================================================
@@ -205,7 +225,9 @@ class RobotDataset(Dataset):
                  mode: str = "pointwise",
                  seq_len: int = 50,
                  stride: int = 1,
-                 normalise: bool = True):
+                 normalise: bool = True,
+                 use_memmap: bool = False,
+                 ):
         if mode not in ("pointwise", "sequence"):
             raise ValueError(f"mode must be 'pointwise' or 'sequence', got {mode!r}")
 
@@ -213,11 +235,13 @@ class RobotDataset(Dataset):
         meta = _load_run_metadata(run_dir)
 
         # Load filtered arrays (what the model trains on)
-        self.q   = _load_csv(split_dir, CSV_FILTERED_Q)
-        self.qd  = _load_csv(split_dir, CSV_FILTERED_QD)
-        self.qdd = _load_csv(split_dir, CSV_FILTERED_QDD)
-        self.tau_measured   = _load_csv(split_dir, CSV_FILTERED_TAU_MEASURED)
-        self.tau_analytical = _load_csv(split_dir, CSV_FILTERED_TAU_DECOMPOSED)
+        self._memmap = bool(use_memmap)
+        _load = lambda fn: _load_csv_or_npy(split_dir, fn, use_memmap=self._memmap)
+        self.q   = _load(CSV_FILTERED_Q)
+        self.qd  = _load(CSV_FILTERED_QD)
+        self.qdd = _load(CSV_FILTERED_QDD)
+        self.tau_measured   = _load(CSV_FILTERED_TAU_MEASURED)
+        self.tau_analytical = _load(CSV_FILTERED_TAU_DECOMPOSED)
 
         if self.tau_analytical.shape[-1] != 4 * ACTIVE_JOINTS:
             raise ValueError(
@@ -239,8 +263,12 @@ class RobotDataset(Dataset):
         self.split   = split
         self.metadata = meta
 
-        logger.info("RobotDataset [%s]: loaded %d samples from %s",
-                    split, self.q.shape[0], split_dir)
+        _backend = "memmap" if (self._memmap and any(
+            os.path.isfile(os.path.join(split_dir, _npy_name_from_csv(n)))
+            for n in (CSV_FILTERED_Q, CSV_FILTERED_QD)
+        )) else "ram"
+        logger.info("RobotDataset [%s]: loaded %d samples from %s  (%s)",
+                    split, self.q.shape[0], split_dir, _backend)
 
         # Normalisation stats from training split (stored in metadata.json)
         norm = meta.get("normalisation", {})
@@ -377,6 +405,7 @@ def make_dataloaders(
         drop_last: bool = False,
         data_train_fraction: float = 1.0,
         data_train_seed: int = 0,
+        use_memmap: bool = False,
 ) -> dict[str, torch.utils.data.DataLoader]:
     """
     Create DataLoaders for train, val, test splits.
@@ -387,6 +416,14 @@ def make_dataloaders(
     same (fraction, seed) see the same samples — important for fair
     data-efficiency comparisons across models.
 
+    ``use_memmap``: if ``.npy`` sidecars exist (see
+    ``Neural_Networks.tools.convert_run_csv_to_npy``), load with memory-mapped
+    numpy arrays to reduce process RSS.
+
+    ``num_workers`` / ``prefetch_factor`` (when used from
+    :func:`run_training` without ``NN_NUM_WORKERS``) are auto-capped on
+    low-RAM machines to limit worker-process fan-out.
+
     Returns dict with 'train', 'val', 'test' DataLoaders.
     """
     if not (0.0 < float(data_train_fraction) <= 1.0):
@@ -396,7 +433,7 @@ def make_dataloaders(
     for split in ("train", "val", "test"):
         ds = RobotDataset(
             run_dir, split=split, mode=mode, seq_len=seq_len,
-            stride=stride, normalise=normalise,
+            stride=stride, normalise=normalise, use_memmap=use_memmap,
         )
         if split == "train" and float(data_train_fraction) < 1.0:
             import numpy as _np

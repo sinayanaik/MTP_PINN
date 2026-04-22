@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,10 @@ import yaml
 CHECKPOINT_SCHEMA_VERSION = 1
 BEST_CKPT_NAME = "model.pt"
 FINAL_CKPT_NAME = "model_final.pt"
+
+# Full training state for mid-run resume (segmented training).
+TRAINING_STATE_SCHEMA = 1
+TRAINING_STATE_NAME = "training_state.pt"
 
 
 def exhaustive_hparams(hp: dict[str, Any], default_base: dict[str, Any]) -> dict[str, Any]:
@@ -140,3 +145,108 @@ def save_checkpoints(
         final_path,
     )
     return best_path, final_path
+
+
+# --- Segmented / resumable training (full optimiser, scheduler, AMP, history) ----
+
+
+def get_rng_state_bundle() -> dict[str, Any]:
+    """Capture PyTorch, CUDA, NumPy, and stdlib random state for mid-run resume."""
+    out: dict[str, Any] = {
+        "torch": torch.get_rng_state(),
+        "numpy": np.random.get_state(),
+        "python": random.getstate(),
+    }
+    if torch.cuda.is_available():
+        out["torch_cuda"] = torch.cuda.get_rng_state_all()
+    return out
+
+
+def set_rng_state_bundle(bundle: dict[str, Any] | None) -> None:
+    if not bundle:
+        return
+    if "torch" in bundle:
+        torch.set_rng_state(bundle["torch"])
+    if "torch_cuda" in bundle and bundle["torch_cuda"] is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(bundle["torch_cuda"])
+    if "numpy" in bundle:
+        np.random.set_state(bundle["numpy"])
+    if "python" in bundle:
+        random.setstate(bundle["python"])
+
+
+def collect_model_training_extras(model: Any) -> dict[str, Any]:
+    """Optional EDR (or future) state not in state_dict (phase, val history)."""
+    m = model._orig_mod if hasattr(model, "_orig_mod") else model
+    out: dict[str, Any] = {}
+    if hasattr(m, "_val_rmse_history"):
+        out["val_rmse_history"] = [float(x) for x in m._val_rmse_history]
+    if hasattr(m, "phase"):
+        try:
+            out["phase"] = int(m.phase)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def apply_model_training_extras(model: Any, extras: dict[str, Any] | None) -> None:
+    if not extras:
+        return
+    m = model._orig_mod if hasattr(model, "_orig_mod") else model
+    if "val_rmse_history" in extras and hasattr(m, "_val_rmse_history"):
+        m._val_rmse_history.clear()
+        m._val_rmse_history.extend(float(x) for x in extras["val_rmse_history"])
+    if "phase" in extras and hasattr(m, "set_phase"):
+        m.set_phase(int(extras["phase"]))
+
+
+def save_training_state(
+    path: str,
+    *,
+    schema: int = TRAINING_STATE_SCHEMA,
+    next_epoch: int,
+    epochs_max: int,
+    model: Any,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Any,
+    onecycle_sched: Any,
+    scaler: Any,
+    history: dict[str, list],
+    best_state: dict | None,
+    best_epoch_num: int,
+    patience_counter: int,
+    best_val_loss: float,
+    best_val_rmse: float,
+    best_val_loss_track: float,
+    best_val_rmse_phys: float,
+    stopped_early: bool,
+) -> None:
+    d = os.path.dirname(os.path.abspath(path))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    out: dict[str, Any] = {
+        "schema": int(schema),
+        "next_epoch": int(next_epoch),
+        "epochs_max": int(epochs_max),
+        "model_state": model.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+        "scheduler_state": None if scheduler is None else scheduler.state_dict(),
+        "onecycle_state": None if onecycle_sched is None else onecycle_sched.state_dict(),
+        "scaler_state": None if scaler is None else scaler.state_dict(),
+        "history": {k: list(v) for k, v in history.items()},
+        "best_state": best_state,
+        "best_epoch_num": int(best_epoch_num),
+        "patience_counter": int(patience_counter),
+        "best_val_loss": float(best_val_loss),
+        "best_val_rmse": float(best_val_rmse),
+        "best_val_loss_track": float(best_val_loss_track),
+        "best_val_rmse_phys": float(best_val_rmse_phys),
+        "stopped_early": bool(stopped_early),
+        "rng": get_rng_state_bundle(),
+        "model_extras": collect_model_training_extras(model),
+    }
+    torch.save(out, path)
+
+
+def load_training_state(path: str, map_location: str | torch.device) -> dict[str, Any]:
+    return torch.load(path, map_location=map_location)

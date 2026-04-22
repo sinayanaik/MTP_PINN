@@ -557,6 +557,7 @@ def _train_epoch_edr(
         )
         loss   = l_data + _lambda_reg * l_corr
 
+        l_pass = None
         if _use_pass:
             l_pass = _passivity_loss_batch(
                 model=model,
@@ -576,9 +577,9 @@ def _train_epoch_edr(
         if onecycle_sched is not None:
             onecycle_sched.step()
 
-        total_loss   += loss.item()
-        total_l_data += l_data.item()
-        total_l_corr += l_corr.item()
+        total_loss   += float(loss.item())
+        total_l_data += float(l_data.item())
+        total_l_corr += float(l_corr.item())
         total_gnorm += gnorm.item() if hasattr(gnorm, "item") else float(gnorm)
         with torch.no_grad():
             d = tau_hat.detach() - target
@@ -591,6 +592,12 @@ def _train_epoch_edr(
             )
             total_mag_C_qd += float(delta_C_qd.detach().abs().mean().item())
             total_mag_f    += float(delta_tau_f.detach().abs().mean().item())
+        if l_pass is not None:
+            del l_pass
+        del (
+            features, target, physics, loss, tau_hat, d, l_data, l_corr, delta_g, delta_M,
+            delta_M_qdd, delta_C_qd, delta_tau_f, q, qd, qdd, tau_g, tau_M, tau_C, tau_f, inputs,
+        )
 
     train_rmse = math.sqrt(total_sse / max(1, total_elem))
     mean_l_data = total_l_data / n_batches
@@ -669,6 +676,7 @@ def _eval_epoch_edr(
                 t_np = t_np.reshape(-1, t_np.shape[-1])
             all_pred.append(p)
             all_target.append(t_np)
+            del features, target, physics, tau_hat, loss, p, t_np
 
     return (
         total_loss / len(loader),

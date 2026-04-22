@@ -141,11 +141,12 @@ def _train_epoch_plain(
         total_gnorm += gnorm.item() if hasattr(gnorm, "item") else float(gnorm)
         if onecycle_sched is not None:
             onecycle_sched.step()
-        total_loss += loss.item()
+        total_loss += float(loss.item())
         with torch.no_grad():
             d = tau_hat.detach() - target
             total_sse += float((d * d).sum().item())
             total_elem += d.numel()
+        del tau_hat, loss, d
     train_rmse = math.sqrt(total_sse / max(1, total_elem))
     return total_loss / n_batches, total_gnorm / n_batches, train_rmse
 
@@ -170,6 +171,7 @@ def _eval_epoch_plain(model: nn.Module, loader, device: torch.device) -> tuple[f
                 t_np = t_np.reshape(-1, t_np.shape[-1])
             all_pred.append(p)
             all_target.append(t_np)
+            del features, target, tau_hat, loss, p, t_np
     return total_loss / len(loader), np.concatenate(all_pred, axis=0), np.concatenate(all_target, axis=0)
 
 
@@ -232,11 +234,12 @@ def _train_epoch_physics_reg(
         total_gnorm += gnorm.item() if hasattr(gnorm, "item") else float(gnorm)
         if onecycle_sched is not None:
             onecycle_sched.step()
-        total_loss += loss.item()
+        total_loss += float(loss.item())
         with torch.no_grad():
             d = tau_hat.detach() - target
             total_sse += float((d * d).sum().item())
             total_elem += d.numel()
+        del tau_hat, loss, d, l_data, l_phys, tau_ref
     train_rmse = math.sqrt(total_sse / max(1, total_elem))
     return total_loss / n_batches, total_gnorm / n_batches, train_rmse
 
@@ -263,6 +266,7 @@ def _eval_epoch_physics_reg(
                 t_np = t_np.reshape(-1, t_np.shape[-1])
             all_pred.append(p)
             all_target.append(t_np)
+            del features, target, physics, tau_hat, loss, p, t_np
     return total_loss / len(loader), np.concatenate(all_pred, axis=0), np.concatenate(all_target, axis=0)
 
 
@@ -321,11 +325,12 @@ def _train_epoch_residual(
         total_gnorm += gnorm.item() if hasattr(gnorm, "item") else float(gnorm)
         if onecycle_sched is not None:
             onecycle_sched.step()
-        total_loss += loss.item()
+        total_loss += float(loss.item())
         with torch.no_grad():
             d = tau_hat.detach() - target
             total_sse += float((d * d).sum().item())
             total_elem += d.numel()
+        del tau_hat, loss, d, delta, tau_phys
     train_rmse = math.sqrt(total_sse / max(1, total_elem))
     return total_loss / n_batches, total_gnorm / n_batches, train_rmse
 
@@ -352,6 +357,7 @@ def _eval_epoch_residual(
                 t_np = t_np.reshape(-1, t_np.shape[-1])
             all_pred.append(p)
             all_target.append(t_np)
+            del features, target, physics, tau_hat, loss, p, t_np
     return total_loss / len(loader), np.concatenate(all_pred, axis=0), np.concatenate(all_target, axis=0)
 
 
