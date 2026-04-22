@@ -427,7 +427,6 @@ def probe_resources(log: logging.Logger, trials: list[dict]) -> ResourcePlan:
 FIXED_HP: dict[str, Any] = {
     "epochs":              5000,     # early stopping cuts this in practice
     "optimizer":           "adamw",
-    "lr_scheduler":        "warmup_cosine",
     "early_stopping":      True,
     "early_stop_metric":   "val_rmse",
     "patience":            500,
@@ -440,13 +439,17 @@ FIXED_HP: dict[str, Any] = {
     "seed":                42,
     "snapshot_every":      0,
     "print_every":         20,       # log every N epochs (overridden per mode)
+    # LR scheduler default parameters (used if not overridden by grid)
+    "warm_restart_T_0":    20,       # Cycle length for cosine_warm_restarts
+    "warm_restart_T_mult": 1,        # Fixed cycle length (no doubling)
+    "warm_restart_eta_min": 3e-6,    # Minimum LR for cosine_warm_restarts
 }
 
 # Overrides applied on top of FIXED_HP when MODE="local" so smoke-test
 # runs finish in minutes rather than hours.
 LOCAL_HP_OVERRIDES: dict[str, Any] = {
-    "epochs":      10,
-    "patience":    10,
+    "epochs":      1000,
+    "patience":    100,
     "print_every": 1,   # more frequent so the terminal never feels stuck
 }
 
@@ -454,48 +457,54 @@ LOCAL_HP_OVERRIDES: dict[str, Any] = {
 # ── HYPERPARAMETER GRIDS ─────────────────────────────────────────────────────
 # ============================================================================
 
-# ── LOCAL  (smoke-test)  ─────────────────────────────────────────────────────
-#    FNN: 8 combos   PhysReg: 4 combos   Residual: 4 combos   Total: 16
+# ── LOCAL  (expanded for full local training — no supercomputer needed) ────
+#    FNN: 192 combos   PhysReg: 128 combos   Residual: 128 combos   Total: 448
 
 LOCAL_GRID_FNN: dict[str, list] = {
-    # 2 × 2 × 2 × 1 × 1 × 1 = 8 combos
-    "hidden_layers": [[128, 256, 128], [256, 512, 256]],
-    "dropout":       [0.1, 0.3],
-    "learning_rate": [3e-4, 1e-3],
-    "weight_decay":  [5e-3],
-    "batch_size":    [512],
-    "activation":    ["silu"],
+    # 1 × 4 × 1 × 1 × 2 × 1 × 4 × 3 = 96 combos
+    "hidden_layers": [[256, 512, 256]],
+    "dropout":       [0.0, 0.1, 0.2, 0.3],
+    "learning_rate": [3e-4],
+    "weight_decay":  [1e-2],
+    "batch_size":    [512, 1024],
+    "activation":    ["gelu"],
+    "data_efficiency_fraction": [1.0, 0.5, 0.25, 0.1],  # 100%, 50%, 25%, 10% of train data
+    "lr_scheduler":  ["warmup_cosine", "reduce_on_plateau", "onecycle"],  # 3 scheduler strategies
 }
 
 LOCAL_GRID_PHYSREG: dict[str, list] = {
-    # 2 × 1 × 1 × 1 × 1 × 1 × 2 × 1 × 1 = 4 combos
-    "hidden_layers":           [[128, 256, 128], [256, 512, 256]],
-    "dropout":                 [0.1],
+    # 1 × 4 × 1 × 1 × 2 × 1 × 7 × 1 × 1 × 4 × 3 = 336 combos
+    "hidden_layers":           [[256, 512, 256]],
+    "dropout":                 [0.0, 0.1, 0.2, 0.3],
     "learning_rate":           [3e-4],
-    "weight_decay":            [5e-3],
-    "batch_size":              [512],
-    "activation":              ["silu"],
-    "physics_weight":          [0.1, 0.5],
+    "weight_decay":            [1e-2],
+    "batch_size":              [512, 1024],
+    "activation":              ["gelu"],
+    "physics_weight":          [0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0],  # expanded
     "physics_warmup_fraction": [0.05],
     "phi_lr_ratio":            [0.1],
+    "data_efficiency_fraction": [1.0, 0.5, 0.25, 0.1],  # 100%, 50%, 25%, 10% of train data
+    "lr_scheduler":            ["warmup_cosine", "reduce_on_plateau", "onecycle"],  # 3 scheduler strategies
 }
 
 LOCAL_GRID_RESIDUAL: dict[str, list] = {
-    # 2 × 1 × 1 × 1 × 1 × 1 × 2 = 4 combos
-    "hidden_layers":    [[128, 256, 128], [256, 512, 256]],
-    "dropout":          [0.1],
+    # 1 × 4 × 1 × 1 × 2 × 1 × 2 × 4 × 3 = 96 combos
+    "hidden_layers":    [[256, 512, 256]],
+    "dropout":          [0.0, 0.1, 0.2, 0.3],
     "learning_rate":    [3e-4],
-    "weight_decay":     [5e-3],
-    "batch_size":       [512],
-    "activation":       ["silu"],
+    "weight_decay":     [1e-2],
+    "batch_size":       [512, 1024],
+    "activation":       ["gelu"],
     "alpha_reg_weight": [0.01, 0.05],
+    "data_efficiency_fraction": [1.0, 0.5, 0.25, 0.1],  # 100%, 50%, 25%, 10% of train data
+    "lr_scheduler":     ["warmup_cosine", "reduce_on_plateau", "onecycle"],  # 3 scheduler strategies
 }
 
 # ── HPC  (exhaustive — designed for 2×A100 80 GB)  ───────────────────────────
 
 HPC_GRID_FNN: dict[str, list] = {
-    # 4 × 4 × 3 × 2 × 4 × 2 = 768 combos
-    # With 2×A100 and ~5 min/trial: ~32 h  |  ~10 min/trial: ~64 h
+    # 4 × 4 × 3 × 2 × 4 × 2 × 4 = 3,072 combos
+    # With 2×A100 and ~5 min/trial: ~128 h  |  ~10 min/trial: ~256 h
     "hidden_layers": [
         [128, 256, 128],
         [256, 512, 256],
@@ -507,10 +516,11 @@ HPC_GRID_FNN: dict[str, list] = {
     "weight_decay":  [5e-3, 1e-2],
     "batch_size":    [512, 1024, 2048, 4096],
     "activation":    ["silu", "gelu"],
+    "lr_scheduler":  ["warmup_cosine", "reduce_on_plateau", "onecycle", "cosine_warm_restarts"],  # 4 scheduler strategies
 }
 
 HPC_GRID_PHYSREG: dict[str, list] = {
-    # 3 × 3 × 2 × 1 × 3 × 1 × 5 × 3 × 3 = 810 combos
+    # 3 × 3 × 2 × 1 × 3 × 1 × 5 × 3 × 3 × 4 = 3,240 combos
     # phi_lr_ratio and weight_decay fixed to defaults (lower sensitivity)
     "hidden_layers": [
         [256, 512, 256],
@@ -525,10 +535,11 @@ HPC_GRID_PHYSREG: dict[str, list] = {
     "physics_weight":          [0.05, 0.1, 0.3, 0.5, 1.0],
     "physics_warmup_fraction": [0.02, 0.05, 0.10],
     "phi_lr_ratio":            [0.05, 0.1, 0.2],
+    "lr_scheduler":            ["warmup_cosine", "reduce_on_plateau", "onecycle", "cosine_warm_restarts"],  # 4 scheduler strategies
 }
 
 HPC_GRID_RESIDUAL: dict[str, list] = {
-    # 3 × 3 × 2 × 2 × 3 × 1 × 4 = 648 combos
+    # 3 × 3 × 2 × 2 × 3 × 1 × 4 × 4 = 2,592 combos
     "hidden_layers": [
         [256, 512, 256],
         [512, 1024, 512],
@@ -540,6 +551,7 @@ HPC_GRID_RESIDUAL: dict[str, list] = {
     "batch_size":       [512, 1024, 2048],
     "activation":       ["silu"],
     "alpha_reg_weight": [0.0, 0.01, 0.05, 0.1],
+    "lr_scheduler":     ["warmup_cosine", "reduce_on_plateau", "onecycle", "cosine_warm_restarts"],  # 4 scheduler strategies
 }
 
 # ============================================================================
@@ -593,6 +605,9 @@ def _build_trials() -> list[dict[str, Any]]:
             hp = {**FIXED_HP, **combo}
             if MODE == "local":
                 hp.update(LOCAL_HP_OVERRIDES)
+            # Map data_efficiency_fraction → data_train_fraction for pipeline
+            if "data_efficiency_fraction" in hp:
+                hp["data_train_fraction"] = hp.pop("data_efficiency_fraction")
             trials.append({
                 "arch":        arch,
                 "model_type":  model_type,
@@ -1165,7 +1180,7 @@ def main() -> None:
             position=pool_size,
             leave=True,
             dynamic_ncols=True,
-            bar_format="{desc}  {bar}  {n_fmt}/{total_fmt} trials  [{elapsed}<{remaining}]  {postfix}",
+            bar_format="{desc}  {bar}  {n_fmt}/{total_fmt} trials  [{elapsed}<{remaining}, ETA={eta}]  {postfix}",
         )
 
         # ── Background drain thread ───────────────────────────────────────────
@@ -1269,7 +1284,7 @@ def main() -> None:
                 n_fail_ref[0] += 1
                 done_bar.update(1)
                 done_bar.set_postfix_str(
-                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]}",
+                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]} ETA={_fmt_time(eta)}",
                     refresh=True,
                 )
                 tqdm.write(
@@ -1285,7 +1300,7 @@ def main() -> None:
             if status == "ok":
                 n_ok_ref[0] += 1
                 done_bar.set_postfix_str(
-                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]}",
+                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]} ETA={_fmt_time(eta)}",
                     refresh=True,
                 )
                 tqdm.write(
@@ -1296,7 +1311,7 @@ def main() -> None:
             elif status == "skipped":
                 n_skip_ref[0] += 1
                 done_bar.set_postfix_str(
-                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]}",
+                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]} ETA={_fmt_time(eta)}",
                     refresh=True,
                 )
                 tqdm.write(
@@ -1305,7 +1320,7 @@ def main() -> None:
             else:
                 n_fail_ref[0] += 1
                 done_bar.set_postfix_str(
-                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]}",
+                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]} ETA={_fmt_time(eta)}",
                     refresh=True,
                 )
                 tqdm.write(
