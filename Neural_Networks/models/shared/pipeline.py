@@ -196,6 +196,15 @@ def run_training(
     patience = int(hp.get("patience", 100))
     use_early_stop = bool(hp.get("early_stopping", True))
     epochs = int(hp.get("epochs", 500))
+    # Patience must not count during LR warm-up: the LR is intentionally low
+    # then, so per-epoch improvements are smaller than min_delta even for a
+    # well-converging model.  patience_counter is held at 0 through warmup so
+    # the full patience budget begins at peak LR.
+    _warmup_ep = (
+        max(1, epochs // 20)
+        if str(hp.get("lr_scheduler", "")).lower() == "warmup_cosine"
+        else 0
+    )
     _early_metric = str(hp.get("early_stop_metric", "val_rmse")).strip().lower()
     if _early_metric not in ("val_rmse", "val_loss"):
         _early_metric = "val_rmse"
@@ -312,6 +321,10 @@ def run_training(
             best_val_rmse_phys = _val_rmse_phys
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             best_epoch_num = int(epoch)
+            patience_counter = 0
+        elif epoch <= _warmup_ep:
+            # LR warm-up in progress — hold patience at 0 so the full budget
+            # starts once the scheduler reaches peak learning rate.
             patience_counter = 0
         else:
             patience_counter += 1

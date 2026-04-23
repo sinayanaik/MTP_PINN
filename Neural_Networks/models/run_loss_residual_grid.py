@@ -110,7 +110,7 @@ MAX_CONCURRENT: int = 8
 
 # Memory governor thresholds — pause before a trial if violated.
 MIN_FREE_RAM_GB:   float = 2.0
-SWAP_THRESHOLD_GB: float = 1.0
+SWAP_THRESHOLD_GB: float = 20.0   # HPC login nodes carry high swap from other users
 MEM_POLL_INTERVAL: float = 5.0
 
 # ============================================================================
@@ -343,8 +343,11 @@ def probe_resources(log: logging.Logger, trials: list[dict]) -> ResourcePlan:
 
     # ── Concurrency decision ──────────────────────────────────────────────────
     if n_gpus == 0:
-        n_concurrent = 1
-        bottleneck   = "CPU-only — sequential in-process"
+        n_concurrent = max(1, min(n_from_ram, n_from_cpu, n_trials, MAX_CONCURRENT))
+        bottleneck   = (
+            "CPU-only — sequential in-process" if n_concurrent == 1
+            else f"CPU-bound — {n_concurrent} parallel processes"
+        )
     else:
         n_concurrent = max(1, min(n_from_ram, n_from_vram, n_from_cpu, n_trials, MAX_CONCURRENT))
         if n_from_ram <= n_from_vram and n_from_ram <= n_from_cpu:
@@ -445,8 +448,8 @@ FIXED_HP: dict[str, Any] = {
 # Overrides applied on top of FIXED_HP when MODE="local" so smoke-test
 # runs finish in minutes rather than hours.
 LOCAL_HP_OVERRIDES: dict[str, Any] = {
-    "epochs":      10,
-    "patience":    10,
+    "epochs":      1000,
+    "patience":    50,
     "print_every": 1,   # more frequent so the terminal never feels stuck
 }
 
@@ -458,37 +461,43 @@ LOCAL_HP_OVERRIDES: dict[str, Any] = {
 #    FNN: 8 combos   PhysReg: 4 combos   Residual: 4 combos   Total: 16
 
 LOCAL_GRID_FNN: dict[str, list] = {
-    # 2 × 2 × 2 × 1 × 1 × 1 = 8 combos
-    "hidden_layers": [[128, 256, 128], [256, 512, 256]],
-    "dropout":       [0.1, 0.3],
-    "learning_rate": [3e-4, 1e-3],
-    "weight_decay":  [5e-3],
-    "batch_size":    [512],
-    "activation":    ["silu"],
+    # 1 × 4 × 1 × 1 × 2 × 1 × 4 × 3 = 96 combos
+    "hidden_layers": [[256, 512, 256]],
+    "dropout":       [0.0, 0.1, 0.2, 0.3],
+    "learning_rate": [3e-4],
+    "weight_decay":  [1e-2],
+    "batch_size":    [1024],
+    "activation":    ["gelu"],
+    "data_efficiency_fraction": [1.0, 0.5, 0.25, 0.1],  # 100%, 50%, 25%, 10% of train data
+    "lr_scheduler":  ["warmup_cosine", "reduce_on_plateau", "onecycle"],  # 3 scheduler strategies
 }
 
 LOCAL_GRID_PHYSREG: dict[str, list] = {
-    # 2 × 1 × 1 × 1 × 1 × 1 × 2 × 1 × 1 = 4 combos
-    "hidden_layers":           [[128, 256, 128], [256, 512, 256]],
-    "dropout":                 [0.1],
+    # 1 × 4 × 1 × 1 × 2 × 1 × 7 × 1 × 1 × 4 × 3 = 336 combos
+    "hidden_layers":           [[256, 512, 256]],
+    "dropout":                 [0.0, 0.1, 0.2, 0.3],
     "learning_rate":           [3e-4],
-    "weight_decay":            [5e-3],
-    "batch_size":              [512],
-    "activation":              ["silu"],
-    "physics_weight":          [0.1, 0.5],
+    "weight_decay":            [1e-2],
+    "batch_size":              [1024],
+    "activation":              ["gelu"],
+    "physics_weight":          [0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0],  # expanded
     "physics_warmup_fraction": [0.05],
     "phi_lr_ratio":            [0.1],
+    "data_efficiency_fraction": [1.0, 0.5, 0.25, 0.1],  # 100%, 50%, 25%, 10% of train data
+    "lr_scheduler":            ["warmup_cosine", "reduce_on_plateau", "onecycle"],  # 3 scheduler strategies
 }
 
 LOCAL_GRID_RESIDUAL: dict[str, list] = {
-    # 2 × 1 × 1 × 1 × 1 × 1 × 2 = 4 combos
-    "hidden_layers":    [[128, 256, 128], [256, 512, 256]],
-    "dropout":          [0.1],
+    # 1 × 4 × 1 × 1 × 2 × 1 × 2 × 4 × 3 = 96 combos
+    "hidden_layers":    [[256, 512, 256]],
+    "dropout":          [0.0, 0.1, 0.2, 0.3],
     "learning_rate":    [3e-4],
-    "weight_decay":     [5e-3],
-    "batch_size":       [512],
-    "activation":       ["silu"],
+    "weight_decay":     [1e-2],
+    "batch_size":       [1024],
+    "activation":       ["gelu"],
     "alpha_reg_weight": [0.01, 0.05],
+    "data_efficiency_fraction": [1.0, 0.5, 0.25, 0.1],  # 100%, 50%, 25%, 10% of train data
+    "lr_scheduler":     ["warmup_cosine", "reduce_on_plateau", "onecycle"],  # 3 scheduler strategies
 }
 
 # ── HPC  (exhaustive — designed for 2×A100 80 GB)  ───────────────────────────
@@ -838,10 +847,14 @@ def _wait_for_memory(log: logging.Logger) -> None:
     def _ok() -> bool:
         vm   = psutil.virtual_memory()
         swap = psutil.swap_memory()
-        return (
-            vm.available / 1e9 >= MIN_FREE_RAM_GB
-            and swap.used / 1e9 <= SWAP_THRESHOLD_GB
+        ram_ok  = vm.available / 1e9 >= MIN_FREE_RAM_GB
+        # Skip the swap check when RAM is plentiful — on multi-user HPC nodes
+        # other jobs consume swap even when this process has ample free RAM.
+        swap_ok = (
+            swap.used / 1e9 <= SWAP_THRESHOLD_GB
+            or vm.available / 1e9 >= 4 * MIN_FREE_RAM_GB
         )
+        return ram_ok and swap_ok
 
     if _ok():
         return
