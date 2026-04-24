@@ -1,84 +1,76 @@
 #!/usr/bin/env python3
-"""Hyperparameter grid search for BlackBoxFNN, PhysicsRegularizedFNN and
-ResidualCorrectionFNN torque models.
+"""Local hyperparameter grid search for the three torque model variants.
 
-ALL configuration is at the top of this file — no CLI arguments.
-Edit MODE, ARCH, DRY_RUN, SKIP_EXISTING and the grid dicts, then run::
+Models compared:
+    * ``BlackBoxFNN``            — purely data-driven MLP baseline.
+    * ``PhysicsRegularizedFNN``  — MLP + learnable calibration on summed
+                                    analytical torque; blended data / physics loss.
+    * ``ResidualCorrectionFNN``  — predicts Δ on top of τ_phys; magnitude-penalty.
+
+Research goal: how do the three architectures compare as a function of training-
+data fraction and physics-weight hyperparameter?  The grid is deliberately small
+(72 trials = 8 FNN + 40 PhysReg + 24 Residual) and focused on exactly those two
+axes plus seed replicates.
+
+Execution strategy — fully dynamic, resource-polling parallelism
+----------------------------------------------------------------
+The runner picks the number of concurrent trials *at every admission decision*
+by reading live free VRAM and RAM.  No fixed concurrency count, no fixed
+cooldown between trials.  The admission loop:
+
+    1. Estimates each pending trial's VRAM + RAM from its own hyperparameters.
+    2. Polls the actual free VRAM / RAM.
+    3. Launches the next trial only if it fits (with a reserve for OS/display).
+    4. Otherwise sleeps briefly and re-checks — naturally handling the slow
+       CUDA-context release that has crashed this machine in the past.
+
+On CPU-only systems the runner is sequential (parallel CPU trials wreck each
+other via OMP thread contention).  On GPU systems with enough VRAM for only
+one trial, the runner is sequential (no pool overhead).
+
+Edit config constants below and run::
 
     PYTHONPATH=. python3 -m Neural_Networks.models.run_loss_residual_grid
 
-Results land in Trained_Models_Grid/ (completely separate from Trained_Models/).
-Each architecture sub-directory (FNN/, PhysicsRegularizedFNN/,
-ResidualCorrectionFNN/) and a shared models_registry.yaml are created
-automatically.
-
-Analyse results afterwards with::
+Results land in ``Trained_Models_Grid/`` (separate from ``Trained_Models/``).
+Analyse afterwards with::
 
     PYTHONPATH=. python3 -m Neural_Networks.analyze_models_grid
-
-Parallelism strategy
---------------------
-* GPU machines  : ``multiprocessing.Pool`` with ``maxtasksperchild=1`` so each
-  trial runs in a **fresh** process (OS reclaims all memory after every trial).
-  Each trial sets ``CUDA_VISIBLE_DEVICES`` from its UI slot *before* importing
-  ``torch``.  Several concurrent slots may map to the same GPU when the pool
-  is larger than ``n_gpus``; admission control budgets VRAM.  AMP and
-  ``torch.compile`` follow your hyperparameters.
-* CPU machines  : single in-process worker (no subprocess overhead; all CPU
-  cores available to PyTorch; a memory governor pauses before each trial if
-  RAM or swap pressure exceeds configured thresholds).
-* Spawn context is used throughout (required for CUDA multi-process safety).
-
-Runtime estimate (HPC mode, 2×A100 80 GB, ~5–10 min/trial with early stopping)
-----------------------------------------------------------------------------------
-  FNN        :   768 combos  →   ~32–64 h
-  PhysicsReg :  2430 combos  →  ~101–202 h
-  Residual   :   432 combos  →   ~18–36 h
-  Total (all):  3630 combos  →  ~151–302 h  (≈ 6–13 days)
-  Run each arch independently with ARCH="fnn" / "physreg" / "residual"
-  to spread the load across multiple scheduler allocations.
 """
 
 from __future__ import annotations
 
+import gc
 import itertools
 import logging
+import math
 import multiprocessing as mp
 import os
 import sys
 import threading
 import time
 import warnings
-from collections import Counter
-from dataclasses import asdict, dataclass
+from collections import Counter, deque
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# Do NOT `import torch` at module level: child processes set
-# ``CUDA_VISIBLE_DEVICES`` at the start of ``_run_one_trial`` before importing torch.
+# torch is imported lazily — workers set CUDA_VISIBLE_DEVICES before import.
 from tqdm import tqdm
 
 # ============================================================================
 # ── CONFIGURATION  (edit here — no CLI arguments) ────────────────────────────
 # ============================================================================
 
-# Sweep mode:
-#   "local"  → small smoke-test grid (runs in minutes on a laptop / debug node)
-#   "hpc"    → exhaustive grid (designed for 2×A100 80 GB)
-MODE: str = "local"   # "local" | "hpc"
-
-# Architecture(s) to sweep:
+# Which architectures to sweep.
 #   "all"      → BlackBoxFNN + PhysicsRegularizedFNN + ResidualCorrectionFNN
-#   "fnn"      → BlackBoxFNN only
-#   "physreg"  → PhysicsRegularizedFNN only
-#   "residual" → ResidualCorrectionFNN only
-ARCH: str = "all"   # "all" | "fnn" | "physreg" | "residual"
+#   "fnn" | "physreg" | "residual" → just that one
+ARCH: str = "all"
 
-# Set True to print the full combo table and exit without any training.
+# Print the combo table and exit without training.
 DRY_RUN: bool = False
 
-# Set True to skip combos whose output dir already contains a metadata.yaml
-# with a matching hyperparameter set (safe resumption after interruption).
+# Skip combos whose output dir already contains a matching metadata.yaml.
 SKIP_EXISTING: bool = True
 
 # Dataset run directory (pre-processed CSV produced by preprocess_data.py GUI).
@@ -88,520 +80,140 @@ TRAIN_DATA_RUN_DIR: str = str(
     / "run_0419_1338_qraw_d25p3i_ddL_mraw_a1_R_70v15t15_f1p0t1p0_f6a3df"
 )
 
-# Output root — completely separate from Trained_Models/ to avoid polluting
-# the single-run registry.
+# Output root — completely separate from Trained_Models/.
 MODELS_DIR_ROOT: str = str(_NN_ROOT / "Trained_Models_Grid")
-REGISTRY_FILE: str   = str(_NN_ROOT / "Trained_Models_Grid" / "models_registry.yaml")
+REGISTRY_FILE:   str = str(_NN_ROOT / "Trained_Models_Grid" / "models_registry.yaml")
 
-# ============================================================================
-# ── RESOURCE GOVERNOR ────────────────────────────────────────────────────────
-#    probe_resources() probes RAM / VRAM / CPU at startup and derives the
-#    optimal n_concurrent, thread counts, and DataLoader workers automatically.
-#    Per-trial memory costs are estimated analytically from hidden layer sizes
-#    and batch size; RESOURCE_TARGET (70 %) keeps 30 % headroom for the OS.
-# ============================================================================
+# Batch size for every trial. The memory estimator scales accordingly — drop
+# to 512 if the admission loop reports "tight resources" repeatedly.
+BATCH_SIZE: int = 1024
 
-# Fraction of each resource (RAM, VRAM, CPU) the grid search may consume.
-# Applied to *currently free* resources, not total — so 0.80 is safe.
-RESOURCE_TARGET: float = 0.80
+# ── Resource-admission parameters (no hardcoded concurrency) ─────────────────
+# Reserves: NEVER consumed by the grid (keeps the desktop responsive).
+VRAM_RESERVE_GB: float = 0.5
+RAM_RESERVE_GB:  float = 2.0
 
-# Hard cap — on large clusters use scheduler array jobs instead.
-MAX_CONCURRENT: int = 8
+# Polling cadence for the admission loop.
+ADMISSION_POLL_SEC: float = 1.0   # while in-flight trials are running
+TIGHT_SLEEP_SEC:    float = 5.0   # when nothing currently fits
 
-# Memory governor thresholds — pause before a trial if violated.
+# Sequential-path RAM floor (laptop-grade check).
 MIN_FREE_RAM_GB:   float = 2.0
-SWAP_THRESHOLD_GB: float = 20.0   # HPC login nodes carry high swap from other users
 MEM_POLL_INTERVAL: float = 5.0
 
 # ============================================================================
-# ── RESOURCE PLAN ────────────────────────────────────────────────────────────
+# ── FIXED HYPER-PARAMETERS (identical for every trial) ───────────────────────
 # ============================================================================
 
-@dataclass
-class TrialMemEst:
-    """Analytical memory footprint estimate for one trial."""
-    vram_gb:     float   # expected GPU VRAM consumption (incl. CUDA ctx overhead)
-    ram_gb:      float   # expected host RAM consumption (incl. torch base RSS)
-    param_count: int     # total trainable parameters
-
-
-@dataclass
-class ResourcePlan:
-    """Derived execution plan from the system resource probe."""
-    n_gpus:               int
-    n_concurrent:         int    # parallel trials (hard upper bound for the pool)
-    dl_workers_per_trial: int    # DataLoader worker processes per trial
-    torch_threads:        int    # PyTorch intra-op threads per trial process
-    compile_mode:         str    # torch.compile mode
-    use_compile:          bool   # False for local (compile > 10-epoch training)
-    use_amp:              bool
-    ram_total_gb:         float
-    ram_free_gb:          float
-    vram_total_gb:        float
-    cpu_logical:          int
-    cpu_physical:         int
-    bottleneck:           str
-    cuda_ctx_gb:          float  # measured CUDA context overhead per process
-    torch_base_ram_gb:    float  # measured Python+torch RSS per fresh worker
-
-
-# ── MODEL DIMENSION CONSTANTS (mirror loader.py / torque_models.py) ──────────
-_N_INPUTS:  int = 15   # q(5) + qd(5) + qdd(5)
-_N_OUTPUTS: int = 5    # τ per joint
-
-
-def _count_params(
-    hidden_layers: list[int],
-    in_dim: int = 15,
-    out_dim: int = 5,
-    extra: int = 0,
-) -> int:
-    """Count trainable parameters for a build_mlp-style network.
-
-    Architecture (matches torque_models.build_mlp):
-        hidden layer i: Linear(in→out) + LayerNorm(out) + Activation + Dropout
-        output layer:   Linear(h_last→out_dim)
-
-    ``extra`` covers arch-specific additions, e.g. PhysicsReg tau_scale/bias.
-    """
-    dims  = [in_dim] + list(hidden_layers) + [out_dim]
-    total = 0
-    for i, (a, b) in enumerate(zip(dims, dims[1:])):
-        total += a * b + b      # Linear: weight (a×b) + bias (b)
-        if i < len(dims) - 2:   # hidden layers only
-            total += 2 * b      # LayerNorm: weight (b) + bias (b)
-    return total + extra
-
-
-def _measure_cuda_ctx_gb(device: int = 0) -> float:
-    """Measure the one-time CUDA context overhead for a fresh process.
-
-    Allocates a 1-element tensor to trigger context initialisation, reads
-    the VRAM delta via torch.cuda.mem_get_info(), then frees the tensor.
-    Returns the overhead in GB.  Falls back to 0.35 GB if CUDA is
-    unavailable or the delta looks too small (context already warm).
-    """
-    import torch
-
-    if not torch.cuda.is_available():
-        return 0.0
-    try:
-        torch.cuda.empty_cache()
-        free_before, _ = torch.cuda.mem_get_info(device)
-        t = torch.zeros(1, device=f"cuda:{device}")
-        free_after, _  = torch.cuda.mem_get_info(device)
-        del t
-        torch.cuda.empty_cache()
-        delta_gb = (free_before - free_after) / 1e9
-        return delta_gb if delta_gb > 0.05 else 0.35   # context already warm
-    except Exception:
-        return 0.35
-
-
-def _measure_torch_base_ram_gb() -> float:
-    """Measure the RSS of a freshly spawned Python+torch worker process.
-
-    Spawns a subprocess that imports psutil and torch, touches a tiny
-    tensor, then prints its RSS.  This captures the per-worker base RAM
-    overhead (interpreter + PyTorch + CUDA init) that the governor budgets
-    for every spawned trial process.  Falls back to 0.5 GB on failure.
-    """
-    import subprocess
-    script = (
-        "import psutil, torch; "
-        "torch.zeros(1, device='cuda' if torch.cuda.is_available() else 'cpu'); "
-        "print(psutil.Process().memory_info().rss)"
-    )
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True, text=True, timeout=60,
-        )
-        rss_bytes = int(result.stdout.strip())
-        gb = rss_bytes / 1e9
-        return gb if 0.1 < gb < 8.0 else 0.5
-    except Exception:
-        return 0.5
-
-
-def _estimate_trial_mem(
-    hp: dict,
-    arch: str,
-    cuda_ctx_gb: float,
-    torch_base_ram_gb: float,
-) -> TrialMemEst:
-    """Analytically estimate GPU VRAM and host RAM for one trial.
-
-    Formula (float32 = 4 bytes throughout — conservative upper bound; real
-    AMP activations are fp16 so this never under-estimates):
-
-        P        = trainable parameter count
-        model    = P × 4 B
-        grads    = P × 4 B
-        adam     = P × 2 × 4 B      (exp_avg + exp_avg_sq)
-        act      = Σ(h_i) × B × 4 × 2  (fwd + bwd activation cache)
-        io_buf   = B × (N_in + N_out) × 4
-        raw      = (model + grads + adam + act + io_buf) × 1.5
-                    ↑ ×1.5: CUDA allocator fragmentation / cache headroom
-        vram_gb  = raw / 1e9 + cuda_ctx_gb         (one context per process)
-        ram_gb   = raw / 1e9 + torch_base_ram_gb    (CPU master copy + interp)
-
-    PhysicsRegularizedFNN adds 2×N_OUTPUTS extra params (tau_scale, tau_bias).
-    """
-    _F  = 4   # bytes per float32
-    hl  = hp.get("hidden_layers", [256, 512, 256])
-    bs  = int(hp.get("batch_size", 512))
-    extra  = 2 * _N_OUTPUTS if arch == "physreg" else 0
-    P      = _count_params(hl, in_dim=_N_INPUTS, out_dim=_N_OUTPUTS, extra=extra)
-
-    model_b = P * _F
-    grad_b  = P * _F
-    adam_b  = P * 2 * _F
-    act_b   = sum(hl) * bs * _F * 2
-    io_b    = bs * (_N_INPUTS + _N_OUTPUTS) * _F
-
-    raw_b = (model_b + grad_b + adam_b + act_b + io_b) * 1.5
-    return TrialMemEst(
-        vram_gb     = raw_b / 1e9 + cuda_ctx_gb,
-        ram_gb      = raw_b / 1e9 + torch_base_ram_gb,
-        param_count = P,
-    )
-
-
-def probe_resources(log: logging.Logger, trials: list[dict]) -> ResourcePlan:
-    """Measure system resources and derive the optimal execution plan.
-
-    Per-trial memory costs are computed analytically from hidden layer sizes
-    and batch size, calibrated by one-time measurements of the CUDA context
-    overhead and the Python+torch worker RSS.  The admission loop in main()
-    uses per-trial estimates to decide when to actually submit each trial,
-    so n_concurrent here is just the hard upper bound for the worker pool.
-
-    GPU memory sharing
-    ------------------
-    When n_concurrent > n_gpus, several worker *processes* are pinned to the
-    same physical GPU (``CUDA_VISIBLE_DEVICES`` is fixed at worker start).
-    The driver multiplexes VRAM — each process is a real separate training
-    job; admission control budgets worst-case per-trial VRAM accordingly.
-    """
-    import psutil
-    import statistics
-    import torch
-
-    n_trials = len(trials)
-
-    # ── One-time overhead measurements ───────────────────────────────────────
-    cuda_ctx_gb       = _measure_cuda_ctx_gb()
-    torch_base_ram_gb = _measure_torch_base_ram_gb()
-    log.info("  CUDA ctx overhead : %.3f GB  (measured)", cuda_ctx_gb)
-    log.info("  Torch worker base : %.3f GB RAM  (measured)", torch_base_ram_gb)
-
-    # ── Per-trial estimates ───────────────────────────────────────────────────
-    all_ests  = [
-        _estimate_trial_mem(t["hp"], t["arch"], cuda_ctx_gb, torch_base_ram_gb)
-        for t in trials
-    ]
-    vram_vals = sorted(e.vram_gb for e in all_ests)
-    ram_vals  = sorted(e.ram_gb  for e in all_ests)
-    log.info(
-        "  Trial VRAM est  : min=%.3f  med=%.3f  max=%.3f GB",
-        vram_vals[0], statistics.median(vram_vals), vram_vals[-1],
-    )
-    log.info(
-        "  Trial RAM  est  : min=%.3f  med=%.3f  max=%.3f GB",
-        ram_vals[0],  statistics.median(ram_vals),  ram_vals[-1],
-    )
-
-    # ── RAM ──────────────────────────────────────────────────────────────────
-    vm           = psutil.virtual_memory()
-    ram_total_gb = vm.total / 1e9
-    ram_free_gb  = vm.available / 1e9
-    n_from_ram   = max(1, int(ram_free_gb * RESOURCE_TARGET / max(ram_vals[-1], 0.1)))
-
-    # ── CPU ──────────────────────────────────────────────────────────────────
-    cpu_logical  = os.cpu_count() or 4
-    try:
-        cpu_physical = psutil.cpu_count(logical=False) or cpu_logical
-    except Exception:
-        cpu_physical = cpu_logical
-    n_from_cpu = max(1, int(cpu_logical * RESOURCE_TARGET) // 2)
-
-    # ── GPU (use *free* VRAM, not total) ─────────────────────────────────────
-    n_gpus     = torch.cuda.device_count()
-    vram_total = 0.0
-    vram_free  = 0.0
-    if n_gpus > 0:
-        vram_total = sum(
-            torch.cuda.get_device_properties(i).total_memory
-            for i in range(n_gpus)
-        ) / 1e9
-        vram_free = sum(
-            torch.cuda.mem_get_info(i)[0] for i in range(n_gpus)
-        ) / 1e9
-    worst_vram  = vram_vals[-1] if vram_vals else 0.5
-    n_from_vram = max(1, int(vram_free * RESOURCE_TARGET / worst_vram)) if n_gpus > 0 else 1
-
-    # ── Concurrency decision ──────────────────────────────────────────────────
-    if n_gpus == 0:
-        n_concurrent = max(1, min(n_from_ram, n_from_cpu, n_trials, MAX_CONCURRENT))
-        bottleneck   = (
-            "CPU-only — sequential in-process" if n_concurrent == 1
-            else f"CPU-bound — {n_concurrent} parallel processes"
-        )
-    else:
-        n_concurrent = max(1, min(n_from_ram, n_from_vram, n_from_cpu, n_trials, MAX_CONCURRENT))
-        if n_from_ram <= n_from_vram and n_from_ram <= n_from_cpu:
-            bottleneck = (
-                f"RAM ({ram_free_gb:.1f} GB free → {n_from_ram} slots "
-                f"at max {ram_vals[-1]:.2f} GB each)"
-            )
-        elif n_from_vram <= n_from_cpu:
-            bottleneck = (
-                f"VRAM ({vram_free:.1f} GB free → {n_from_vram} slots "
-                f"at max {worst_vram:.2f} GB each)"
-            )
-        else:
-            bottleneck = f"CPU ({cpu_logical} logical → {n_from_cpu} slots at 2 threads min)"
-
-    # ── Per-trial allocations ─────────────────────────────────────────────────
-    torch_threads = max(1, int(cpu_logical * RESOURCE_TARGET) // max(1, n_concurrent))
-    if n_gpus == 0:
-        dl_workers = 0    # CPU mode: workers spawn OMP threads → oversubscription storm
-    else:
-        dl_workers = max(0, min(4, cpu_logical // max(1, n_concurrent) - torch_threads // 2))
-
-    # ── Compile / AMP ─────────────────────────────────────────────────────────
-    # Disable torch.compile for local: compile time (5–30 s) >> 10 training epochs.
-    use_compile  = n_gpus > 0 and MODE != "local"
-    compile_mode = "max-autotune" if MODE == "hpc" else "default"
-    use_amp      = n_gpus > 0
-
-    plan = ResourcePlan(
-        n_gpus=n_gpus,
-        n_concurrent=n_concurrent,
-        dl_workers_per_trial=dl_workers,
-        torch_threads=torch_threads,
-        compile_mode=compile_mode,
-        use_compile=use_compile,
-        use_amp=use_amp,
-        ram_total_gb=ram_total_gb,
-        ram_free_gb=ram_free_gb,
-        vram_total_gb=vram_total,
-        cpu_logical=cpu_logical,
-        cpu_physical=cpu_physical,
-        bottleneck=bottleneck,
-        cuda_ctx_gb=cuda_ctx_gb,
-        torch_base_ram_gb=torch_base_ram_gb,
-    )
-
-    log.info("── Resource probe ────────────────────────────────────────────────")
-    log.info("  RAM      : %.1f GB total   %.1f GB free", ram_total_gb, ram_free_gb)
-    log.info("  CPU      : %d logical   %d physical cores", cpu_logical, cpu_physical)
-    if n_gpus > 0:
-        for i in range(n_gpus):
-            props  = torch.cuda.get_device_properties(i)
-            free_i = torch.cuda.mem_get_info(i)[0] / 1e9
-            log.info(
-                "  GPU %-2d   : %s   %.1f GB total  %.1f GB free",
-                i, props.name, props.total_memory / 1e9, free_i,
-            )
-        log.info(
-            "  VRAM     : %.1f GB free  (worst-case trial %.2f GB)",
-            vram_free, worst_vram,
-        )
-    else:
-        log.info("  GPU      : none (CPU mode)")
-    log.info("  Bottleneck: %s", bottleneck)
-    log.info("  → n_concurrent      = %d trial(s) in parallel", n_concurrent)
-    log.info("  → torch_threads     = %d per trial", torch_threads)
-    log.info("  → dl_workers        = %d per trial", dl_workers)
-    log.info("  → use_compile       = %s", use_compile)
-    log.info("  → AMP               = %s", use_amp)
-    log.info("─────────────────────────────────────────────────────────────────")
-
-    return plan
-
-
-# ============================================================================
-# ── FIXED HYPER-PARAMETERS ───────────────────────────────────────────────────
-#    Applied to EVERY trial regardless of which grid combo is being swept.
-#    torch_compile / torch_compile_mode are set automatically by the worker.
-# ============================================================================
 FIXED_HP: dict[str, Any] = {
-    "epochs":              5000,     # early stopping cuts this in practice
-    "optimizer":           "adamw",
-    "lr_scheduler":        "warmup_cosine",
-    "early_stopping":      True,
-    "early_stop_metric":   "val_rmse",
-    "patience":            500,
-    "min_delta":           1e-4,
-    "grad_clip_norm":      5.0,
-    "feature_noise_std":   0.02,
-    "data_train_fraction": 1.0,
-    "data_train_seed":     0,
-    "stride":              1,
-    "seed":                42,
-    "snapshot_every":      0,
-    "print_every":         20,       # log every N epochs (overridden per mode)
-}
+    # Architecture (constant — we're comparing *variants*, not sizes).
+    "hidden_layers":           [256, 512, 256],
+    "dropout":                 0.1,
+    "activation":              "gelu",
 
-# Overrides applied on top of FIXED_HP when MODE="local" so smoke-test
-# runs finish in minutes rather than hours.
-LOCAL_HP_OVERRIDES: dict[str, Any] = {
-    "epochs":      1000,
-    "patience":    50,
-    "print_every": 1,   # more frequent so the terminal never feels stuck
-}
+    # Optimisation.
+    "optimizer":               "adamw",
+    "learning_rate":           3e-4,
+    "weight_decay":            1e-2,
+    "batch_size":              BATCH_SIZE,
+    "lr_scheduler":            "warmup_cosine",
+    "grad_clip_norm":          5.0,
+    "feature_noise_std":       0.02,
 
-# ============================================================================
-# ── HYPERPARAMETER GRIDS ─────────────────────────────────────────────────────
-# ============================================================================
+    # Training length / early stopping.
+    "epochs":                  1000,
+    "patience":                50,
+    "min_delta":               1e-4,
+    "early_stopping":          True,
+    "early_stop_metric":       "val_rmse",
 
-# ── LOCAL  (smoke-test)  ─────────────────────────────────────────────────────
-#    FNN: 8 combos   PhysReg: 4 combos   Residual: 4 combos   Total: 16
+    # Bookkeeping.
+    "stride":                  1,
+    "snapshot_every":          0,
+    "print_every":             1,
 
-LOCAL_GRID_FNN: dict[str, list] = {
-    # 1 × 4 × 1 × 1 × 2 × 1 × 4 × 3 = 96 combos
-    "hidden_layers": [[256, 512, 256]],
-    "dropout":       [0.0, 0.1, 0.2, 0.3],
-    "learning_rate": [3e-4],
-    "weight_decay":  [1e-2],
-    "batch_size":    [1024],
-    "activation":    ["gelu"],
-    "data_efficiency_fraction": [1.0, 0.5, 0.25, 0.1],  # 100%, 50%, 25%, 10% of train data
-    "lr_scheduler":  ["warmup_cosine", "reduce_on_plateau", "onecycle"],  # 3 scheduler strategies
-}
+    # Seed defaults (overridden per-trial by the sweep).
+    "seed":                    0,
+    "data_train_seed":         0,
 
-LOCAL_GRID_PHYSREG: dict[str, list] = {
-    # 1 × 4 × 1 × 1 × 2 × 1 × 7 × 1 × 1 × 4 × 3 = 336 combos
-    "hidden_layers":           [[256, 512, 256]],
-    "dropout":                 [0.0, 0.1, 0.2, 0.3],
-    "learning_rate":           [3e-4],
-    "weight_decay":            [1e-2],
-    "batch_size":              [1024],
-    "activation":              ["gelu"],
-    "physics_weight":          [0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0],  # expanded
-    "physics_warmup_fraction": [0.05],
-    "phi_lr_ratio":            [0.1],
-    "data_efficiency_fraction": [1.0, 0.5, 0.25, 0.1],  # 100%, 50%, 25%, 10% of train data
-    "lr_scheduler":            ["warmup_cosine", "reduce_on_plateau", "onecycle"],  # 3 scheduler strategies
-}
-
-LOCAL_GRID_RESIDUAL: dict[str, list] = {
-    # 1 × 4 × 1 × 1 × 2 × 1 × 2 × 4 × 3 = 96 combos
-    "hidden_layers":    [[256, 512, 256]],
-    "dropout":          [0.0, 0.1, 0.2, 0.3],
-    "learning_rate":    [3e-4],
-    "weight_decay":     [1e-2],
-    "batch_size":       [1024],
-    "activation":       ["gelu"],
-    "alpha_reg_weight": [0.01, 0.05],
-    "data_efficiency_fraction": [1.0, 0.5, 0.25, 0.1],  # 100%, 50%, 25%, 10% of train data
-    "lr_scheduler":     ["warmup_cosine", "reduce_on_plateau", "onecycle"],  # 3 scheduler strategies
-}
-
-# ── HPC  (exhaustive — designed for 2×A100 80 GB)  ───────────────────────────
-
-HPC_GRID_FNN: dict[str, list] = {
-    # 4 × 4 × 3 × 2 × 4 × 2 = 768 combos
-    # With 2×A100 and ~5 min/trial: ~32 h  |  ~10 min/trial: ~64 h
-    "hidden_layers": [
-        [128, 256, 128],
-        [256, 512, 256],
-        [512, 1024, 512],
-        [256, 512, 512, 256],
-    ],
-    "dropout":       [0.0, 0.1, 0.2, 0.3],
-    "learning_rate": [1e-3, 3e-4, 1e-4],
-    "weight_decay":  [5e-3, 1e-2],
-    "batch_size":    [512, 1024, 2048, 4096],
-    "activation":    ["silu", "gelu"],
-}
-
-HPC_GRID_PHYSREG: dict[str, list] = {
-    # 3 × 3 × 2 × 1 × 3 × 1 × 5 × 3 × 3 = 810 combos
-    # phi_lr_ratio and weight_decay fixed to defaults (lower sensitivity)
-    "hidden_layers": [
-        [256, 512, 256],
-        [512, 1024, 512],
-        [256, 512, 512, 256],
-    ],
-    "dropout":                 [0.0, 0.1, 0.2],
-    "learning_rate":           [3e-4, 1e-4],
-    "weight_decay":            [5e-3],
-    "batch_size":              [512, 1024, 2048],
-    "activation":              ["silu"],
-    "physics_weight":          [0.05, 0.1, 0.3, 0.5, 1.0],
-    "physics_warmup_fraction": [0.02, 0.05, 0.10],
-    "phi_lr_ratio":            [0.05, 0.1, 0.2],
-}
-
-HPC_GRID_RESIDUAL: dict[str, list] = {
-    # 3 × 3 × 2 × 2 × 3 × 1 × 4 = 648 combos
-    "hidden_layers": [
-        [256, 512, 256],
-        [512, 1024, 512],
-        [256, 512, 512, 256],
-    ],
-    "dropout":          [0.0, 0.1, 0.2],
-    "learning_rate":    [3e-4, 1e-4],
-    "weight_decay":     [5e-3, 1e-2],
-    "batch_size":       [512, 1024, 2048],
-    "activation":       ["silu"],
-    "alpha_reg_weight": [0.0, 0.01, 0.05, 0.1],
+    # PhysReg-only HPs (ignored by other strategies).
+    "physics_warmup_fraction": 0.05,
+    "phi_lr_ratio":            0.1,
 }
 
 # ============================================================================
-# ── ARCHITECTURE METADATA ────────────────────────────────────────────────────
+# ── HYPERPARAMETER SWEEPS ────────────────────────────────────────────────────
+#
+# Goal: isolate (data availability) × (physics weighting) for each architecture.
+# Everything else is fixed; seed gives two replicates per combo.
 # ============================================================================
+
+_SEEDS      = [0, 1]
+_DATA_FRACS = [1.0, 0.5, 0.25, 0.1]
+
+# FNN baseline: data × seed.  4 × 2 = 8 combos.
+GRID_FNN: dict[str, list] = {
+    "data_train_fraction": _DATA_FRACS,
+    "seed":                _SEEDS,
+}
+
+# Physics-regularized: physics_weight × data × seed.  5 × 4 × 2 = 40 combos.
+GRID_PHYSREG: dict[str, list] = {
+    "physics_weight":      [0.05, 0.1, 0.3, 0.5, 1.0],
+    "data_train_fraction": _DATA_FRACS,
+    "seed":                _SEEDS,
+}
+
+# Physics-residual: alpha_reg × data × seed (alpha=0 ablation included).
+# 3 × 4 × 2 = 24 combos.
+GRID_RESIDUAL: dict[str, list] = {
+    "alpha_reg_weight":    [0.0, 0.01, 0.05],
+    "data_train_fraction": _DATA_FRACS,
+    "seed":                _SEEDS,
+}
+
+# Total: 8 + 40 + 24 = 72 trials when ARCH="all".
 
 _ARCH_META: dict[str, tuple[str, str, str]] = {
-    # key: (model_type, save_subdir, run_help)
     "fnn":      ("BlackBoxFNN",           "FNN",                   "Neural_Networks/models/run_fnn.py"),
     "physreg":  ("PhysicsRegularizedFNN", "PhysicsRegularizedFNN", "Neural_Networks/models/run_physics_regularized.py"),
     "residual": ("ResidualCorrectionFNN", "ResidualCorrectionFNN", "Neural_Networks/models/run_physics_residual.py"),
 }
 
-# ============================================================================
-# ── INTERNAL HELPERS ─────────────────────────────────────────────────────────
-# ============================================================================
+_ARCH_GRID: dict[str, dict[str, list]] = {
+    "fnn":      GRID_FNN,
+    "physreg":  GRID_PHYSREG,
+    "residual": GRID_RESIDUAL,
+}
 
-# HP keys excluded from the "already-trained?" fingerprint comparison so that
-# hardware-dependent settings don't prevent skip detection across machines.
+# HP keys excluded from the "already-trained?" fingerprint (hardware-dependent
+# or historical).  Keys starting with ``_`` are also excluded.
 _SKIP_KEYS = frozenset({"torch_compile", "torch_compile_mode", "_grid_seed"})
 
 
+# ============================================================================
+# ── TRIAL-BUILDING HELPERS ───────────────────────────────────────────────────
+# ============================================================================
+
 def _cartesian(grid: dict[str, list]) -> list[dict[str, Any]]:
-    """Return all Cartesian-product combos of a grid dict as flat HP dicts."""
     keys = list(grid.keys())
-    return [
-        {k: v for k, v in zip(keys, combo)}
-        for combo in itertools.product(*[grid[k] for k in keys])
-    ]
+    return [dict(zip(keys, combo)) for combo in itertools.product(*(grid[k] for k in keys))]
 
 
 def _build_trials() -> list[dict[str, Any]]:
-    """Build the ordered list of trial configs for the current MODE / ARCH."""
-    local_grids = {
-        "fnn":      LOCAL_GRID_FNN,
-        "physreg":  LOCAL_GRID_PHYSREG,
-        "residual": LOCAL_GRID_RESIDUAL,
-    }
-    hpc_grids = {
-        "fnn":      HPC_GRID_FNN,
-        "physreg":  HPC_GRID_PHYSREG,
-        "residual": HPC_GRID_RESIDUAL,
-    }
-    active_grids = hpc_grids if MODE == "hpc" else local_grids
     active_archs = list(_ARCH_META.keys()) if ARCH == "all" else [ARCH]
+    if not all(a in _ARCH_META for a in active_archs):
+        raise ValueError(f"ARCH={ARCH!r} must be 'all' or one of {list(_ARCH_META)}")
 
     trials: list[dict[str, Any]] = []
     for arch in active_archs:
         model_type, save_subdir, run_help = _ARCH_META[arch]
-        for combo in _cartesian(active_grids[arch]):
+        for combo in _cartesian(_ARCH_GRID[arch]):
             hp = {**FIXED_HP, **combo}
-            if MODE == "local":
-                hp.update(LOCAL_HP_OVERRIDES)
+            # Seed axis populates both torch init seed and data subsample seed
+            # so each replicate is a *complete* re-run.
+            if "seed" in combo:
+                hp["data_train_seed"] = int(combo["seed"])
             trials.append({
                 "arch":        arch,
                 "model_type":  model_type,
@@ -614,8 +226,11 @@ def _build_trials() -> list[dict[str, Any]]:
 
 def _find_existing_run(subdir_path: Path, model_type: str, hp: dict) -> bool:
     """Return True if *subdir_path* already holds a run matching this HP set."""
-    import yaml  # deferred — not available at module import time in workers
-    compare_hp = {k: v for k, v in hp.items() if k not in _SKIP_KEYS and not k.startswith("_")}
+    import yaml
+    compare_hp = {
+        k: v for k, v in hp.items()
+        if k not in _SKIP_KEYS and not k.startswith("_")
+    }
     for meta_file in subdir_path.glob("*/metadata.yaml"):
         try:
             with open(meta_file) as fh:
@@ -633,335 +248,249 @@ def _find_existing_run(subdir_path: Path, model_type: str, hp: dict) -> bool:
     return False
 
 
-def _hp_short(hp: dict) -> str:
-    """One-line HP summary for progress logging."""
-    hl = hp.get("hidden_layers", "?")
-    hl_str = "×".join(str(x) for x in hl) if isinstance(hl, list) else str(hl)
-    return (
-        f"hl=[{hl_str}] do={hp.get('dropout','?')} "
-        f"lr={hp.get('learning_rate','?'):.0e} wd={hp.get('weight_decay','?'):.0e} "
-        f"bs={hp.get('batch_size','?')}"
+def _hp_desc(arch: str, hp: dict) -> str:
+    extras = {"physics_weight": "pw", "alpha_reg_weight": "arw"}
+    extra = "  ".join(f"{short}={hp[k]}" for k, short in extras.items() if k in hp)
+    base = (
+        f"{arch:<8} frac={hp.get('data_train_fraction','?')} "
+        f"seed={hp.get('seed','?')}"
     )
+    return f"{base}  {extra}" if extra else base
 
 
 def _fmt_time(seconds: float) -> str:
-    """Format seconds as h:mm:ss."""
     s = int(seconds)
     return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
 
 
 def _print_combo_table(trials: list[dict[str, Any]]) -> None:
-    """Print a formatted table of all grid combinations."""
     counts = Counter(t["arch"] for t in trials)
-    print(f"\n{'='*90}")
-    print(f"  GRID SEARCH  —  MODE={MODE!r}  ARCH={ARCH!r}  Total={len(trials)} combos")
+    print(f"\n{'='*76}")
+    print(f"  GRID SEARCH  —  ARCH={ARCH!r}   Total={len(trials)} combos")
     for arch, cnt in sorted(counts.items()):
         print(f"    {arch:<12}  {cnt} combos")
-    print(f"{'='*90}")
-    print(f"  {'#':<5} {'arch':<10} {'hidden_layers':<25} {'dropout':<8} {'lr':<9} "
-          f"{'wd':<8} {'bs':<6} {'extra HPs'}")
-    print(f"  {'-'*88}")
+    print(f"{'='*76}")
+    print(f"  {'#':<4} {'arch':<10} {'frac':<6} {'seed':<5} extras")
+    print(f"  {'-'*72}")
     for i, t in enumerate(trials, 1):
         hp = t["hp"]
-        hl = hp.get("hidden_layers", [])
-        hl_str = "×".join(str(x) for x in hl) if isinstance(hl, list) else str(hl)
-        extra_keys = {"physics_weight", "physics_warmup_fraction", "phi_lr_ratio", "alpha_reg_weight"}
-        extra = "  ".join(f"{k}={hp[k]}" for k in extra_keys if k in hp)
+        extra = "  ".join(
+            f"{k}={hp[k]}" for k in ("physics_weight", "alpha_reg_weight") if k in hp
+        )
         print(
-            f"  {i:<5} {t['arch']:<10} [{hl_str}]{'':<{max(1,22-len(hl_str))}} "
-            f"{hp.get('dropout','?'):<8} {hp.get('learning_rate','?'):<9.0e} "
-            f"{hp.get('weight_decay','?'):<8.0e} {hp.get('batch_size','?'):<6} {extra}"
+            f"  {i:<4} {t['arch']:<10} {str(hp.get('data_train_fraction','?')):<6} "
+            f"{str(hp.get('seed','?')):<5} {extra}"
         )
-    print(f"{'='*90}\n")
+    print(f"{'='*76}\n")
 
 
 # ============================================================================
-# ── WORKER FUNCTION (spawned; fresh process per trial with Pool maxtasksperchild=1) ─
+# ── RESOURCE QUERIES (live, dynamic) ─────────────────────────────────────────
 # ============================================================================
-#
-# ``multiprocessing.Queue`` must NOT be passed as ``apply_async`` arguments under
-# the *spawn* start method (pickle error: "only be shared through inheritance").
-# It is injected once per worker via ``Pool(..., initializer=..., initargs=(q,))``.
 
-_POOL_PROGRESS_QUEUE: "mp.Queue | None" = None
+# Dims mirror loader.py: 15 input features, 5 output joints.
+_N_IN  = 15
+_N_OUT = 5
 
 
-def _pool_progress_init(progress_queue: "mp.Queue") -> None:
-    """Pool worker initializer: cache the main-process progress queue handle."""
-    global _POOL_PROGRESS_QUEUE
-    _POOL_PROGRESS_QUEUE = progress_queue
+def _count_params(hidden_layers: list[int], extra: int = 0) -> int:
+    """Match :func:`torque_models.build_mlp` exactly (Linear + LayerNorm)."""
+    dims = [_N_IN] + list(hidden_layers) + [_N_OUT]
+    total = 0
+    for i, (a, b) in enumerate(zip(dims, dims[1:])):
+        total += a * b + b          # Linear(a→b): weight + bias
+        if i < len(dims) - 2:
+            total += 2 * b          # LayerNorm(b): weight + bias
+    return total + extra
 
 
-def _configure_grid_child_logging() -> None:
-    warnings.filterwarnings("ignore", category=UserWarning, module="torch")
-    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
-    for _ln in (
-        "", "Neural_Networks", "Neural_Networks.loader",
-        "Neural_Networks.models.shared.pipeline", "Neural_Networks.robot_physics",
-    ):
-        logging.getLogger(_ln).setLevel(logging.WARNING)
+# Framework overhead that the analytical parameter-count formula can't predict:
+# cuDNN workspaces, cuBLAS buffers, PyTorch allocator's steady-state caching
+# after a few training steps.  Measured empirically as ~0.5 GB for a small MLP
+# on any reasonably modern GPU — bake in as a constant to keep estimates honest.
+_FRAMEWORK_VRAM_OVERHEAD_GB: float = 0.5
 
 
-def _run_one_trial(
-    trial: dict,
-    worker_slot: int,
-    plan_dict: dict,
-) -> dict[str, Any]:
-    """Train one model on GPU ``worker_slot % n_gpus``; env set before ``import torch``.
+def _estimate_trial_mem(hp: dict, arch: str, cuda_ctx_gb: float) -> tuple[float, float]:
+    """Conservative (vram_gb, ram_gb) estimate for one trial's own HP."""
+    hl = hp.get("hidden_layers", [256, 512, 256])
+    bs = int(hp.get("batch_size", 1024))
+    extra = 2 * _N_OUT if arch == "physreg" else 0
+    P = _count_params(hl, extra=extra)
 
-    ``plan_dict`` is a plain ``dict`` from ``ResourcePlan`` (picklable).  Each
-    call may run in a new process (``maxtasksperchild=1``) so the OS reclaims
-    all memory when the run finishes.  Progress updates use
-    ``_POOL_PROGRESS_QUEUE`` (set in ``_pool_progress_init``).
-    """
-    import gc
-    import os
+    B = 4                                                    # float32 bytes
+    model_b = P * B
+    grad_b  = P * B
+    adam_b  = P * 2 * B                                      # exp_avg + exp_avg_sq
+    act_b   = sum(hl) * bs * B * 2                           # fwd + bwd activations
+    io_b    = bs * (_N_IN + _N_OUT) * B
 
-    _pq = _POOL_PROGRESS_QUEUE
-    if _pq is None:
-        raise RuntimeError("grid worker missing progress queue (pool initializer not run)")
+    raw = (model_b + grad_b + adam_b + act_b + io_b) * 1.5   # allocator headroom
+    vram_gb = raw / 1e9 + cuda_ctx_gb + _FRAMEWORK_VRAM_OVERHEAD_GB
+    ram_gb  = raw / 1e9 + 1.0                                # + python/torch base RSS
+    return vram_gb, ram_gb
 
-    plan     = ResourcePlan(**plan_dict)
-    n_g      = int(plan.n_gpus)
-    gpu_id   = int(worker_slot) % n_g if n_g > 0 else -1
-    if n_g > 0:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    else:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-    import torch
-    _configure_grid_child_logging()
-    torch.set_num_threads(plan.torch_threads)
-    torch.set_num_interop_threads(max(1, min(4, plan.torch_threads // 2)))
-    if torch.cuda.is_available():
-        torch.set_float32_matmul_precision("high")
-
-    arch        = trial["arch"]
-    model_type  = trial["model_type"]
-    save_subdir = trial["save_subdir"]
-    run_help    = trial["run_help"]
-    hp          = dict(trial["hp"])
-    models_dir  = os.path.join(MODELS_DIR_ROOT, save_subdir)
-    os.makedirs(models_dir, exist_ok=True)
-
+def _query_cuda_available() -> bool:
+    """True if CUDA is usable.  Cheap — does not create a CUDA context."""
     try:
-        # ── Skip-existing check ──────────────────────────────────────────────
-        if SKIP_EXISTING and _find_existing_run(Path(models_dir), model_type, hp):
-            _pq.put(("done", worker_slot, "skip"))
-            return {"status": "skipped", "arch": arch, "hp": hp, "gpu_id": gpu_id}
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
 
-        # ── Hardware-specific settings ───────────────────────────────────────
-        cuda_ok = torch.cuda.is_available() and gpu_id >= 0
-        hp["torch_compile"]      = plan.use_compile and cuda_ok
-        hp["torch_compile_mode"] = plan.compile_mode
 
-        # ``multiprocessing.Pool`` workers are *daemon* processes; they cannot
-        # spawn DataLoader worker children ("daemonic processes are not allowed
-        # to have children").  Always load batches in-process here.
-        os.environ["NN_NUM_WORKERS"] = "0"
-
-        # ── Build and run the training job ───────────────────────────────────
-        # Late imports: the spawn context re-runs this module but must not
-        # import CUDA-heavy libs at module level before CUDA_VISIBLE_DEVICES is set.
-        from Neural_Networks.models.shared.pipeline import TrainJob, run_training
-        from Neural_Networks.models.shared.strategies import (
-            PLAIN_STRATEGY,
-            PHYSICS_REG_STRATEGY,
-            RESIDUAL_STRATEGY,
-        )
-
-        _strategy_map = {
-            "fnn":      PLAIN_STRATEGY,
-            "physreg":  PHYSICS_REG_STRATEGY,
-            "residual": RESIDUAL_STRATEGY,
-        }
-
-        job = TrainJob(
-            run_dir=TRAIN_DATA_RUN_DIR,
-            models_dir=models_dir,
-            registry_file=REGISTRY_FILE,
-            model_type=model_type,
-            save_subdir=save_subdir,
-            hp=hp,
-            strategy=_strategy_map[arch],
-            run_help=run_help,
-        )
-
-        # Notify main process: trial starting on this slot.
-        _pq.put((
-            "start", worker_slot,
-            _hp_desc(arch, hp), int(hp.get("epochs", 5000)),
-        ))
-
-        def _cb(
-            epoch: int, total_ep: int, val_rmse: float,
-            pat_ctr: int, pat_max: int,
-        ) -> None:
-            _pq.put((
-                "progress", worker_slot,
-                epoch, total_ep, val_rmse, pat_ctr, pat_max,
-            ))
-
-        rc = run_training(job, progress_callback=_cb)
-        _pq.put(("done", worker_slot, "ok" if rc == 0 else "failed"))
-        return {
-            "status": "ok" if rc == 0 else "failed",
-            "arch":   arch,
-            "hp":     hp,
-            "gpu_id": gpu_id,
-        }
-
-    except Exception as exc:
-        import traceback
-        if _POOL_PROGRESS_QUEUE is not None:
-            _POOL_PROGRESS_QUEUE.put(("done", worker_slot, "error"))
-        return {
-            "status": "error",
-            "arch":   arch,
-            "hp":     hp,
-            "gpu_id": gpu_id,
-            "error":  f"{exc}\n{traceback.format_exc()}",
-        }
-    finally:
-        # Long-lived workers retain CUDA allocator caches; clear between trials
-        # so the next run does not stack VRAM and trigger OOM at the system level.
+def _query_free_vram_gb() -> float:
+    """Free VRAM on GPU 0, in GB.  Prefers ``nvidia-smi`` to avoid creating a
+    CUDA context in the main process; falls back to :func:`torch.cuda.mem_get_info`."""
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["nvidia-smi",
+             "--query-gpu=memory.free",
+             "--format=csv,noheader,nounits"],
+            timeout=5,
+        ).decode().strip().split("\n")[0]
+        return float(out.strip()) / 1024.0      # MiB → GB
+    except Exception:
         try:
+            import torch
             if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            gc.collect()
+                return torch.cuda.mem_get_info(0)[0] / 1e9
         except Exception:
             pass
+        return 0.0
+
+
+def _query_total_vram_gb() -> float:
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["nvidia-smi",
+             "--query-gpu=memory.total",
+             "--format=csv,noheader,nounits"],
+            timeout=5,
+        ).decode().strip().split("\n")[0]
+        return float(out.strip()) / 1024.0
+    except Exception:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return torch.cuda.get_device_properties(0).total_memory / 1e9
+        except Exception:
+            pass
+        return 0.0
+
+
+def _query_free_ram_gb() -> float:
+    import psutil
+    return psutil.virtual_memory().available / 1e9
+
+
+def _measure_cuda_ctx_gb() -> float:
+    """Measure a fresh process's CUDA context overhead via a child subprocess.
+
+    We do NOT touch CUDA in the main process, because even a single context
+    permanently consumes ~350 MB on this GPU — non-trivial on a 4 GB card.
+    The child allocates a 1-element tensor, prints the VRAM delta, and exits.
+    """
+    import subprocess
+    import sys
+    script = (
+        "import torch, sys\n"
+        "if not torch.cuda.is_available():\n"
+        "    print(0); sys.exit(0)\n"
+        "f0, _ = torch.cuda.mem_get_info(0)\n"
+        "t = torch.zeros(1, device='cuda:0')\n"
+        "f1, _ = torch.cuda.mem_get_info(0)\n"
+        "del t\n"
+        "print((f0 - f1) / 1e9)\n"
+    )
+    try:
+        out = subprocess.check_output(
+            [sys.executable, "-c", script], timeout=30, text=True,
+        ).strip()
+        val = float(out.splitlines()[-1])
+        # Defensive: if the measurement looks absurd, fall back to a typical value.
+        return val if 0.05 <= val <= 2.0 else 0.35
+    except Exception:
+        return 0.35
+
+
+def _compute_pool_size(cuda_available: bool) -> int:
+    """Derive an upper bound on concurrent workers from hardware alone.
+
+    This is the *pool capacity*, not a concurrency target; the admission loop
+    decides how many are actually in flight based on live free VRAM / RAM.
+    """
+    import psutil
+    if not cuda_available:
+        return 1                                         # CPU ⇒ sequential
+    cpu_phys = psutil.cpu_count(logical=False) or 2
+    vram_total = _query_total_vram_gb()
+    # One slot per ~1.5 GB of total VRAM (covers ctx + model + activations).
+    n_vram = max(1, int(vram_total / 1.5))               # 2 on 4 GB, 5 on 8 GB, 10 on 16 GB
+    n_cpu  = max(1, cpu_phys // 2)                       # ≥ 2 threads per worker
+    return min(n_vram, n_cpu)
+
+
+def _compute_threads_per_worker(pool_size: int) -> int:
+    import psutil
+    cpu_phys = psutil.cpu_count(logical=False) or 2
+    # Leave 1 physical core free for the OS / display.
+    return max(2, (cpu_phys - 1) // max(1, pool_size))
 
 
 # ============================================================================
-# ── RESOURCE GOVERNOR HELPERS ────────────────────────────────────────────────
+# ── SEQUENTIAL RUNNER ────────────────────────────────────────────────────────
 # ============================================================================
 
 def _wait_for_memory(log: logging.Logger) -> None:
-    """Block until RAM and swap pressure drop below configured thresholds.
-
-    Polls every MEM_POLL_INTERVAL seconds; emits one warning per wait cycle.
-    """
     import psutil
-
-    def _ok() -> bool:
-        vm   = psutil.virtual_memory()
-        swap = psutil.swap_memory()
-        ram_ok  = vm.available / 1e9 >= MIN_FREE_RAM_GB
-        # Skip the swap check when RAM is plentiful — on multi-user HPC nodes
-        # other jobs consume swap even when this process has ample free RAM.
-        swap_ok = (
-            swap.used / 1e9 <= SWAP_THRESHOLD_GB
-            or vm.available / 1e9 >= 4 * MIN_FREE_RAM_GB
-        )
-        return ram_ok and swap_ok
-
-    if _ok():
+    if psutil.virtual_memory().available / 1e9 >= MIN_FREE_RAM_GB:
         return
-
-    vm   = psutil.virtual_memory()
-    swap = psutil.swap_memory()
     log.warning(
-        "Memory pressure: %.1f GB RAM free  %.1f GB swap used — "
-        "pausing %.0f s ...",
-        vm.available / 1e9, swap.used / 1e9, MEM_POLL_INTERVAL,
+        "Only %.1f GB RAM free — pausing %.0f s ...",
+        psutil.virtual_memory().available / 1e9, MEM_POLL_INTERVAL,
     )
-    while not _ok():
+    while psutil.virtual_memory().available / 1e9 < MIN_FREE_RAM_GB:
         time.sleep(MEM_POLL_INTERVAL)
-
-
-# ============================================================================
-# ── CPU SEQUENTIAL RUNNER ────────────────────────────────────────────────────
-# ============================================================================
-
-def _hp_desc(arch: str, hp: dict) -> str:
-    """Compact single-line description used as the tqdm bar label."""
-    hl = hp.get("hidden_layers", [])
-    hl_str = "×".join(str(x) for x in hl) if isinstance(hl, list) else str(hl)
-    extra_keys = {
-        "physics_weight":  "pw",
-        "alpha_reg_weight":"arw",
-        "phi_lr_ratio":    "plr",
-    }
-    extras = "  ".join(
-        f"{short}={hp[k]}" for k, short in extra_keys.items() if k in hp
-    )
-    base = (
-        f"{arch:<8} [{hl_str}] "
-        f"do={hp.get('dropout','?')} "
-        f"lr={hp.get('learning_rate','?'):.0e} "
-        f"bs={hp.get('batch_size','?')}"
-    )
-    return f"{base}  {extras}" if extras else base
 
 
 def _run_sequential(
     trials: list[dict[str, Any]],
-    plan: ResourcePlan,
     log: logging.Logger,
     t_start: float,
 ) -> tuple[int, int, int]:
-    """Run all trials in-process, one at a time (CPU or single-GPU).
-
-    Each trial shows a live epoch progress bar::
-
-        [ 1/16] fnn [128×256×128] do=0.1 lr=3e-04 bs=512
-        [########................]  4/10 ep  val_rmse=0.0821 N·m  pat=1/10
-
-    All per-epoch log.info spam from pipeline.py is suppressed.
-    ProcessPoolExecutor is *not* used — no subprocess spawn, no VRAM
-    contention, and the memory governor can act between every trial.
-
-    Returns (n_ok, n_skip, n_fail).
-    """
+    """Run every trial in-process, one after another (CPU-only or pool_size=1)."""
+    import psutil
     import torch
 
-    total  = len(trials)
-    n_ok   = 0
-    n_skip = 0
-    n_fail = 0
-
-    cuda_ok = plan.n_gpus > 0 and torch.cuda.is_available()
-
-    # ── Thread and device setup ────────────────────────────────────────────
-    torch.set_num_threads(plan.torch_threads)
-    torch.set_num_interop_threads(max(1, min(4, plan.torch_threads // 2)))
-
-    if cuda_ok:
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-        torch.cuda.set_device(0)
+    # Thread setup — main process can use all cores now (no siblings).
+    cpu_phys = psutil.cpu_count(logical=False) or 2
+    torch_threads = max(1, cpu_phys - 1)
+    torch.set_num_threads(torch_threads)
+    torch.set_num_interop_threads(max(1, torch_threads // 4))
+    if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
-        os.environ["NN_NUM_WORKERS"] = str(plan.dl_workers_per_trial)
-        _device_label = "GPU 0"
-    else:
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
-        os.environ.pop("NN_NUM_WORKERS", None)
-        _device_label = "CPU"
-
+        torch.cuda.set_device(0)
+        os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+    os.environ["NN_NUM_WORKERS"] = "0"
     os.environ["_GRID_N_WORKERS"] = "1"
 
-    # ── Silence pipeline per-epoch INFO scroll ─────────────────────────────
     logging.getLogger("Neural_Networks.models.shared.pipeline").setLevel(logging.WARNING)
     logging.getLogger("Neural_Networks").setLevel(logging.WARNING)
     warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
-    log.info(
-        "Sequential mode — device=%s  threads=%d  %d trials",
-        _device_label, plan.torch_threads, total,
-    )
-
-    # Late import after CUDA_VISIBLE_DEVICES is set
     from Neural_Networks.models.shared.pipeline import TrainJob, run_training
     from Neural_Networks.models.shared.strategies import (
         PLAIN_STRATEGY, PHYSICS_REG_STRATEGY, RESIDUAL_STRATEGY,
     )
-    _strategy_map = {
-        "fnn":      PLAIN_STRATEGY,
-        "physreg":  PHYSICS_REG_STRATEGY,
-        "residual": RESIDUAL_STRATEGY,
-    }
+    strategy_map = {"fnn": PLAIN_STRATEGY, "physreg": PHYSICS_REG_STRATEGY, "residual": RESIDUAL_STRATEGY}
 
-    _w = len(str(total))   # field width for trial counter
+    total = len(trials)
+    n_ok = n_skip = n_fail = 0
+    w = len(str(total))
 
     for idx, trial in enumerate(trials, 1):
         arch        = trial["arch"]
@@ -973,45 +502,30 @@ def _run_sequential(
         os.makedirs(models_dir, exist_ok=True)
         desc = _hp_desc(arch, hp)
 
-        # ── Memory guard ───────────────────────────────────────────────────
         _wait_for_memory(log)
 
-        # ── Skip-existing check ────────────────────────────────────────────
         if SKIP_EXISTING and _find_existing_run(Path(models_dir), model_type, hp):
             n_skip += 1
-            tqdm.write(f"  [SKIP]  {idx:{_w}}/{total}  {desc}")
+            tqdm.write(f"  [SKIP]  {idx:{w}}/{total}  {desc}")
             continue
 
-        # ── Hardware HP overrides ──────────────────────────────────────────
-        hp["torch_compile"]      = plan.use_compile and cuda_ok
-        hp["torch_compile_mode"] = plan.compile_mode
+        hp["torch_compile"]      = False
+        hp["torch_compile_mode"] = "default"
 
-        # ── Per-trial epoch progress bar ───────────────────────────────────
-        epochs_total = int(hp.get("epochs", 5000))
-        bar_desc = f"[{idx:{_w}}/{total}] {desc}"
-        inner_bar = tqdm(
+        epochs_total = int(hp.get("epochs", 1000))
+        bar = tqdm(
             total=epochs_total,
-            desc=bar_desc,
+            desc=f"[{idx:{w}}/{total}] {desc}",
             unit="ep",
             leave=True,
             dynamic_ncols=True,
-            bar_format=(
-                "{desc}  "
-                "{bar}  "
-                "{n_fmt}/{total_fmt} ep"
-                "  {postfix}"
-            ),
+            bar_format="{desc}  {bar}  {n_fmt}/{total_fmt} ep  {postfix}",
         )
-        _last_epoch = [0]
+        last_epoch = [0]
 
         def _cb(
-            epoch: int,
-            total_ep: int,
-            val_rmse: float,
-            pat_ctr: int,
-            pat_max: int,
-            _bar: tqdm = inner_bar,
-            _last: list = _last_epoch,
+            epoch: int, total_ep: int, val_rmse: float, pat_ctr: int, pat_max: int,
+            _bar: tqdm = bar, _last: list = last_epoch,
         ) -> None:
             delta = epoch - _last[0]
             if delta > 0:
@@ -1029,7 +543,7 @@ def _run_sequential(
             model_type=model_type,
             save_subdir=save_subdir,
             hp=hp,
-            strategy=_strategy_map[arch],
+            strategy=strategy_map[arch],
             run_help=run_help,
         )
 
@@ -1043,49 +557,741 @@ def _run_sequential(
             error_msg = f"{exc}\n{traceback.format_exc()}"
             status    = "error"
         finally:
-            inner_bar.close()
+            bar.close()
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            gc.collect()
 
         elapsed = time.time() - t_start
         eta     = (elapsed / idx) * (total - idx) if idx > 0 else 0.0
-
         if status == "ok":
             n_ok += 1
-            tqdm.write(
-                f"  [ OK ]  {idx:{_w}}/{total}  {desc}"
-                f"  elapsed={_fmt_time(elapsed)}  ETA={_fmt_time(eta)}"
-            )
+            tqdm.write(f"  [ OK ]  {idx:{w}}/{total}  {desc}  elapsed={_fmt_time(elapsed)}  ETA={_fmt_time(eta)}")
         elif status == "failed":
             n_fail += 1
-            tqdm.write(f"  [FAIL]  {idx:{_w}}/{total}  {desc}  (run_training returned non-zero)")
+            tqdm.write(f"  [FAIL]  {idx:{w}}/{total}  {desc}  (run_training returned non-zero)")
         else:
             n_fail += 1
-            tqdm.write(f"  [ERR ]  {idx:{_w}}/{total}  {desc}\n" + error_msg[:400])
+            tqdm.write(f"  [ERR ]  {idx:{w}}/{total}  {desc}\n" + error_msg[:400])
 
     return n_ok, n_skip, n_fail
 
 
 # ============================================================================
-# ── MAIN ORCHESTRATOR ────────────────────────────────────────────────────────
+# ── PARALLEL WORKER ──────────────────────────────────────────────────────────
+#
+# Under the *spawn* start method the module is re-imported in each child, so
+# CUDA-heavy libs MUST NOT be imported at module top.  Queues cannot be passed
+# as ``apply_async`` args under spawn (pickle restriction), so the Pool
+# initializer caches the shared progress queue in a module global.
+# ============================================================================
+
+_POOL_PROGRESS_QUEUE: "mp.Queue | None" = None
+
+
+def _pool_init(progress_queue: "mp.Queue") -> None:
+    """Pool initializer: cache the shared progress queue in a module global."""
+    global _POOL_PROGRESS_QUEUE
+    _POOL_PROGRESS_QUEUE = progress_queue
+    # Silence worker-process logging noise.
+    warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
+    for name in (
+        "", "Neural_Networks", "Neural_Networks.loader",
+        "Neural_Networks.models.shared.pipeline", "Neural_Networks.robot_physics",
+    ):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+def _run_one_trial(
+    trial: dict[str, Any],
+    worker_slot: int,
+    threads_per_worker: int,
+) -> dict[str, Any]:
+    """Run a single trial in a fresh worker process.
+
+    Must set ``CUDA_VISIBLE_DEVICES`` and thread counts BEFORE importing torch,
+    so this function does its imports lazily inside the body.
+    """
+    q = _POOL_PROGRESS_QUEUE
+    if q is None:
+        raise RuntimeError("_pool_init did not run — progress queue missing")
+
+    arch        = trial["arch"]
+    model_type  = trial["model_type"]
+    save_subdir = trial["save_subdir"]
+    run_help    = trial["run_help"]
+    hp          = dict(trial["hp"])
+    models_dir  = os.path.join(MODELS_DIR_ROOT, save_subdir)
+    os.makedirs(models_dir, exist_ok=True)
+
+    # Pool workers are daemonic — cannot spawn DataLoader worker children.
+    os.environ["NN_NUM_WORKERS"] = "0"
+    # Single-GPU laptop: every worker targets GPU 0.
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+    try:
+        import torch
+
+        torch.set_num_threads(int(threads_per_worker))
+        torch.set_num_interop_threads(max(1, int(threads_per_worker) // 2))
+        if torch.cuda.is_available():
+            torch.set_float32_matmul_precision("high")
+
+        # Skip-existing inside the worker — cheap, avoids redundant data load.
+        if SKIP_EXISTING and _find_existing_run(Path(models_dir), model_type, hp):
+            q.put(("done", worker_slot, "skip"))
+            return {"status": "skipped", "arch": arch, "hp": hp}
+
+        # torch.compile is net-negative on short local runs.
+        hp["torch_compile"]      = False
+        hp["torch_compile_mode"] = "default"
+
+        # Late imports: don't touch CUDA libs at module level.
+        from Neural_Networks.models.shared.pipeline import TrainJob, run_training
+        from Neural_Networks.models.shared.strategies import (
+            PLAIN_STRATEGY, PHYSICS_REG_STRATEGY, RESIDUAL_STRATEGY,
+        )
+        strategy_map = {"fnn": PLAIN_STRATEGY, "physreg": PHYSICS_REG_STRATEGY, "residual": RESIDUAL_STRATEGY}
+
+        job = TrainJob(
+            run_dir=TRAIN_DATA_RUN_DIR,
+            models_dir=models_dir,
+            registry_file=REGISTRY_FILE,
+            model_type=model_type,
+            save_subdir=save_subdir,
+            hp=hp,
+            strategy=strategy_map[arch],
+            run_help=run_help,
+        )
+
+        q.put(("start", worker_slot, _hp_desc(arch, hp), int(hp.get("epochs", 1000))))
+
+        def _cb(epoch: int, total_ep: int, val_rmse: float, pat_ctr: int, pat_max: int) -> None:
+            q.put(("progress", worker_slot, int(epoch), int(total_ep),
+                   float(val_rmse), int(pat_ctr), int(pat_max)))
+
+        rc = run_training(job, progress_callback=_cb)
+        status = "ok" if rc == 0 else "failed"
+        q.put(("done", worker_slot, status))
+        return {"status": status, "arch": arch, "hp": hp}
+
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        if _POOL_PROGRESS_QUEUE is not None:
+            _POOL_PROGRESS_QUEUE.put(("done", worker_slot, "error"))
+        return {"status": "error", "arch": arch, "hp": hp, "error": f"{exc}\n{tb}"}
+
+    finally:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
+
+
+# ============================================================================
+# ── TUI STATE + DASHBOARD (rich-based) ───────────────────────────────────────
+# ============================================================================
+
+@dataclass
+class _SlotState:
+    slot: int
+    hp_desc: str = ""
+    arch: str = ""
+    epoch: int = 0
+    total_ep: int = 1
+    val_rmse: float = float("nan")
+    pat_ctr: int = 0
+    pat_max: int = 50
+    started_at: float | None = None
+    status: str = "waiting"   # waiting | running | done
+
+
+@dataclass
+class _Result:
+    n: int
+    arch: str
+    config: str
+    status: str               # ok | skip | fail | err
+    rmse: float | None
+    elapsed: float
+
+
+@dataclass
+class _TUIState:
+    pool_size: int
+    total_trials: int
+    threads_per_worker: int
+    device_label: str
+    slots: list[_SlotState] = field(default_factory=list)
+    in_flight: int = 0
+    pending: int = 0
+    completed: int = 0
+    ok: int = 0
+    skip: int = 0
+    fail: int = 0
+    free_vram_gb:  float = 0.0
+    total_vram_gb: float = 0.0
+    free_ram_gb:   float = 0.0
+    total_ram_gb:  float = 0.0
+    results: deque = field(default_factory=lambda: deque(maxlen=8))
+    t_start: float = 0.0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+_BLOCK_CHARS = " ▏▎▍▌▋▊▉█"
+
+
+def _gauge(used: float, total: float, width: int = 24) -> str:
+    """Render a fractional unicode-block gauge."""
+    if total <= 0:
+        return " " * width
+    frac = max(0.0, min(1.0, used / total))
+    units = frac * width
+    full = int(units)
+    part_idx = int((units - full) * (len(_BLOCK_CHARS) - 1))
+    part = _BLOCK_CHARS[part_idx] if full < width else ""
+    return "█" * full + part + " " * max(0, width - full - (1 if part else 0))
+
+
+def _fmt_hms(sec: float) -> str:
+    sec = max(0, int(sec))
+    return f"{sec//3600:d}:{(sec%3600)//60:02d}:{sec%60:02d}"
+
+
+def _fmt_mmss(sec: float) -> str:
+    sec = max(0, int(sec))
+    return f"{sec//60:02d}:{sec%60:02d}"
+
+
+def _short_config(hp: dict) -> str:
+    """Compact HP string for dashboard tables."""
+    frac = hp.get("data_train_fraction", "?")
+    seed = hp.get("seed", "?")
+    extra = ""
+    if "physics_weight" in hp:
+        extra = f" pw={hp['physics_weight']}"
+    elif "alpha_reg_weight" in hp:
+        extra = f" arw={hp['alpha_reg_weight']}"
+    return f"frac={frac} seed={seed}{extra}"
+
+
+def _use_rich() -> bool:
+    """Whether to render the live dashboard (TTY only)."""
+    try:
+        return bool(sys.stdout.isatty() and sys.stderr.isatty()
+                    and os.environ.get("TERM") not in ("", "dumb"))
+    except Exception:
+        return False
+
+
+def _render_dashboard(state: _TUIState) -> Any:
+    """Build the rich Layout for the current TUI state.  Reads under lock."""
+    from rich.layout import Layout
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from rich.align import Align
+
+    with state.lock:
+        # Snapshot every field we need so rendering is lock-free after here.
+        pool_size   = state.pool_size
+        total       = state.total_trials
+        tpw         = state.threads_per_worker
+        device      = state.device_label
+        in_flight   = state.in_flight
+        pending     = state.pending
+        completed   = state.completed
+        ok_n        = state.ok
+        skip_n      = state.skip
+        fail_n      = state.fail
+        free_vram   = state.free_vram_gb
+        total_vram  = state.total_vram_gb
+        free_ram    = state.free_ram_gb
+        total_ram   = state.total_ram_gb
+        slots       = [
+            _SlotState(
+                slot=s.slot, hp_desc=s.hp_desc, arch=s.arch,
+                epoch=s.epoch, total_ep=s.total_ep, val_rmse=s.val_rmse,
+                pat_ctr=s.pat_ctr, pat_max=s.pat_max,
+                started_at=s.started_at, status=s.status,
+            )
+            for s in state.slots
+        ]
+        results     = list(state.results)
+        t_start     = state.t_start
+
+    # ── Header ──────────────────────────────────────────────────────────────
+    header = Text.assemble(
+        ("Torque Grid Search", "bold cyan"),
+        "   ARCH=", (str(ARCH), "bold"),
+        f"   total={total}   ",
+        (f"pool_size={pool_size}", "bold"),
+        f"   threads/worker={tpw}   device={device}",
+    )
+    header_panel = Panel(header, border_style="cyan", padding=(0, 1))
+
+    # ── Resources ───────────────────────────────────────────────────────────
+    vram_used = max(0.0, total_vram - free_vram)
+    ram_used  = max(0.0, total_ram  - free_ram)
+    vram_pct  = (vram_used / total_vram * 100) if total_vram > 0 else 0.0
+    ram_pct   = (ram_used  / total_ram  * 100) if total_ram  > 0 else 0.0
+
+    def _gauge_style(pct: float) -> str:
+        if pct >= 85: return "bold red"
+        if pct >= 65: return "yellow"
+        return "green"
+
+    res_tbl = Table.grid(padding=(0, 1), expand=True)
+    res_tbl.add_column(style="dim", width=6, no_wrap=True)
+    res_tbl.add_column(width=26, no_wrap=True)
+    res_tbl.add_column(no_wrap=True)
+    res_tbl.add_row(
+        "VRAM",
+        Text(_gauge(vram_used, total_vram, 24), style=_gauge_style(vram_pct)),
+        f"{vram_used:5.2f} / {total_vram:5.2f} GB  ({free_vram:4.2f} free, reserve {VRAM_RESERVE_GB:.2f})",
+    )
+    res_tbl.add_row(
+        "RAM",
+        Text(_gauge(ram_used, total_ram, 24), style=_gauge_style(ram_pct)),
+        f"{ram_used:5.2f} / {total_ram:5.2f} GB  ({free_ram:4.2f} free, reserve {RAM_RESERVE_GB:.2f})",
+    )
+
+    counts = Text.assemble(
+        f"in-flight ",
+        (f"{in_flight:>2d}", "bold cyan"),
+        "     pending ",
+        (f"{pending:>3d}", "bold"),
+        "     completed ",
+        (f"{completed:>3d}", "bold"),
+        "     ",
+        ("OK ",   "bold"), (f"{ok_n:>2d}",   "bold green"),
+        "   ", ("SKIP ", "bold"), (f"{skip_n:>2d}", "bold yellow"),
+        "   ", ("FAIL ", "bold"), (f"{fail_n:>2d}", "bold red"),
+    )
+
+    res_outer = Table.grid(expand=True)
+    res_outer.add_row(res_tbl)
+    res_outer.add_row(counts)
+    resources_panel = Panel(res_outer, title="resources (live)", border_style="blue", padding=(0, 1))
+
+    # ── Active trials (two lines per slot) ──────────────────────────────────
+    act = Table.grid(padding=(0, 0), expand=True)
+    act.add_column()
+
+    now = time.time()
+    first = True
+    for s in slots:
+        if not first:
+            act.add_row("")   # visual separator between slots
+        first = False
+
+        tag = f"slot {s.slot+1}/{pool_size}"
+        if s.status == "running":
+            bar = _gauge(s.epoch, max(1, s.total_ep), 28)
+            elapsed = now - s.started_at if s.started_at else 0.0
+            eta = (elapsed / s.epoch) * (s.total_ep - s.epoch) if s.epoch > 0 else 0.0
+            rmse_str = f"{s.val_rmse:.4f}" if not math.isnan(s.val_rmse) else "  —"
+            # Strip the arch prefix from hp_desc — we render arch in its own column.
+            cfg = s.hp_desc
+            if s.arch and cfg.lstrip().startswith(s.arch):
+                cfg = cfg.lstrip()[len(s.arch):].lstrip()
+            line1 = Text.assemble(
+                (f"{tag}  ", "dim"),
+                (f"{s.arch:<9}", "cyan"),
+                f"{cfg[:32]:<32}  ",
+                (bar, "cyan"),
+                f"  {s.epoch:>4d}/{s.total_ep:<4d}",
+            )
+            line2 = Text.assemble(
+                "            ",
+                ("val_rmse=", "dim"), f"{rmse_str}  ",
+                ("pat=",      "dim"), f"{s.pat_ctr:>2d}/{s.pat_max:<2d}  ",
+                ("elapsed ",  "dim"), _fmt_mmss(elapsed),
+                ("   eta ",   "dim"), _fmt_mmss(eta),
+            )
+            act.add_row(line1)
+            act.add_row(line2)
+        else:
+            line1 = Text.assemble((f"{tag}  ", "dim"), ("waiting ...", "dim"))
+            act.add_row(line1)
+            act.add_row(Text("", style="dim"))
+    active_panel = Panel(act, title="active trials", border_style="cyan", padding=(0, 1))
+
+    # ── Overall progress ────────────────────────────────────────────────────
+    overall_bar_w = 40
+    overall_bar = _gauge(completed, max(1, total), overall_bar_w)
+    elapsed_s = now - t_start
+    avg_per = elapsed_s / completed if completed > 0 else 0.0
+    eta_s = avg_per * (total - completed) if completed > 0 else 0.0
+    tp_str = f"{avg_per/60:.2f} min/trial" if completed > 0 else "—"
+    overall_inner = Table.grid(expand=True)
+    overall_inner.add_column(width=overall_bar_w + 2, no_wrap=True)
+    overall_inner.add_column(no_wrap=True)
+    overall_inner.add_row(
+        Text(overall_bar, style="bold green"),
+        f"  {completed} / {total} trials",
+    )
+    overall_inner.add_row(
+        f"  elapsed {_fmt_hms(elapsed_s):>8s}    eta {_fmt_hms(eta_s):>8s}    throughput {tp_str}",
+        "",
+    )
+    overall_panel = Panel(overall_inner, title="overall progress", border_style="green", padding=(0, 1))
+
+    # ── Recent results ──────────────────────────────────────────────────────
+    hist = Table(expand=True, show_edge=False, pad_edge=False, padding=(0, 1))
+    hist.add_column("#",        width=4,  justify="right", style="dim")
+    hist.add_column("arch",     width=9,  no_wrap=True)
+    hist.add_column("config",   width=28, no_wrap=True)
+    hist.add_column("result",   width=6,  justify="center")
+    hist.add_column("rmse",     width=8,  justify="right")
+    hist.add_column("elapsed",  justify="right")
+    if not results:
+        hist.add_row("—", "", "", "", "", "")
+    for r in reversed(results):
+        style = {"ok": "green", "skip": "yellow", "fail": "red", "err": "red"}.get(r.status, "")
+        label = {"ok": "OK", "skip": "SKIP", "fail": "FAIL", "err": "ERR"}.get(r.status, r.status.upper())
+        hist.add_row(
+            str(r.n),
+            Text(r.arch, style="cyan"),
+            r.config,
+            Text(label, style=style),
+            f"{r.rmse:.4f}" if r.rmse is not None else "—",
+            _fmt_hms(r.elapsed),
+        )
+    history_panel = Panel(hist, title="recent results (last 8)", border_style="magenta", padding=(0, 1))
+
+    # ── Assemble layout ─────────────────────────────────────────────────────
+    layout = Layout()
+    # 2 content lines per slot + 1 separator between slots, plus 2 chrome lines.
+    active_h = 2 + 2 * len(slots) + max(0, len(slots) - 1)
+    history_h = 3 + max(len(results), 1)        # chrome + header + rows
+    layout.split_column(
+        Layout(header_panel,    name="header",    size=3),
+        Layout(resources_panel, name="resources", size=6),
+        Layout(active_panel,    name="active",    size=active_h),
+        Layout(overall_panel,   name="overall",   size=5),
+        Layout(history_panel,   name="history",   size=min(12, history_h)),
+    )
+    return layout
+
+
+class _DashboardRenderable:
+    """rich ``__rich__`` hook so ``Live`` auto-refresh pulls live state."""
+    def __init__(self, state: _TUIState):
+        self.state = state
+
+    def __rich__(self) -> Any:
+        return _render_dashboard(self.state)
+
+
+# ============================================================================
+# ── PARALLEL RUNNER (dynamic admission, rich dashboard) ──────────────────────
+# ============================================================================
+
+def _run_parallel_dynamic(
+    trials: list[dict[str, Any]],
+    pool_size: int,
+    threads_per_worker: int,
+    device_label: str,
+    log: logging.Logger,
+    t_start: float,
+) -> tuple[int, int, int]:
+    """Submit trials while live free VRAM + RAM permit.  No hardcoded N.
+
+    Renders a live rich dashboard on TTY; falls back to periodic plain status
+    lines when stdout/stderr are redirected.
+    """
+    total = len(trials)
+
+    # One-time measurement of the per-process CUDA context overhead.
+    cuda_ctx_gb = _measure_cuda_ctx_gb()
+    log.info("CUDA ctx overhead (per worker): %.2f GB", cuda_ctx_gb)
+
+    # Per-trial estimates — different HPs will differ in future grids.
+    estimates = [_estimate_trial_mem(t["hp"], t["arch"], cuda_ctx_gb) for t in trials]
+    vram_max = max(e[0] for e in estimates)
+    vram_min = min(e[0] for e in estimates)
+    ram_max  = max(e[1] for e in estimates)
+    log.info("Per-trial estimate: vram∈[%.2f, %.2f] GB  ram_max=%.2f GB", vram_min, vram_max, ram_max)
+
+    # Largest-first: big trials slot in when VRAM is cold.
+    pending: list[tuple[dict, tuple[float, float]]] = sorted(
+        zip(trials, estimates), key=lambda x: -x[1][0]
+    )
+
+    # ── Shared dashboard state ──────────────────────────────────────────────
+    import psutil as _ps
+    _total_ram_gb = _ps.virtual_memory().total / 1e9
+    state = _TUIState(
+        pool_size=pool_size,
+        total_trials=total,
+        threads_per_worker=threads_per_worker,
+        device_label=device_label,
+        slots=[_SlotState(slot=i) for i in range(pool_size)],
+        pending=total,
+        total_vram_gb=_query_total_vram_gb() or 0.0,
+        total_ram_gb=_total_ram_gb,
+        t_start=t_start,
+    )
+    state.free_vram_gb = _query_free_vram_gb()
+    state.free_ram_gb  = _query_free_ram_gb()
+
+    ctx = mp.get_context("spawn")
+    progress_q: mp.Queue = ctx.Queue()
+
+    # ── Drain thread: queue messages → dashboard state ──────────────────────
+    stop_event = threading.Event()
+
+    def _drain() -> None:
+        while not stop_event.is_set():
+            try:
+                msg = progress_q.get(timeout=0.5)
+            except Exception:
+                continue
+            if msg is None:
+                return
+            kind, slot = msg[0], int(msg[1])
+            if not (0 <= slot < pool_size):
+                continue
+            with state.lock:
+                s = state.slots[slot]
+                if kind == "start":
+                    _, _, desc, epochs_total = msg
+                    s.hp_desc   = str(desc)
+                    s.arch      = str(desc).split()[0] if desc else ""
+                    s.epoch     = 0
+                    s.total_ep  = max(1, int(epochs_total))
+                    s.val_rmse  = float("nan")
+                    s.pat_ctr   = 0
+                    s.pat_max   = 50
+                    s.started_at = time.time()
+                    s.status    = "running"
+                elif kind == "progress":
+                    _, _, epoch, total_ep, val_rmse, pat_ctr, pat_max = msg
+                    s.epoch    = int(epoch)
+                    s.total_ep = max(1, int(total_ep))
+                    s.val_rmse = float(val_rmse)
+                    s.pat_ctr  = int(pat_ctr)
+                    s.pat_max  = int(pat_max)
+                elif kind == "done":
+                    s.status = "waiting"   # result row added by main-thread reaper
+
+    drain_thread = threading.Thread(target=_drain, daemon=True)
+    drain_thread.start()
+
+    # ── Resource poller: live VRAM/RAM gauges at 1 Hz ───────────────────────
+    def _poll_resources() -> None:
+        while not stop_event.is_set():
+            fv = _query_free_vram_gb()
+            fr = _query_free_ram_gb()
+            with state.lock:
+                state.free_vram_gb = fv
+                state.free_ram_gb  = fr
+            stop_event.wait(1.0)
+
+    poller_thread = threading.Thread(target=_poll_resources, daemon=True)
+    poller_thread.start()
+
+    # ── Fallback ticker (non-TTY): periodic plain status line ───────────────
+    use_rich_ui = _use_rich()
+
+    def _fallback_ticker() -> None:
+        while not stop_event.is_set():
+            with state.lock:
+                msg = (
+                    f"[{_fmt_hms(time.time() - state.t_start)}] "
+                    f"done={state.completed}/{state.total_trials}  "
+                    f"in-flight={state.in_flight}  pending={state.pending}  "
+                    f"vram={max(0.0, state.total_vram_gb - state.free_vram_gb):.2f}/"
+                    f"{state.total_vram_gb:.2f} GB  "
+                    f"ram={max(0.0, state.total_ram_gb - state.free_ram_gb):.2f}/"
+                    f"{state.total_ram_gb:.2f} GB  "
+                    f"ok={state.ok} skip={state.skip} fail={state.fail}"
+                )
+            print(msg, flush=True)
+            stop_event.wait(10.0)
+
+    fallback_thread: threading.Thread | None = None
+    if not use_rich_ui:
+        fallback_thread = threading.Thread(target=_fallback_ticker, daemon=True)
+        fallback_thread.start()
+
+    # ── Admission loop primitives ───────────────────────────────────────────
+    in_flight_map: dict[Any, tuple[dict, tuple[float, float], int, float]] = {}
+    free_slots: list[int] = list(range(pool_size))
+
+    def _set_counts() -> None:
+        with state.lock:
+            state.in_flight = len(in_flight_map)
+            state.pending   = len(pending)
+
+    def _reap_completed() -> None:
+        for ar in [a for a in list(in_flight_map) if a.ready()]:
+            trial, _est, slot, submitted_at = in_flight_map.pop(ar)
+            free_slots.append(slot)
+            try:
+                result = ar.get(timeout=1.0)
+            except Exception as exc:
+                result = {"status": "error", "arch": trial["arch"], "hp": trial["hp"], "error": str(exc)}
+            status = result.get("status", "?")
+            # Normalise status into dashboard codes
+            code = {
+                "ok": "ok", "skipped": "skip", "failed": "fail", "error": "err",
+            }.get(status, "err")
+            elapsed_trial = time.time() - submitted_at
+            rmse = None  # rmse for the run is not returned via result dict; we surface "—"
+            with state.lock:
+                state.completed += 1
+                if code == "ok":   state.ok   += 1
+                elif code == "skip": state.skip += 1
+                else:              state.fail += 1
+                state.results.append(_Result(
+                    n=state.completed,
+                    arch=trial["arch"],
+                    config=_short_config(trial["hp"]),
+                    status=code,
+                    rmse=rmse,
+                    elapsed=elapsed_trial,
+                ))
+                # Reset the slot that just freed up
+                if 0 <= slot < pool_size:
+                    st = state.slots[slot]
+                    st.status = "waiting"
+                    st.hp_desc = ""
+                    st.arch = ""
+                    st.epoch = 0
+                    st.total_ep = 1
+                    st.val_rmse = float("nan")
+                    st.pat_ctr = 0
+                    st.started_at = None
+            _set_counts()
+
+    def _try_admit_one(pool) -> bool:
+        if not pending or not free_slots:
+            return False
+        trial, (vram_est, ram_est) = pending[0]      # largest-first
+        with state.lock:
+            vram_free = state.free_vram_gb
+            ram_free  = state.free_ram_gb
+        if (vram_free >= vram_est + VRAM_RESERVE_GB
+                and ram_free >= ram_est + RAM_RESERVE_GB):
+            pending.pop(0)
+            slot = free_slots.pop(0)
+            ar = pool.apply_async(_run_one_trial, (trial, slot, threads_per_worker))
+            in_flight_map[ar] = (trial, (vram_est, ram_est), slot, time.time())
+            _set_counts()
+            return True
+        # Largest didn't fit. If pool is empty, try smallest.
+        if not in_flight_map:
+            pending.sort(key=lambda x: x[1][0])
+            trial, (vram_est, ram_est) = pending[0]
+            if (vram_free >= vram_est + VRAM_RESERVE_GB
+                    and ram_free >= ram_est + RAM_RESERVE_GB):
+                pending.pop(0)
+                slot = free_slots.pop(0)
+                ar = pool.apply_async(_run_one_trial, (trial, slot, threads_per_worker))
+                in_flight_map[ar] = (trial, (vram_est, ram_est), slot, time.time())
+                pending.sort(key=lambda x: -x[1][0])
+                _set_counts()
+                return True
+            pending.sort(key=lambda x: -x[1][0])
+            log.warning(
+                "tight resources — free vram=%.2f ram=%.2f; smallest trial needs %.2f/%.2f GB. sleeping %.1fs",
+                vram_free, ram_free, vram_est, ram_est, TIGHT_SLEEP_SEC,
+            )
+            time.sleep(TIGHT_SLEEP_SEC)
+        return False
+
+    _set_counts()
+
+    # ── Pool + dashboard lifecycle ──────────────────────────────────────────
+    pool = ctx.Pool(
+        processes=pool_size,
+        maxtasksperchild=1,
+        initializer=_pool_init,
+        initargs=(progress_q,),
+    )
+
+    live_cm = None
+    if use_rich_ui:
+        from rich.console import Console
+        from rich.live import Live
+        console = Console()
+        live_cm = Live(
+            _DashboardRenderable(state),
+            console=console,
+            refresh_per_second=4,
+            screen=False,
+            transient=False,
+        )
+        live_cm.__enter__()
+
+    try:
+        # Initial fill
+        while pending and free_slots:
+            if not _try_admit_one(pool):
+                break
+
+        # Main admission + reap loop
+        while pending or in_flight_map:
+            _reap_completed()
+            if pending and free_slots:
+                admitted = _try_admit_one(pool)
+                if not admitted and in_flight_map:
+                    time.sleep(ADMISSION_POLL_SEC)
+            elif in_flight_map:
+                time.sleep(ADMISSION_POLL_SEC)
+
+    except KeyboardInterrupt:
+        log.warning("KeyboardInterrupt — terminating worker pool ...")
+        pool.terminate()
+        pool.join()
+        raise
+    else:
+        pool.close()
+        pool.join()
+    finally:
+        stop_event.set()
+        progress_q.put(None)
+        drain_thread.join(timeout=3)
+        poller_thread.join(timeout=3)
+        if fallback_thread is not None:
+            fallback_thread.join(timeout=3)
+        if live_cm is not None:
+            try:
+                live_cm.__exit__(None, None, None)
+            except Exception:
+                pass
+
+    with state.lock:
+        return state.ok, state.skip, state.fail
+
+
+# ============================================================================
+# ── MAIN ─────────────────────────────────────────────────────────────────────
 # ============================================================================
 
 def main() -> None:
-    import torch  # not at module top — workers must not import torch before their initializer sets ``CUDA_VISIBLE_DEVICES``.
-
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(message)s",
     )
     log = logging.getLogger("grid")
 
-    # ── Build trial list ─────────────────────────────────────────────────────
-    trials = _build_trials()
-    total  = len(trials)
+    trials      = _build_trials()
+    total       = len(trials)
     arch_counts = Counter(t["arch"] for t in trials)
 
-    # ── Header ──────────────────────────────────────────────────────────────
     log.info("=" * 72)
-    log.info("Torque Model  —  Hyperparameter Grid Search")
-    log.info("  MODE       : %s", MODE)
+    log.info("Torque Model  —  Local Grid Search (dynamic admission)")
     log.info("  ARCH       : %s", ARCH)
     log.info("  TOTAL      : %d trials", total)
     for a, cnt in sorted(arch_counts.items()):
@@ -1100,307 +1306,59 @@ def main() -> None:
         _print_combo_table(trials)
         return
 
-    # ── Create output directories ────────────────────────────────────────────
     for arch in _ARCH_META:
         _, save_subdir, _ = _ARCH_META[arch]
         os.makedirs(os.path.join(MODELS_DIR_ROOT, save_subdir), exist_ok=True)
     os.makedirs(os.path.join(MODELS_DIR_ROOT, "analysis"), exist_ok=True)
 
-    # ── Probe resources and build execution plan ─────────────────────────────
-    plan    = probe_resources(log, trials)
-    t_start = time.time()
+    # Probe capabilities (no CUDA context created in the main process).
+    cuda_ok = _query_cuda_available()
+    pool_size = _compute_pool_size(cuda_ok)
+    threads_per_worker = _compute_threads_per_worker(pool_size)
 
-    if plan.n_concurrent == 1:
-        # ── Sequential path: in-process, tqdm epoch bars per trial ──────────────
-        # Used for: CPU-only machines, or GPU with VRAM too tight for 2 trials.
-        n_ok, n_skip, n_fail = _run_sequential(trials, plan, log, t_start)
-
+    import psutil
+    cpu_phys = psutil.cpu_count(logical=False) or 2
+    free_ram_gb = _query_free_ram_gb()
+    if cuda_ok:
+        free_vram_gb  = _query_free_vram_gb()
+        total_vram_gb = _query_total_vram_gb()
+        # Short device label for the dashboard header.
+        try:
+            import subprocess as _sp
+            gpu_name = _sp.check_output(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                timeout=5,
+            ).decode().strip().split("\n")[0]
+        except Exception:
+            gpu_name = "CUDA GPU"
+        device_label = f"cuda:0 ({gpu_name}, {total_vram_gb:.1f} GB)"
+        log.info(
+            "device=%s  VRAM=%.1f/%.1f GB free   RAM=%.1f GB free   CPU=%d phys",
+            device_label, free_vram_gb, total_vram_gb, free_ram_gb, cpu_phys,
+        )
     else:
-        # ── Parallel path: dynamic admission control ─────────────────────────
-        # Budget is measured ONCE before any worker is spawned, so persistent
-        # idle-worker CUDA contexts don't shrink the budget between batches.
-        # Concurrency is purely budget-driven — no artificial floor or target
-        # count.  MAX_CONCURRENT is the only hard ceiling.
-        n_ok   = 0
-        n_skip = 0
-        n_fail = 0
+        device_label = "cpu"
+        log.info("device=cpu   RAM=%.1f GB free   CPU=%d phys", free_ram_gb, cpu_phys)
+    log.info("pool_size=%d   threads_per_worker=%d", pool_size, threads_per_worker)
 
-        import psutil as _psutil
-
-        # ── Static admission budgets (80% of free resources right now) ────────
-        if plan.n_gpus > 0:
-            vram_budget_gb = torch.cuda.mem_get_info(0)[0] / 1e9 * RESOURCE_TARGET
+    t_start = time.time()
+    try:
+        if pool_size <= 1:
+            n_ok, n_skip, n_fail = _run_sequential(trials, log, t_start)
         else:
-            vram_budget_gb = float("inf")
-        ram_budget_gb = _psutil.virtual_memory().available / 1e9 * RESOURCE_TARGET
-
-        # Pool size: hard cap is MAX_CONCURRENT; practical cap from resource est.
-        pool_size = min(MAX_CONCURRENT, plan.n_concurrent, total)
-
-        log.info(
-            "  Admission budget : VRAM=%.2f GB  RAM=%.2f GB  (%.0f%% of free)",
-            vram_budget_gb if vram_budget_gb < 1e9 else 0.0,
-            ram_budget_gb, RESOURCE_TARGET * 100,
-        )
-        log.info("  Worker pool size : %d", pool_size)
-
-        plan_dict = asdict(plan)
-        os.environ["_GRID_N_WORKERS"] = str(pool_size)
-
-        ctx: mp.context.SpawnContext = mp.get_context("spawn")
-        progress_queue: mp.Queue = ctx.Queue()
-        # One UI slot 0..pool_size-1 per concurrent trial; recycled when a run ends.
-        free_slots:     mp.Queue = ctx.Queue()
-        for _i in range(pool_size):
-            free_slots.put(_i)
-
-        log.info(
-            "Launching Pool — %d processes  maxtasksperchild=1  (%d GPU(s)) ...",
-            pool_size, plan.n_gpus,
-        )
-
-        # ── Per-slot tqdm bars ────────────────────────────────────────────────
-        _w = len(str(total))
-        slot_bars = [
-            tqdm(
-                total=1,
-                desc=f"[{i + 1}/{pool_size}] waiting...",
-                position=i,
-                leave=True,
-                dynamic_ncols=True,
-                bar_format="{desc}  {bar}  {n_fmt}/{total_fmt} ep  {postfix}",
+            n_ok, n_skip, n_fail = _run_parallel_dynamic(
+                trials, pool_size, threads_per_worker, device_label, log, t_start,
             )
-            for i in range(pool_size)
-        ]
-        done_bar = tqdm(
-            total=total,
-            desc="overall",
-            position=pool_size,
-            leave=True,
-            dynamic_ncols=True,
-            bar_format="{desc}  {bar}  {n_fmt}/{total_fmt} trials  [{elapsed}<{remaining}]  {postfix}",
-        )
+    except KeyboardInterrupt:
+        log.warning("Interrupted by user — partial results preserved.")
+        return
 
-        # ── Background drain thread ───────────────────────────────────────────
-        def _drain() -> None:
-            while True:
-                msg = progress_queue.get()
-                if msg is None:
-                    break
-                kind = msg[0]
-                slot = msg[1]
-                bar  = slot_bars[slot]
-                if kind == "start":
-                    _, slot, desc, total_ep = msg
-                    bar.reset(total=total_ep)
-                    bar.set_description_str(
-                        f"[{slot + 1}/{pool_size}] {desc[:62]}"
-                    )
-                    bar.set_postfix_str("starting...", refresh=True)
-                elif kind == "progress":
-                    _, slot, epoch, total_ep, val_rmse, pat_ctr, pat_max = msg
-                    delta = epoch - bar.n
-                    if delta > 0:
-                        bar.update(delta)
-                    bar.set_postfix_str(
-                        f"rmse={val_rmse:.4f} N·m  pat={pat_ctr}/{pat_max}",
-                        refresh=True,
-                    )
-                elif kind == "done":
-                    _, slot, status = msg
-                    mark = {"ok": "OK ", "skip": "SKIP", "failed": "FAIL", "error": "ERR"}.get(status, status)
-                    bar.set_postfix_str(f"→ {mark}", refresh=True)
-
-        drain_thread = threading.Thread(target=_drain, daemon=True)
-        drain_thread.start()
-
-        # ── Per-trial estimates; list sorted largest-VRAM-first ───────────────
-        trial_ests = [
-            _estimate_trial_mem(
-                t["hp"], t["arch"], plan.cuda_ctx_gb, plan.torch_base_ram_gb
-            )
-            for t in trials
-        ]
-        # Pending: list of (trial_dict, TrialMemEst), largest first so pop()
-        # from the end gives the smallest (used in deadlock guard).
-        pending: list = sorted(
-            zip(trials, trial_ests),
-            key=lambda x: x[1].vram_gb,
-            reverse=True,
-        )
-
-        # in_flight[0] = estimated VRAM in use, in_flight[1] = estimated RAM.
-        # Compared against the STATIC budgets; no real-time re-querying inside
-        # the loop so idle worker CUDA contexts don't shrink the budget.
-        in_flight = [0.0, 0.0]
-
-        def _try_fill(pool, submitted: dict) -> None:
-            """Move trials from *pending* into the pool; budget + free UI slots may cap."""
-            import queue as _q
-            still: list = []
-            idx = 0
-            n = len(pending)
-            while idx < n:
-                trial_t, est_t = pending[idx]
-                if (
-                    (in_flight[0] + est_t.vram_gb) <= vram_budget_gb
-                    and (in_flight[1] + est_t.ram_gb) <= ram_budget_gb
-                    and len(submitted) < pool_size
-                ):
-                    try:
-                        _slot = free_slots.get_nowait()
-                    except _q.Empty:
-                        still.extend(pending[idx:])
-                        break
-                    _ar = pool.apply_async(_run_one_trial, (trial_t, _slot, plan_dict))
-                    submitted[_ar] = (trial_t, est_t, _slot)
-                    in_flight[0] += est_t.vram_gb
-                    in_flight[1] += est_t.ram_gb
-                else:
-                    still.append((trial_t, est_t))
-                idx += 1
-            else:
-                pending[:] = still
-                return
-            pending[:] = still
-
-        def _process_result(
-            ares,
-            orig_trial: dict,
-            est_done: "TrialMemEst",
-            free_ui_slot: int,
-            done_n: int,
-            elapsed: float,
-        ) -> None:
-            in_flight[0] = max(0.0, in_flight[0] - est_done.vram_gb)
-            in_flight[1] = max(0.0, in_flight[1] - est_done.ram_gb)
-            free_slots.put(free_ui_slot)
-            eta = (elapsed / done_n) * (total - done_n) if done_n > 0 else 0.0
-            try:
-                result = ares.get()
-            except Exception as exc:
-                n_fail_ref[0] += 1
-                done_bar.update(1)
-                done_bar.set_postfix_str(
-                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]}",
-                    refresh=True,
-                )
-                tqdm.write(
-                    f"  [EXC ]  {orig_trial['arch']}  "
-                    f"{_hp_short(orig_trial['hp'])}  err={exc}"
-                )
-                return
-
-            status = result.get("status", "?")
-            gpu    = result.get("gpu_id", "?")
-            done_bar.update(1)
-
-            if status == "ok":
-                n_ok_ref[0] += 1
-                done_bar.set_postfix_str(
-                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]}",
-                    refresh=True,
-                )
-                tqdm.write(
-                    f"  [ OK ]  gpu={gpu}  {result['arch']}  "
-                    f"{_hp_short(result['hp'])}  "
-                    f"elapsed={_fmt_time(elapsed)}  ETA={_fmt_time(eta)}"
-                )
-            elif status == "skipped":
-                n_skip_ref[0] += 1
-                done_bar.set_postfix_str(
-                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]}",
-                    refresh=True,
-                )
-                tqdm.write(
-                    f"  [SKIP]  {result['arch']}  {_hp_short(result['hp'])}"
-                )
-            else:
-                n_fail_ref[0] += 1
-                done_bar.set_postfix_str(
-                    f"ok={n_ok_ref[0]} skip={n_skip_ref[0]} fail={n_fail_ref[0]}",
-                    refresh=True,
-                )
-                tqdm.write(
-                    f"  [FAIL]  gpu={gpu}  {result['arch']}  "
-                    f"{_hp_short(result['hp'])}  "
-                    f"err={result.get('error','?')[:200]}"
-                )
-
-        # Use single-element lists so nested closures can mutate them.
-        n_ok_ref   = [0]
-        n_skip_ref = [0]
-        n_fail_ref = [0]
-        done_n     = 0
-
-        with ctx.Pool(
-            processes=pool_size,
-            maxtasksperchild=1,
-            initializer=_pool_progress_init,
-            initargs=(progress_queue,),
-        ) as pool:
-            # AsyncResult → (trial_dict, TrialMemEst, ui_slot)
-            submitted: dict = {}
-
-            _try_fill(pool, submitted)
-
-            if not submitted and pending:
-                trial_t, est_t = pending.pop()   # smallest (end of sorted list)
-                log.warning(
-                    "Budget too tight — force-submitting smallest trial "
-                    "(est. vram=%.2f GB  ram=%.2f GB)",
-                    est_t.vram_gb, est_t.ram_gb,
-                )
-                _fslot = free_slots.get()
-                ar = pool.apply_async(_run_one_trial, (trial_t, _fslot, plan_dict))
-                submitted[ar] = (trial_t, est_t, _fslot)
-                in_flight[0] += est_t.vram_gb
-                in_flight[1] += est_t.ram_gb
-
-            while submitted:
-                _ready = [a for a in list(submitted.keys()) if a.ready()]
-                if not _ready:
-                    time.sleep(0.005)
-                else:
-                    for ar in _ready:
-                        o_t, est_d, fslot = submitted.pop(ar)
-                        done_n += 1
-                        elapsed = time.time() - t_start
-                        _process_result(ar, o_t, est_d, fslot, done_n, elapsed)
-                _try_fill(pool, submitted)
-                if not submitted and pending:
-                    trial_t, est_t = pending.pop()   # smallest
-                    log.warning(
-                        "Budget too tight — force-submitting smallest trial "
-                        "(est. vram=%.2f GB  ram=%.2f GB)",
-                        est_t.vram_gb, est_t.ram_gb,
-                    )
-                    _fslot = free_slots.get()
-                    ar = pool.apply_async(_run_one_trial, (trial_t, _fslot, plan_dict))
-                    submitted[ar] = (trial_t, est_t, _fslot)
-                    in_flight[0] += est_t.vram_gb
-                    in_flight[1] += est_t.ram_gb
-
-        n_ok   = n_ok_ref[0]
-        n_skip = n_skip_ref[0]
-        n_fail = n_fail_ref[0]
-
-        # Stop drain thread and close all bars cleanly.
-        progress_queue.put(None)
-        drain_thread.join(timeout=3)
-        for bar in slot_bars:
-            bar.close()
-        done_bar.close()
-
-    # ── Final summary ────────────────────────────────────────────────────────
-    elapsed_total = time.time() - t_start
+    elapsed = time.time() - t_start
     log.info("=" * 72)
-    log.info("Grid search complete in %s", _fmt_time(elapsed_total))
+    log.info("Grid search complete in %s", _fmt_time(elapsed))
     log.info("  OK=%d  Skipped=%d  Failed=%d  Total=%d", n_ok, n_skip, n_fail, total)
     log.info("Results saved to: %s", MODELS_DIR_ROOT)
-    log.info(
-        "Analyse results:  PYTHONPATH=. python -m Neural_Networks.analyze_models_grid"
-    )
+    log.info("Analyse results:  PYTHONPATH=. python -m Neural_Networks.analyze_models_grid")
     log.info("=" * 72)
 
 

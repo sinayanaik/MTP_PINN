@@ -1,40 +1,5 @@
 #!/usr/bin/env python3
-"""Scan grid-search trained models and produce a comprehensive performance report.
-
-This is the grid-search counterpart of ``analyze_models.py``.  It scans
-``Trained_Models_Grid/`` (instead of ``Trained_Models/``) and adds four
-grid-specific figures on top of the nine base figures:
-
-  Fig 10 — Top-K Leaderboard  (ranked table per architecture)
-  Fig 11 — HP Importance      (mean test RMSE per HP value, per architecture)
-  Fig 12 — HP Pair Heatmaps   (2-D RMSE heatmap for key HP pairs)
-  Fig 13 — Pareto Front       (test RMSE vs estimated parameter count)
-
-Base figures (identical logic to analyze_models.py):
-  Fig 1  — Training Dynamics (best per type)
-  Fig 2  — RMSE Comparison
-  Fig 3  — R² and Pearson ρ Comparison
-  Fig 4  — Per-Joint Heatmaps
-  Fig 5  — Multi-Metric Parallel Coordinates
-  Fig 6  — R² vs RMSE Scatter
-  Fig 7  — MAE and NRMSE Comparison
-  Fig 8  — EDR Physics Correction Magnitudes (skipped if no EDR models)
-  Fig 9  — Per-Joint R² and RMSE Breakdown
-
-Metrics are read from the correct held-out splits stored in metadata.yaml:
-  * ``test_metrics``  — test split (15 %)          → primary evaluation
-  * ``val_metrics``   — validation split (15 %)     → secondary evaluation
-  * ``metrics``       — checkpoint eval (combined)  → NOT used as final metric
-Train-RMSE is extracted from ``training_history.csv`` at the best-checkpoint
-epoch (epoch where ``val_rmse`` in the CSV is minimised).
-
-Usage (from repository root)::
-
-    PYTHONPATH=. python Neural_Networks/analyze_models_grid.py
-    PYTHONPATH=. python Neural_Networks/analyze_models_grid.py --models-dir path/to/Trained_Models_Grid
-    PYTHONPATH=. python Neural_Networks/analyze_models_grid.py --no-plot
-    PYTHONPATH=. python Neural_Networks/analyze_models_grid.py --top-k 5
-"""
+"""Scan grid-search trained models and produce a comprehensive performance report."""
 
 from __future__ import annotations
 
@@ -49,9 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib
+import matplotlib.ticker
 
-# Interactive windows: let matplotlib pick the best available backend.
-# On headless systems set MPLBACKEND=Agg in the environment, or pass --no-plot.
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
@@ -63,7 +27,6 @@ import yaml
 # ---------------------------------------------------------------------------
 
 _NN_ROOT = Path(__file__).resolve().parent
-# *** Grid-search output directory — differs from analyze_models.py ***
 DEFAULT_MODELS_DIR = str(_NN_ROOT / "Trained_Models_Grid")
 
 JOINT_NAMES = ["J1 (yaw)", "J2 (shoulder)", "J3 (elbow)", "J4 (wrist)", "J5 (wrist roll)"]
@@ -77,7 +40,18 @@ _TYPE_ABBREV: dict[str, str] = {
     "EDR": "EDR",
 }
 
-# HP keys to render in grid-specific figures (ordered for display)
+# Colorblind-safe Okabe-Ito palette
+_OKABE_ITO_PALETTE = [
+    "#E69F00",  # orange        -> BlackBoxFNN
+    "#56B4E9",  # sky blue      -> PhysicsRegularizedFNN
+    "#009E73",  # green         -> ResidualCorrectionFNN
+    "#F0E442",  # yellow
+    "#0072B2",  # blue
+    "#D55E00",  # vermillion
+    "#CC79A7",  # reddish purple
+    "#000000",  # black
+]
+
 _GRID_HP_KEYS_FNN:      list[str] = ["hidden_layers", "dropout", "learning_rate", "weight_decay", "batch_size", "activation"]
 _GRID_HP_KEYS_PHYSREG:  list[str] = ["hidden_layers", "dropout", "learning_rate", "batch_size", "physics_weight", "physics_warmup_fraction", "phi_lr_ratio"]
 _GRID_HP_KEYS_RESIDUAL: list[str] = ["hidden_layers", "dropout", "learning_rate", "weight_decay", "batch_size", "alpha_reg_weight"]
@@ -95,7 +69,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _setup_plot_style() -> None:
-    """Apply a clean, screen-friendly style to all subsequent figures."""
     plt.rcParams.update({
         "figure.dpi": 100,
         "figure.facecolor": "white",
@@ -109,14 +82,16 @@ def _setup_plot_style() -> None:
         "axes.grid.axis": "y",
         "grid.alpha": 0.40,
         "grid.color": "#c8c8c8",
-        "font.size": 10,
-        "axes.titlesize": 12,
-        "axes.labelsize": 11,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "DejaVu Serif", "serif"],
+        "font.size": 12,
+        "axes.titlesize": 13,
+        "axes.labelsize": 12,
+        "xtick.labelsize": 11,
+        "ytick.labelsize": 11,
         "legend.framealpha": 0.93,
         "legend.edgecolor": "#aaaaaa",
-        "legend.fontsize": 9,
+        "legend.fontsize": 10,
         "figure.constrained_layout.use": False,
     })
 
@@ -126,7 +101,6 @@ def _setup_plot_style() -> None:
 # ---------------------------------------------------------------------------
 
 def scan_trained_models(models_dir: str) -> list[dict[str, Any]]:
-    """Walk *models_dir* and collect every run that has a ``metadata.yaml``."""
     root = Path(models_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"Trained-models directory not found: {models_dir}")
@@ -159,7 +133,6 @@ def scan_trained_models(models_dir: str) -> list[dict[str, Any]]:
 def group_by_model_type(
     records: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Group records by ``model_type`` field (or parent folder name as fallback)."""
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for rec in records:
         mtype = rec.get("model_type") or Path(rec["_run_dir"]).parent.name
@@ -168,13 +141,14 @@ def group_by_model_type(
 
 
 # ---------------------------------------------------------------------------
-# Metric helpers  (read from correct val/test splits)
+# Metric helpers
 # ---------------------------------------------------------------------------
 
 def _get_split(rec: dict[str, Any], split: str) -> dict[str, Any]:
     key_map = {
         "val":        "val_metrics",
         "test":       "test_metrics",
+        "train":      "train_metrics",
         "checkpoint": "metrics",
     }
     return rec.get(key_map.get(split, f"{split}_metrics"), {}) or {}
@@ -249,6 +223,171 @@ def _best_epoch_info(
 
 
 # ---------------------------------------------------------------------------
+# Train metrics computation
+# ---------------------------------------------------------------------------
+
+def _compute_train_metrics(rec: dict[str, Any]) -> dict[str, Any]:
+    """Load model.pt, run inference on training split, compute full metrics.
+
+    Results cached to <run_dir>/train_metrics_cache.yaml.
+    Returns empty dict if model/data unavailable.
+    """
+    _CACHE_VERSION = 2
+
+    run_dir = Path(rec.get("_run_dir", ""))
+    cache_path = run_dir / "train_metrics_cache.yaml"
+
+    if cache_path.is_file():
+        try:
+            with open(cache_path) as f:
+                cached = yaml.safe_load(f)
+            if isinstance(cached, dict) and cached.get("_v") == _CACHE_VERSION:
+                return {k: v for k, v in cached.items() if k != "_v"}
+        except Exception:
+            pass
+
+    model_pt = run_dir / "model.pt"
+    if not model_pt.is_file():
+        logger.debug("No model.pt in %s — skipping train metrics.", run_dir)
+        return {}
+
+    data_run_dir = rec.get("data_run_dir", "")
+    if not data_run_dir or not Path(data_run_dir).is_dir():
+        logger.debug("data_run_dir missing/invalid for %s — skipping.", run_dir)
+        return {}
+
+    try:
+        import torch
+        from Neural_Networks.loader import RobotDataset
+        from Neural_Networks.models.torque_models import (
+            BlackBoxFNN, PhysicsRegularizedFNN, ResidualCorrectionFNN,
+        )
+    except ImportError as exc:
+        logger.debug("Cannot import torch/model modules: %s", exc)
+        return {}
+
+    try:
+        mtype = rec.get("model_type", "BlackBoxFNN")
+        hp = rec.get("hyperparams", {})
+        hidden_layers = hp.get("hidden_layers", [256, 512, 256])
+        dropout       = float(hp.get("dropout", 0.1))
+        activation    = str(hp.get("activation", "gelu"))
+
+        _cls_map = {
+            "BlackBoxFNN":           BlackBoxFNN,
+            "PhysicsRegularizedFNN": PhysicsRegularizedFNN,
+            "ResidualCorrectionFNN": ResidualCorrectionFNN,
+        }
+
+        # Load checkpoint and extract model state with correct key
+        ckpt = torch.load(str(model_pt), map_location="cpu", weights_only=False)
+        if not isinstance(ckpt, dict):
+            logger.debug("Checkpoint at %s is not a dict — skipping.", model_pt)
+            return {}
+        model_state = ckpt.get("model_state")
+        if model_state is None:
+            logger.debug(
+                "Key 'model_state' not found in %s (found keys: %s) — skipping.",
+                model_pt, list(ckpt.keys())[:8],
+            )
+            return {}
+
+        # Prefer hparams/model class stored in checkpoint (always in sync with saved weights)
+        ckpt_hp   = ckpt.get("hparams") or hp
+        ckpt_hl   = ckpt_hp.get("hidden_layers", hidden_layers)
+        ckpt_do   = float(ckpt_hp.get("dropout", dropout))
+        ckpt_act  = str(ckpt_hp.get("activation", activation))
+        cls_final = _cls_map.get(ckpt.get("model_class") or mtype)
+        if cls_final is None:
+            cls_final = _cls_map.get(mtype)
+        if cls_final is None:
+            return {}
+
+        model = cls_final(n_joints=N_JOINTS, hidden_layers=ckpt_hl,
+                          dropout=ckpt_do, activation=ckpt_act)
+        model.load_state_dict(model_state)  # strict=True to catch any weight mismatch
+        model.eval()
+
+        dataset = RobotDataset(data_run_dir, split="train", mode="pointwise", normalise=True)
+        # Prefer norm_stats from checkpoint (same source as training); fall back to dataset
+        ckpt_norm = ckpt.get("norm_stats", {})
+        if ckpt_norm and "mean_tau" in ckpt_norm:
+            mean_tau = np.asarray(ckpt_norm["mean_tau"], dtype=np.float32)
+            std_tau  = np.asarray(ckpt_norm["std_tau"],  dtype=np.float32).clip(min=1e-8)
+        else:
+            mean_tau = dataset.mean_tau
+            std_tau  = dataset.std_tau
+
+        all_preds: list[np.ndarray] = []
+        all_tgts:  list[np.ndarray] = []
+        batch_size = 2048
+        n = len(dataset)
+
+        with torch.no_grad():
+            for start in range(0, n, batch_size):
+                end = min(start + batch_size, n)
+                feat_list, tgt_list, phy_list = [], [], []
+                for i in range(start, end):
+                    f, t, p = dataset[i]
+                    feat_list.append(f); tgt_list.append(t); phy_list.append(p)
+                feat = torch.stack(feat_list)
+                tgt  = torch.stack(tgt_list)
+                phy  = torch.stack(phy_list)
+                pred_norm = model(feat, phy)
+                pred_phys = pred_norm.numpy() * std_tau + mean_tau
+                tgt_phys  = tgt.numpy()       * std_tau + mean_tau
+                all_preds.append(pred_phys)
+                all_tgts.append(tgt_phys)
+
+        pred_np = np.concatenate(all_preds, axis=0)
+        tgt_np  = np.concatenate(all_tgts,  axis=0)
+
+        rmse_j, r2_j, mae_j, nrmse_j, pearson_j = [], [], [], [], []
+        for j in range(N_JOINTS):
+            p_j = pred_np[:, j]; t_j = tgt_np[:, j]
+            res = t_j - p_j
+            ss_res = float(np.sum(res ** 2))
+            ss_tot = float(np.sum((t_j - t_j.mean()) ** 2))
+            r2   = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+            rmse = float(np.sqrt(np.mean(res ** 2)))
+            mae  = float(np.mean(np.abs(res)))
+            nrmse = rmse / float(t_j.std()) if t_j.std() > 0 else float("nan")
+            corr  = float(np.corrcoef(p_j, t_j)[0, 1]) if len(p_j) > 1 else float("nan")
+            rmse_j.append(rmse); r2_j.append(r2); mae_j.append(mae)
+            nrmse_j.append(nrmse); pearson_j.append(corr)
+
+        pred_flat = pred_np.reshape(-1); tgt_flat = tgt_np.reshape(-1)
+        ss_res_pool = float(np.sum((tgt_flat - pred_flat) ** 2))
+        ss_tot_pool = float(np.sum((tgt_flat - tgt_flat.mean()) ** 2))
+        r2_pool   = 1.0 - ss_res_pool / ss_tot_pool if ss_tot_pool > 0 else float("nan")
+        rmse_pool = float(np.sqrt(np.mean((pred_flat - tgt_flat) ** 2)))
+
+        result: dict[str, Any] = {
+            "rmse": rmse_j, "r2": r2_j, "mae": mae_j,
+            "nrmse": nrmse_j, "pearson_r": pearson_j,
+            "rmse_mean": float(np.mean(rmse_j)),
+            "rmse_pooled": rmse_pool,
+            "r2_overall": r2_pool,
+            "r2_mean": float(np.nanmean(r2_j)),
+            "mae_mean": float(np.mean(mae_j)),
+            "nrmse_mean": float(np.nanmean(nrmse_j)),
+            "pearson_r_mean": float(np.nanmean(pearson_j)),
+        }
+
+        try:
+            with open(cache_path, "w") as f:
+                yaml.dump({"_v": _CACHE_VERSION, **result}, f)
+        except Exception:
+            pass
+
+        return result
+
+    except Exception as exc:
+        logger.debug("Train metrics computation failed for %s: %s", run_dir, exc)
+        return {}
+
+
+# ---------------------------------------------------------------------------
 # Misc helpers
 # ---------------------------------------------------------------------------
 
@@ -263,16 +402,31 @@ def _short_label(run_id: str) -> str:
     return run_id[:30]
 
 
+def _arch_short_label(mtype: str) -> str:
+    return {
+        "BlackBoxFNN":           "Black-Box",
+        "PhysicsRegularizedFNN": "Physics-Reg",
+        "ResidualCorrectionFNN": "Residual-Corr",
+        "EDR":                   "EDR",
+    }.get(mtype, mtype[:14])
+
+
 def _type_color_map(model_types: list[str]) -> dict[str, str]:
-    palette = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-    return {t: palette[i % len(palette)] for i, t in enumerate(sorted(model_types))}
+    sorted_types = sorted(model_types)
+    return {t: _OKABE_ITO_PALETTE[i % len(_OKABE_ITO_PALETTE)]
+            for i, t in enumerate(sorted_types)}
+
+
+def _panel_label(ax: "plt.Axes", letter: str, fontsize: float = 13.0) -> None:
+    ax.text(0.02, 0.97, f"({letter})", transform=ax.transAxes,
+            fontsize=fontsize, fontweight="bold", va="top", ha="left")
 
 
 # ---------------------------------------------------------------------------
 # Enrich records
 # ---------------------------------------------------------------------------
 
-def enrich_records(records: list[dict[str, Any]]) -> None:
+def enrich_records(records: list[dict[str, Any]], compute_train: bool = True) -> None:
     for rec in records:
         hist = _load_history(rec.get("_history_path"))
         rec["_history"] = hist
@@ -280,23 +434,26 @@ def enrich_records(records: list[dict[str, Any]]) -> None:
         rec["_best_epoch"] = ep
         rec["_train_rmse_hist"] = tr
         rec["_val_rmse_hist"] = vr
+        if compute_train:
+            tm = _compute_train_metrics(rec)
+        else:
+            tm = {}
+        # Do NOT fall back to _train_rmse_hist: that value is in normalised units,
+        # not physical N·m, so mixing it with test/val metrics causes 5-6× scale errors.
+        rec["train_metrics"] = tm
 
 
 # ---------------------------------------------------------------------------
 # Helpers used across plots
 # ---------------------------------------------------------------------------
 
-def _sorted_records(
-    groups: dict[str, list[dict[str, Any]]],
-) -> list[dict[str, Any]]:
+def _sorted_records(groups: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
     all_recs = [r for recs in groups.values() for r in recs]
     all_recs.sort(key=lambda r: _split_scalar(r, "test", "rmse_pooled"))
     return all_recs
 
 
-def _best_per_type(
-    groups: dict[str, list[dict[str, Any]]],
-) -> list[dict[str, Any]]:
+def _best_per_type(groups: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
     bests: list[dict[str, Any]] = []
     for recs in groups.values():
         best = min(recs, key=lambda r: _split_scalar(r, "test", "rmse_pooled"))
@@ -315,32 +472,28 @@ def _model_sublabel(rec: dict[str, Any]) -> str:
     return f"{mtype}\n({detail})"
 
 
-def _save_fig(fig: plt.Figure, path: Path) -> None:
+def _save_fig(fig: "plt.Figure", path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(path), dpi=120, bbox_inches="tight")
-    logger.info("Saved: %s", path)
+    pdf_path = path.with_suffix(".pdf")
+    png_path = path.with_suffix(".png")
+    fig.savefig(str(pdf_path), dpi=300, bbox_inches="tight")
+    fig.savefig(str(png_path), dpi=300, bbox_inches="tight")
+    logger.info("Saved: %s  +  %s", pdf_path, png_path)
     plt.draw()
 
 
 def _fmt(v: float, decimals: int = 5) -> str:
-    return f"{v:.{decimals}f}" if v == v else "   —   "
+    return f"{v:.{decimals}f}" if v == v else "   -   "
 
 
-def _annotate_bars(
-    ax: plt.Axes,
-    bars: Any,
-    vals: list[float],
-    rotation: int = 90,
-    fontsize: float = 6.5,
-) -> None:
+def _annotate_bars(ax: "plt.Axes", bars: Any, vals: list[float],
+                   rotation: int = 90, fontsize: float = 8.0) -> None:
     for bar, v in zip(bars, vals):
         if v == v:
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.0005,
-                f"{v:.4f}",
-                ha="center", va="bottom", fontsize=fontsize, rotation=rotation,
-            )
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 0.0005,
+                    f"{v:.4f}", ha="center", va="bottom",
+                    fontsize=fontsize, rotation=rotation)
 
 
 # ---------------------------------------------------------------------------
@@ -378,20 +531,20 @@ def print_summary_table(groups: dict[str, list[dict[str, Any]]]) -> None:
 
     W = 148
     print("\n" + "=" * W)
-    print("  GRID SEARCH — TRAINED MODELS — PERFORMANCE REPORT")
-    print("  val/test RMSE, R², MAE, Pearson ρ read from proper held-out splits  |  RMSE & MAE in N·m")
-    print("  † train_rmse_hist and val_rmse_hist are from training_history.csv at best checkpoint")
+    print("  GRID SEARCH - TRAINED MODELS - PERFORMANCE REPORT")
+    print("  val/test RMSE, R2, MAE, Pearson read from proper held-out splits  |  RMSE & MAE in N.m")
+    print("  + train_rmse_hist and val_rmse_hist are from training_history.csv at best checkpoint")
     print("=" * W)
 
     MT = 28
     hdr = (
         f"  {'#':<3} {'Model Type':<{MT}}  "
         f"{'Ep':>5}  {'ES':>3}  "
-        f"{'Test RMSE↓':>11}  {'Val RMSE↓':>11}  "
-        f"{'Test R²↑':>10}  {'Val R²↑':>10}  "
-        f"{'Test MAE↓':>10}  {'Val MAE↓':>10}  "
-        f"{'Test ρ↑':>9}  {'Val ρ↑':>9}  "
-        f"{'Tr-RMSE†':>10}  {'V-RMSE†':>10}"
+        f"{'Test RMSE':>11}  {'Val RMSE':>11}  "
+        f"{'Test R2':>10}  {'Val R2':>10}  "
+        f"{'Test MAE':>10}  {'Val MAE':>10}  "
+        f"{'Test P':>9}  {'Val P':>9}  "
+        f"{'Tr-RMSE+':>10}  {'V-RMSE+':>10}"
     )
     print(hdr)
     print("-" * W)
@@ -406,23 +559,23 @@ def print_summary_table(groups: dict[str, list[dict[str, Any]]]) -> None:
             f"{_fmt(row['train_rmse_hist']):>10}  {_fmt(row['val_rmse_hist']):>10}"
         )
     print("-" * W)
-    print("  ES=Y: early stopped   †: training-history units (see header)\n")
+    print("  ES=Y: early stopped   +: training-history units\n")
 
-    print("=== Best per model type (ranked by test RMSE, N·m) ===")
+    print("=== Best per model type (ranked by test RMSE, N.m) ===")
     for mtype in sorted(groups.keys()):
         best = min(groups[mtype], key=lambda r: _split_scalar(r, "test", "rmse_pooled"))
         bp  = _split_scalar(best, "test", "rmse_pooled")
         r2  = _split_scalar(best, "test", "r2_overall")
         mae = _split_scalar(best, "test", "mae_mean")
         print(
-            f"  {mtype:<35}  test RMSE={bp:.5f} N·m  "
-            f"test R²={r2:.4f}  test MAE={mae:.5f} N·m  →  {best.get('run_id', '?')}"
+            f"  {mtype:<35}  test RMSE={bp:.5f} N.m  "
+            f"test R2={r2:.4f}  test MAE={mae:.5f} N.m  ->  {best.get('run_id', '?')}"
         )
     print()
 
 
 # ---------------------------------------------------------------------------
-# Fig 1 — Training Dynamics
+# Fig 1 - Training Dynamics
 # ---------------------------------------------------------------------------
 
 def plot_training_dynamics(
@@ -438,75 +591,72 @@ def plot_training_dynamics(
     nrows = (n + ncols - 1) // ncols
     fig, axes = plt.subplots(
         nrows, ncols,
-        figsize=(7 * ncols, 5.5 * nrows),
+        figsize=(5.5 * ncols, 4.5 * nrows),
         squeeze=False,
-        num="Fig 1 — Training Dynamics (best per type)",
     )
     axes_flat = axes.flatten()
     type_colors = _type_color_map(list(groups.keys()))
+
+    panel_letters = "abcdefgh"
+    all_losses: list[float] = []
 
     for idx, rec in enumerate(all_recs):
         ax = axes_flat[idx]
         hist = rec.get("_history", {})
         mtype = rec.get("model_type", "unknown")
-        run_id = rec.get("run_id", "?")
         best_ep = rec.get("_best_epoch", -1)
 
         tl = hist.get("train_loss", [])
-        vl = hist.get("val_loss", [])
-        tr = hist.get("train_rmse", [])
-        vr = hist.get("val_rmse", [])
+        vl = hist.get("val_loss",   [])
         ep = hist.get("epoch", list(range(1, max(len(tl), len(vl), 1) + 1)))
 
         c = type_colors.get(mtype, "steelblue")
 
         if tl:
-            ax.plot(ep[:len(tl)], tl, color=c, lw=1.8, label="train loss")
+            ax.plot(ep[:len(tl)], tl, color=c, lw=2.0, label="Train Loss")
+            all_losses.extend(tl)
         if vl:
-            ax.plot(ep[:len(vl)], vl, color=c, lw=1.8, ls="--", alpha=0.8, label="val loss")
-
-        ax2 = ax.twinx()
-        ax2.tick_params(axis="y", colors="darkorange", labelsize=6)
-        if tr:
-            ax2.plot(ep[:len(tr)], tr, color="darkorange", lw=1.1, alpha=0.55, label="train RMSE†")
-        if vr:
-            ax2.plot(ep[:len(vr)], vr, color="darkorange", lw=1.1, ls=":", label="val RMSE†")
-        ax2.set_ylabel("RMSE†", fontsize=6, color="darkorange")
-
+            ax.plot(ep[:len(vl)], vl, color=c, lw=2.0, ls="--", alpha=0.8, label="Val Loss")
+            all_losses.extend(vl)
         if best_ep > 0:
-            ax.axvline(best_ep, color="red", lw=1.0, ls=":", alpha=0.75, label=f"best ep={best_ep}")
+            ax.axvline(best_ep, color="#CC0000", lw=1.2, ls=":", alpha=0.85,
+                       label=f"Best checkpoint (ep {best_ep})")
 
-        tr_nm = _split_scalar(rec, "test", "rmse_pooled")
-        vl_nm = _split_scalar(rec, "val",  "rmse_pooled")
-        r2_t  = _split_scalar(rec, "test", "r2_overall")
-        subtitle = (
-            f"test RMSE={tr_nm:.4f} N·m  val RMSE={vl_nm:.4f} N·m\ntest R²={r2_t:.4f}"
-            if tr_nm == tr_nm else ""
-        )
-        ax.set_title(f"{mtype}\n{_short_label(run_id)}\n{subtitle}", fontsize=9, fontweight="bold")
-        ax.set_xlabel("epoch", fontsize=9)
-        ax.set_ylabel("MSE loss", fontsize=9)
+        letter = panel_letters[idx] if idx < len(panel_letters) else str(idx)
+        ax.set_title(f"({letter}) {_arch_short_label(mtype)}", fontsize=13, fontweight="bold")
+        ax.set_xlabel("Epoch", fontsize=12)
+        ax.set_ylabel("MSE Loss", fontsize=12)
         ax.grid(True, alpha=0.25)
-        ax.tick_params(labelsize=7)
 
-        lines1, lbls1 = ax.get_legend_handles_labels()
-        lines2, lbls2 = ax2.get_legend_handles_labels()
-        ax.legend(lines1 + lines2, lbls1 + lbls2, fontsize=5.5, loc="upper right")
+    # Unified y-axis scale
+    finite_losses = [v for v in all_losses if np.isfinite(v)]
+    if finite_losses:
+        lo = max(0.0, np.percentile(finite_losses, 1) * 0.9)
+        hi = np.percentile(finite_losses, 99) * 1.05
+        for idx in range(n):
+            axes_flat[idx].set_ylim(lo, hi)
+
+    # Single shared legend at bottom
+    handles, labels = axes_flat[0].get_legend_handles_labels()
+    seen: dict[str, Any] = {}
+    for h, l in zip(handles, labels):
+        if l not in seen:
+            seen[l] = h
+    if seen:
+        fig.legend(list(seen.values()), list(seen.keys()),
+                   loc="lower center", bbox_to_anchor=(0.5, 0.01),
+                   ncol=len(seen), fontsize=11, framealpha=0.95,
+                   edgecolor="#aaaaaa", borderpad=0.8)
 
     for idx in range(n, len(axes_flat)):
         axes_flat[idx].axis("off")
 
-    fig.suptitle(
-        "Fig 1 — Training Dynamics  (best model per type)\n"
-        "solid/dashed = train/val loss · orange = RMSE† (hist units) · red dot = best checkpoint",
-        fontsize=12,
-    )
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.12, 1, 1])
     _save_fig(fig, output_dir / "fig1_training_dynamics.png")
 
 
 # ---------------------------------------------------------------------------
-# Fig 2 — RMSE Comparison
+# Fig 2 - RMSE Comparison (Train vs Test)
 # ---------------------------------------------------------------------------
 
 def plot_rmse_comparison(
@@ -518,87 +668,80 @@ def plot_rmse_comparison(
         return
 
     type_colors = _type_color_map(list(groups.keys()))
-    bar_colors = [type_colors.get(r.get("model_type", "?"), "steelblue") for r in all_recs]
-    labels = [_model_label(r) for r in all_recs]
+    bar_colors = [type_colors.get(r.get("model_type", "?"), "#888888") for r in all_recs]
+    labels = [_arch_short_label(r.get("model_type", "?")) for r in all_recs]
 
-    val_rmse  = [_split_scalar(r, "val",  "rmse_pooled") for r in all_recs]
-    test_rmse = [_split_scalar(r, "test", "rmse_pooled") for r in all_recs]
-    delta     = [t - v if (t == t and v == v) else float("nan")
-                 for t, v in zip(test_rmse, val_rmse)]
-    val_r2    = [_split_scalar(r, "val",  "r2_overall") for r in all_recs]
-    test_r2   = [_split_scalar(r, "test", "r2_overall") for r in all_recs]
+    train_rmse = [_split_scalar(r, "train", "rmse_pooled") for r in all_recs]
+    test_rmse  = [_split_scalar(r, "test",  "rmse_pooled") for r in all_recs]
+    test_r2    = [_split_scalar(r, "test",  "r2_overall")  for r in all_recs]
 
     n = len(all_recs)
     x = np.arange(n)
-    bw = 0.22
+    bw = 0.32
 
-    fig, ax = plt.subplots(
-        figsize=(max(11, n * 2.8), 7),
-        num="Fig 2 — RMSE Comparison (best per type)",
-    )
-    fig.suptitle(
-        "Fig 2 — Pooled RMSE Comparison  (best model per type)\n"
-        "Val vs Test RMSE in N·m  ·  Δ = Test − Val  ·  right axis: R²",
-        fontsize=12, fontweight="bold",
-    )
+    fig, (ax_rmse, ax_r2) = plt.subplots(1, 2, figsize=(max(10, n * 2.8), 6))
 
-    bv = ax.bar(x - bw, val_rmse,  bw, color=bar_colors, alpha=0.85,
-                edgecolor="white", label="Val RMSE")
-    bt = ax.bar(x,      test_rmse, bw, color=bar_colors, alpha=0.55,
-                edgecolor="white", hatch="///", label="Test RMSE")
-    bd = ax.bar(x + bw, delta,     bw, color="#b0b0b0", alpha=0.80,
-                edgecolor="#888888", hatch="xxx", label="Δ (Test − Val)")
+    # Panel (a): Train vs Test RMSE
+    b_train = ax_rmse.bar(x - bw / 2, train_rmse, bw, color=bar_colors,
+                          alpha=0.90, edgecolor="white", linewidth=0.8)
+    b_test  = ax_rmse.bar(x + bw / 2, test_rmse,  bw, color=bar_colors,
+                          alpha=0.60, edgecolor="white", linewidth=0.8, hatch="////")
 
-    _annotate_bars(ax, bv, val_rmse,  fontsize=8, rotation=75)
-    _annotate_bars(ax, bt, test_rmse, fontsize=8, rotation=75)
+    for b, v in zip(b_train, train_rmse):
+        if v == v and np.isfinite(v):
+            ax_rmse.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.0005,
+                         f"{v:.4f}", ha="center", va="bottom", fontsize=9, rotation=75)
+    for b, v in zip(b_test, test_rmse):
+        if v == v and np.isfinite(v):
+            ax_rmse.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.0005,
+                         f"{v:.4f}", ha="center", va="bottom", fontsize=9, rotation=75)
 
-    for bar, v in zip(bd, delta):
-        if v == v:
-            colour = "#cc2222" if v > 0 else "#228822"
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                max(bar.get_height(), 0) + 0.0003,
-                f"{v:+.4f}",
-                ha="center", va="bottom", fontsize=7.5, rotation=75, color=colour, fontweight="bold",
-            )
+    valid_rmse = [v for v in train_rmse + test_rmse if v == v and np.isfinite(v)]
+    if valid_rmse:
+        ax_rmse.set_ylim(max(0.0, min(valid_rmse) * 0.97), max(valid_rmse) * 1.08)
 
-    ax_r2 = ax.twinx()
-    ax_r2.plot(x - bw, val_r2,  color="purple", lw=2.0, ls="--",
-               marker="o", markersize=7, alpha=0.85, label="Val R²")
-    ax_r2.plot(x,      test_r2, color="purple", lw=2.0, ls=":",
-               marker="^", markersize=7, alpha=0.85, label="Test R²")
-    ax_r2.set_ylabel("R²  ↑ higher is better", fontsize=10, color="purple")
-    ax_r2.tick_params(axis="y", colors="purple", labelsize=9)
-    ax_r2.spines["right"].set_visible(True)
-    ax_r2.spines["right"].set_color("purple")
-    valid_r2 = [v for v in val_r2 + test_r2 if v == v]
-    ax_r2.set_ylim(max(0.0, min(valid_r2) - 0.05) if valid_r2 else 0.0, 1.02)
+    ax_rmse.set_xticks(x)
+    ax_rmse.set_xticklabels(labels, rotation=0, ha="center", fontsize=11, fontweight="bold")
+    ax_rmse.set_xlabel("Architecture", fontsize=12)
+    ax_rmse.set_ylabel("Pooled RMSE (N.m)  lower is better", fontsize=12)
+    ax_rmse.set_xlim(-0.6, n - 0.4)
+    _panel_label(ax_rmse, "a")
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=10, fontweight="bold")
-    ax.set_xlabel("Model Architecture", fontsize=11)
-    ax.set_ylabel("Pooled RMSE (N·m)  ↓ lower is better", fontsize=11)
-    ax.set_xlim(-0.6, n - 0.4)
+    proxy_train = Patch(facecolor="#888888", alpha=0.90, label="Train RMSE")
+    proxy_test  = Patch(facecolor="#888888", alpha=0.60, hatch="////", label="Test RMSE")
+    ax_rmse.legend(handles=[proxy_train, proxy_test], fontsize=10, loc="upper right")
 
-    type_handles = [Patch(color=type_colors[t], label=t) for t in sorted(type_colors)]
-    style_handles = [
-        Patch(facecolor="gray", alpha=0.85, label="Solid = Val RMSE"),
-        Patch(facecolor="gray", alpha=0.55, hatch="///", label="Hatched = Test RMSE"),
-        Patch(facecolor="#b0b0b0", hatch="xxx", label="Δ = Test − Val"),
-        Line2D([0], [0], color="purple", lw=2, ls="--", marker="o", label="Val R²"),
-        Line2D([0], [0], color="purple", lw=2, ls=":",  marker="^", label="Test R²"),
-    ]
-    fig.tight_layout(rect=[0, 0.14, 1, 1])
-    fig.legend(
-        handles=type_handles + style_handles,
-        loc="lower center", bbox_to_anchor=(0.5, 0.02), ncol=4, fontsize=9,
-    )
+    # Panel (b): Test R2
+    b_r2 = ax_r2.bar(x, test_r2, 0.50, color=bar_colors, alpha=0.82,
+                     edgecolor="white", linewidth=0.8)
+    for b, v in zip(b_r2, test_r2):
+        if v == v and np.isfinite(v):
+            ax_r2.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.0005,
+                       f"{v:.4f}", ha="center", va="bottom", fontsize=9, rotation=75)
+
+    valid_r2 = [v for v in test_r2 if v == v and np.isfinite(v)]
+    if valid_r2:
+        ax_r2.set_ylim(max(0.0, min(valid_r2) - 0.02), min(1.03, max(valid_r2) + 0.02))
+
+    ax_r2.axhline(1.0, color="#888888", lw=1.0, ls="--", alpha=0.5)
+    ax_r2.set_xticks(x)
+    ax_r2.set_xticklabels(labels, rotation=0, ha="center", fontsize=11, fontweight="bold")
+    ax_r2.set_xlabel("Architecture", fontsize=12)
+    ax_r2.set_ylabel("Test R2  higher is better", fontsize=12)
+    ax_r2.set_xlim(-0.6, n - 0.4)
+    _panel_label(ax_r2, "b")
+
+    arch_handles = [Patch(facecolor=type_colors[t], label=_arch_short_label(t))
+                    for t in sorted(type_colors)]
+    fig.tight_layout(rect=[0, 0.10, 1, 1])
+    fig.legend(handles=arch_handles, loc="lower center",
+               bbox_to_anchor=(0.5, 0.02), ncol=len(arch_handles), fontsize=10)
 
     _save_fig(fig, output_dir / "fig2_rmse_comparison.png")
 
 
 # ---------------------------------------------------------------------------
-# Fig 3 — R² and Pearson ρ Comparison
+# Fig 3 - R2 and Pearson Comparison (Train vs Test)
 # ---------------------------------------------------------------------------
 
 def plot_r2_comparison(
@@ -610,82 +753,66 @@ def plot_r2_comparison(
         return
 
     type_colors = _type_color_map(list(groups.keys()))
-    bar_colors = [type_colors.get(r.get("model_type", "?"), "steelblue") for r in all_recs]
-    labels = [_model_label(r) for r in all_recs]
+    bar_colors = [type_colors.get(r.get("model_type", "?"), "#888888") for r in all_recs]
+    labels = [_arch_short_label(r.get("model_type", "?")) for r in all_recs]
 
     n = len(all_recs)
     x = np.arange(n)
-    bw = 0.22
+    bw = 0.32
 
     panels = [
-        ("r2_overall",     "R² Overall (pooled)",   "R²"),
-        ("r2_mean",        "R² Mean (per-joint)",    "R²"),
-        ("pearson_r_mean", "Pearson ρ Mean",         "ρ"),
+        ("r2_overall",     "(a) R2 Overall",    "R2"),
+        ("r2_mean",        "(b) R2 Mean",        "R2"),
+        ("pearson_r_mean", "(c) Pearson rho Mean", "rho"),
     ]
 
-    fig, axes = plt.subplots(
-        1, 3,
-        figsize=(max(16, n * 4.0), 8),
-        num="Fig 3 — R² and Pearson ρ Comparison (best per type)",
-    )
-    fig.suptitle(
-        "Fig 3 — R² and Pearson ρ  —  Best Model per Type  (↑ higher is better)\n"
-        "Solid = Val  ·  Hatched = Test  ·  Δ = Test − Val  (green = improvement, red = degradation)",
-        fontsize=12, fontweight="bold",
-    )
+    fig, axes = plt.subplots(1, 3, figsize=(max(14, n * 4.0), 6))
 
-    for ax, (metric_key, title, ylabel) in zip(axes, panels):
-        vv = [_split_scalar(r, "val",  metric_key) for r in all_recs]
-        tv = [_split_scalar(r, "test", metric_key) for r in all_recs]
-        dv = [t - v if (t == t and v == v) else float("nan") for t, v in zip(tv, vv)]
+    for ax, (metric_key, title, ylabel), letter in zip(axes, panels, "abc"):
+        tv  = [_split_scalar(r, "test",  metric_key) for r in all_recs]
+        trv = [_split_scalar(r, "train", metric_key) for r in all_recs]
 
-        bv = ax.bar(x - bw, vv, bw, color=bar_colors, alpha=0.85, edgecolor="white")
-        bt = ax.bar(x,      tv, bw, color=bar_colors, alpha=0.55, edgecolor="white", hatch="///")
-        bd = ax.bar(x + bw, dv, bw, color="#b0b0b0",  alpha=0.80, edgecolor="#888888", hatch="xxx")
+        b_tr = ax.bar(x - bw / 2, trv, bw, color=bar_colors, alpha=0.90,
+                      edgecolor="white", linewidth=0.8)
+        b_te = ax.bar(x + bw / 2, tv,  bw, color=bar_colors, alpha=0.60,
+                      edgecolor="white", linewidth=0.8, hatch="////")
 
-        _annotate_bars(ax, bv, vv, fontsize=7.5, rotation=75)
-        _annotate_bars(ax, bt, tv, fontsize=7.5, rotation=75)
+        for b, v in zip(b_tr, trv):
+            if v == v and np.isfinite(v):
+                ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.0008,
+                        f"{v:.4f}", ha="center", va="bottom", fontsize=8.5, rotation=75)
+        for b, v in zip(b_te, tv):
+            if v == v and np.isfinite(v):
+                ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.0008,
+                        f"{v:.4f}", ha="center", va="bottom", fontsize=8.5, rotation=75)
 
-        for bar, v in zip(bd, dv):
-            if v == v:
-                colour = "#228822" if v >= 0 else "#cc2222"
-                ax.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    (bar.get_height() if v >= 0 else 0) + 0.001,
-                    f"{v:+.4f}",
-                    ha="center", va="bottom", fontsize=7, rotation=75, color=colour, fontweight="bold",
-                )
-
-        valid = [v for v in vv + tv if v == v]
-        lo = max(0.0, min(valid) - 0.05) if valid else 0.7
-        hi = min(1.03, max(valid) + 0.06) if valid else 1.03
+        valid = [v for v in trv + tv if v == v and np.isfinite(v)]
+        lo = max(0.0, min(valid) - 0.03) if valid else 0.7
+        hi = min(1.03, max(valid) + 0.03) if valid else 1.03
         ax.set_ylim(lo, hi)
-        ax.axhline(1.0, color="#44aa44", lw=0.9, alpha=0.5, ls="--", label="perfect = 1.0")
+        ax.axhline(1.0, color="#888888", lw=0.9, alpha=0.4, ls="--")
         ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=10, fontweight="bold")
-        ax.set_xlabel("Model Architecture", fontsize=11)
+        ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=11, fontweight="bold")
+        ax.set_xlabel("Architecture", fontsize=12)
         ax.set_ylabel(ylabel, fontsize=12)
-        ax.set_title(title, fontsize=12, fontweight="bold")
+        ax.set_title(title, fontsize=13, fontweight="bold")
         ax.set_xlim(-0.6, n - 0.4)
+        _panel_label(ax, letter)
 
-    type_handles = [Patch(color=type_colors[t], label=t) for t in sorted(type_colors)]
-    style_handles = [
-        Patch(facecolor="gray", alpha=0.85, label="Solid = Val"),
-        Patch(facecolor="gray", alpha=0.55, hatch="///", label="Hatched = Test"),
-        Patch(facecolor="#b0b0b0", hatch="xxx", label="Δ = Test − Val"),
-        Line2D([0], [0], color="#44aa44", lw=1.5, ls="--", label="Perfect = 1.0"),
-    ]
+    proxy_tr = Patch(facecolor="#888888", alpha=0.90, label="Train")
+    proxy_te = Patch(facecolor="#888888", alpha=0.60, hatch="////", label="Test")
+    arch_handles = [Patch(facecolor=type_colors[t], label=_arch_short_label(t))
+                    for t in sorted(type_colors)]
     fig.tight_layout(rect=[0, 0.11, 1, 1])
-    fig.legend(
-        handles=type_handles + style_handles,
-        loc="lower center", bbox_to_anchor=(0.5, 0.02), ncol=4, fontsize=9,
-    )
+    fig.legend(handles=arch_handles + [proxy_tr, proxy_te],
+               loc="lower center", bbox_to_anchor=(0.5, 0.02),
+               ncol=len(arch_handles) + 2, fontsize=10)
 
     _save_fig(fig, output_dir / "fig3_r2_comparison.png")
 
 
 # ---------------------------------------------------------------------------
-# Fig 4 — Per-Joint Heatmaps (2 × 2 grid)
+# Fig 4 - Per-Joint Heatmaps (2-panel, shared colorbar, plasma)
 # ---------------------------------------------------------------------------
 
 def plot_per_joint_heatmaps(
@@ -696,51 +823,55 @@ def plot_per_joint_heatmaps(
     if not all_recs:
         return
 
-    labels = [_model_label(r) for r in all_recs]
+    labels = [_arch_short_label(r.get("model_type", "?")) for r in all_recs]
 
-    def _mat(split: str, key: str) -> np.ndarray:
-        return np.array([_split_joints(r, split, key) for r in all_recs])
+    test_rmse_mat = np.array([_split_joints(r, "test", "rmse") for r in all_recs])
+    val_rmse_mat  = np.array([_split_joints(r, "val",  "rmse") for r in all_recs])
+
+    all_rmse = np.concatenate([test_rmse_mat.flatten(), val_rmse_mat.flatten()])
+    valid_rmse = all_rmse[np.isfinite(all_rmse)]
+    vmin = float(valid_rmse.min()) if len(valid_rmse) else 0.0
+    vmax = float(valid_rmse.max()) if len(valid_rmse) else 1.0
+
+    nrows_fig = max(4.0, len(all_recs) * 1.4 + 1.5)
+    fig, axes = plt.subplots(1, 2, figsize=(18, nrows_fig))
 
     panels = [
-        (0, 0, _mat("test", "rmse"),  "Test RMSE (N·m) ↓  darker=worse", "RdYlGn_r"),
-        (0, 1, _mat("val",  "rmse"),  "Val  RMSE (N·m) ↓  darker=worse", "RdYlGn_r"),
-        (1, 0, _mat("test", "r2"),    "Test R² ↑  darker=worse",          "RdYlGn"),
-        (1, 1, _mat("val",  "r2"),    "Val  R² ↑  darker=worse",          "RdYlGn"),
+        (axes[0], test_rmse_mat, "(a) Test RMSE (N.m)"),
+        (axes[1], val_rmse_mat,  "(b) Val RMSE (N.m)"),
     ]
 
-    nrows_fig = max(5.0, len(all_recs) * 1.4 + 2.5)
-    fig, axes = plt.subplots(
-        2, 2,
-        figsize=(18, nrows_fig),
-        num="Fig 4 — Per-Joint Heatmaps (best per type)",
-    )
-    fig.suptitle(
-        "Fig 4 — Per-Joint Metrics Heatmap  (best model per type)\n"
-        "rows = model types sorted best→worst · cols = joints",
-        fontsize=13, fontweight="bold",
-    )
-
-    for ri, ci, mat, title, cmap in panels:
-        ax = axes[ri, ci]
-        im = ax.imshow(mat, aspect="auto", cmap=cmap)
+    im_last = None
+    for ax, mat, title in panels:
+        masked = np.ma.masked_invalid(mat)
+        im = ax.imshow(masked, aspect="auto", cmap="plasma",
+                       vmin=vmin, vmax=vmax, interpolation="nearest")
+        im_last = im
         ax.set_xticks(range(N_JOINTS))
-        ax.set_xticklabels(JOINT_NAMES, fontsize=10, fontweight="bold")
+        ax.set_xticklabels(JOINT_NAMES, fontsize=11, fontweight="bold")
         ax.set_yticks(range(len(labels)))
-        ax.set_yticklabels(labels, fontsize=11, fontweight="bold")
-        ax.set_title(title, fontsize=11, fontweight="bold")
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        ax.set_yticklabels(labels, fontsize=12, fontweight="bold")
+        ax.set_title(title, fontsize=13, fontweight="bold")
         for i in range(len(labels)):
             for j in range(N_JOINTS):
                 v = mat[i, j]
-                if v == v:
-                    ax.text(j, i, f"{v:.3f}", ha="center", va="center", fontsize=10, fontweight="bold")
+                if v == v and np.isfinite(v):
+                    norm_v = (v - vmin) / (vmax - vmin) if vmax > vmin else 0.5
+                    txt_c = "white" if norm_v > 0.6 else "black"
+                    ax.text(j, i, f"{v:.3f}", ha="center", va="center",
+                            fontsize=13, fontweight="bold", color=txt_c)
+
+    if im_last is not None:
+        cbar = fig.colorbar(im_last, ax=axes.tolist(), fraction=0.025, pad=0.03)
+        cbar.set_label("RMSE (N.m) - lower is better", fontsize=11)
+        cbar.ax.tick_params(labelsize=10)
 
     fig.tight_layout()
     _save_fig(fig, output_dir / "fig4_per_joint_heatmaps.png")
 
 
 # ---------------------------------------------------------------------------
-# Fig 5 — Multi-Metric Parallel Coordinates
+# Fig 5 - Multi-Metric Parallel Coordinates (Train vs Test)
 # ---------------------------------------------------------------------------
 
 def plot_parallel_coordinates(
@@ -751,102 +882,86 @@ def plot_parallel_coordinates(
     if not all_recs:
         return
 
+    all_recs_full = _sorted_records(groups)
+
     axes_def = [
-        ("rmse_pooled",    "test", "Test\nRMSE↓",    False),
-        ("rmse_pooled",    "val",  "Val\nRMSE↓",     False),
-        ("r2_overall",     "test", "Test\nR²↑",      True),
-        ("r2_overall",     "val",  "Val\nR²↑",       True),
-        ("mae_mean",       "test", "Test\nMAE↓",     False),
-        ("nrmse_mean",     "test", "Test\nNRMSE↓",   False),
-        ("pearson_r_mean", "test", "Test\nPearson↑", True),
+        ("rmse_pooled",    "train",  "Train\nRMSE",    False),
+        ("rmse_pooled",    "test",   "Test\nRMSE",     False),
+        ("r2_overall",     "test",   "Test\nR2",       True),
+        ("r2_mean",        "test",   "Test\nR2-mean",  True),
+        ("mae_mean",       "test",   "Test\nMAE",      False),
+        ("nrmse_mean",     "test",   "Test\nNRMSE",    False),
+        ("pearson_r_mean", "test",   "Test\nPearson",  True),
     ]
     n_axes = len(axes_def)
     axis_labels = [a[2] for a in axes_def]
 
+    # Normalize across all runs
+    axis_ranges: dict[str, tuple[float, float]] = {}
+    for key, split, lbl, _ in axes_def:
+        vals = [_split_scalar(r, split, key) for r in all_recs_full]
+        valid = [v for v in vals if v == v and np.isfinite(v)]
+        axis_ranges[lbl] = (min(valid), max(valid)) if valid else (0.0, 1.0)
+
     model_rows = []
     for rec in all_recs:
-        raw = {lbl: _split_scalar(rec, split, key) for key, split, lbl, _ in axes_def}
-        model_rows.append({
-            "rec": rec,
-            "raw": raw,
-            "norm": {},
-            "model_type": rec.get("model_type", "unknown"),
-            "label": _short_label(rec.get("run_id", "?")),
-        })
-
-    axis_ranges: dict[str, tuple[float, float]] = {}
-    for key, split, lbl, higher_better in axes_def:
-        vals = [d["raw"][lbl] for d in model_rows]
-        valid = [v for v in vals if v == v]
-        if not valid:
-            for d in model_rows:
-                d["norm"][lbl] = float("nan")
-            axis_ranges[lbl] = (0.0, 1.0)
-            continue
-        mn, mx = min(valid), max(valid)
-        span = mx - mn if mx != mn else 1.0
-        axis_ranges[lbl] = (mn, mx)
-        for d in model_rows:
-            v = d["raw"][lbl]
-            if v != v:
-                d["norm"][lbl] = float("nan")
-                continue
-            score = (v - mn) / span
-            d["norm"][lbl] = score if higher_better else (1.0 - score)
+        norm = {}
+        raw  = {}
+        for key, split, lbl, higher_better in axes_def:
+            v = _split_scalar(rec, split, key)
+            raw[lbl] = v
+            mn, mx = axis_ranges[lbl]
+            span = mx - mn if mx != mn else 1.0
+            if v == v and np.isfinite(v):
+                score = (v - mn) / span
+                norm[lbl] = score if higher_better else (1.0 - score)
+            else:
+                norm[lbl] = float("nan")
+        model_rows.append({"rec": rec, "raw": raw, "norm": norm,
+                           "model_type": rec.get("model_type", "unknown")})
 
     type_colors = _type_color_map(list(groups.keys()))
     x_pos = list(range(n_axes))
 
-    fig, ax = plt.subplots(
-        figsize=(15, 8),
-        num="Fig 5 — Parallel Coordinates (best per type)",
-    )
-    fig.suptitle(
-        "Fig 5 — Multi-Metric Parallel Coordinates  (best model per type)\n"
-        "y = 1 → best on that metric · y = 0 → worst · lines labelled by model type",
-        fontsize=12, fontweight="bold",
-    )
-
-    lw = 2.0 if len(model_rows) <= 6 else 1.4
-    alpha = 0.80 if len(model_rows) <= 10 else 0.60
+    fig, ax = plt.subplots(figsize=(15, 8))
 
     drawn_types: set[str] = set()
     for d in model_rows:
         mtype = d["model_type"]
         c = type_colors.get(mtype, "steelblue")
         y_vals = [d["norm"].get(lbl, float("nan")) for lbl in axis_labels]
-        if any(v != v for v in y_vals):
+        if any(v != v or not np.isfinite(v) for v in y_vals):
             continue
-        ax.plot(x_pos, y_vals, color=c, lw=lw, alpha=alpha)
-        ax.scatter(x_pos, y_vals, color=c, s=60, zorder=4)
-        ax.text(n_axes - 0.05, y_vals[-1], f"  {mtype}", fontsize=9,
-                color=c, va="center", fontweight="bold")
+        ax.plot(x_pos, y_vals, color=c, lw=2.5, alpha=0.85, marker="o", markersize=8)
+        ax.text(n_axes - 0.05, y_vals[-1], f"  {_arch_short_label(mtype)}",
+                fontsize=10, color=c, va="center", fontweight="bold")
         drawn_types.add(mtype)
 
     for xi in x_pos:
-        ax.axvline(xi, color="gray", lw=0.5, alpha=0.4)
+        ax.axvline(xi, color="gray", lw=0.6, alpha=0.4)
 
     for i, (_, _, lbl, _) in enumerate(axes_def):
         lo, hi = axis_ranges[lbl]
-        ax.text(i,  1.05, f"{hi:.4f}", ha="center", va="bottom", fontsize=6.5, color="#666")
-        ax.text(i, -0.07, f"{lo:.4f}", ha="center", va="top",    fontsize=6.5, color="#666")
+        ax.text(i,  1.07, f"{hi:.4f}", ha="center", va="bottom", fontsize=9, color="#555")
+        ax.text(i, -0.09, f"{lo:.4f}", ha="center", va="top",    fontsize=9, color="#555")
 
     ax.set_xticks(x_pos)
     ax.set_xticklabels(axis_labels, fontsize=11, fontweight="bold")
-    ax.set_ylabel("Performance Score  (1 = best,  0 = worst)", fontsize=11)
-    ax.set_ylim(-0.12, 1.15)
+    ax.set_ylabel("Normalised Score  (1=best across all runs, 0=worst)", fontsize=11)
+    ax.set_ylim(-0.15, 1.20)
     ax.grid(axis="y", alpha=0.18)
 
-    legend_handles = [Patch(color=type_colors[t], label=t) for t in sorted(drawn_types)]
+    legend_handles = [Patch(color=type_colors[t], label=_arch_short_label(t))
+                      for t in sorted(drawn_types)]
     fig.tight_layout(rect=[0, 0.10, 1, 1])
     fig.legend(handles=legend_handles, loc="lower center",
-               bbox_to_anchor=(0.5, 0.02), ncol=len(drawn_types), fontsize=9)
+               bbox_to_anchor=(0.5, 0.02), ncol=len(drawn_types), fontsize=10)
 
     _save_fig(fig, output_dir / "fig5_parallel_coordinates.png")
 
 
 # ---------------------------------------------------------------------------
-# Fig 6 — R² vs RMSE Scatter
+# Fig 6 - R2 vs RMSE Scatter (Train->Test gap)
 # ---------------------------------------------------------------------------
 
 def plot_r2_vs_rmse_scatter(
@@ -856,71 +971,66 @@ def plot_r2_vs_rmse_scatter(
     type_colors = _type_color_map(list(groups.keys()))
     model_types = sorted(groups.keys())
 
-    fig, ax = plt.subplots(
-        figsize=(11, 8),
-        num="Fig 6 — R² vs RMSE Scatter",
-    )
-    fig.suptitle(
-        "Fig 6 — R² vs RMSE  —  Best Model per Type\n"
-        "Circles = Val  ·  Triangles = Test  ·  top-left corner = ideal",
-        fontsize=12, fontweight="bold",
-    )
+    fig, ax = plt.subplots(figsize=(11, 7))
 
     best_map = {r.get("model_type"): r for r in _best_per_type(groups)}
     for mtype in model_types:
         c = type_colors[mtype]
-        for rec in ([best_map[mtype]] if mtype in best_map else []):
-            lbl = _model_label(rec)
-            vr  = _split_scalar(rec, "val",  "rmse_pooled")
-            vr2 = _split_scalar(rec, "val",  "r2_overall")
-            tr  = _split_scalar(rec, "test", "rmse_pooled")
-            tr2 = _split_scalar(rec, "test", "r2_overall")
+        rec = best_map.get(mtype)
+        if rec is None:
+            continue
 
-            if vr == vr and vr2 == vr2:
-                ax.scatter(vr, vr2, color=c, s=200, marker="o", zorder=5, alpha=0.88)
-                ax.annotate(lbl + "\n(val)", (vr, vr2),
-                            textcoords="offset points", xytext=(8, 4),
-                            fontsize=10, color=c, fontweight="bold")
-            if tr == tr and tr2 == tr2:
-                ax.scatter(tr, tr2, color=c, s=200, marker="^", zorder=5, alpha=0.88)
-                ax.annotate(lbl + "\n(test)", (tr, tr2),
-                            textcoords="offset points", xytext=(8, -14),
-                            fontsize=10, color=c, fontweight="bold")
+        tr_rmse = _split_scalar(rec, "train", "rmse_pooled")
+        if not (tr_rmse == tr_rmse and np.isfinite(tr_rmse)):
+            tr_rmse = rec.get("_train_rmse_hist", float("nan"))
+        tr_r2 = _split_scalar(rec, "train", "r2_overall")
 
-    best_recs_fig6 = _best_per_type(groups)
-    all_test_rmse = [_split_scalar(r, "test", "rmse_pooled") for r in best_recs_fig6]
-    all_test_r2   = [_split_scalar(r, "test", "r2_overall")  for r in best_recs_fig6]
-    valid_r  = [v for v in all_test_rmse if v == v]
-    valid_r2 = [v for v in all_test_r2  if v == v]
-    if valid_r and valid_r2:
-        ax.annotate(
-            "← ideal",
-            (min(valid_r), max(valid_r2)),
-            textcoords="offset points", xytext=(-35, 6),
-            fontsize=9, color="green",
-            arrowprops=dict(arrowstyle="->", color="green"),
-        )
+        te_rmse = _split_scalar(rec, "test", "rmse_pooled")
+        te_r2   = _split_scalar(rec, "test", "r2_overall")
 
-    type_handles   = [Patch(color=type_colors[t], label=t) for t in model_types]
+        if tr_rmse == tr_rmse and np.isfinite(tr_rmse):
+            y_tr = tr_r2 if (tr_r2 == tr_r2 and np.isfinite(tr_r2)) else te_r2
+            ax.scatter(tr_rmse, y_tr, color=c, s=160, marker="o",
+                       facecolors="none", edgecolors=c, linewidths=2.0, zorder=5)
+            if te_rmse == te_rmse and np.isfinite(te_rmse) and te_r2 == te_r2 and np.isfinite(te_r2):
+                ax.scatter(te_rmse, te_r2, color=c, s=160, marker="o", zorder=6)
+                ax.annotate("", xy=(te_rmse, te_r2), xytext=(tr_rmse, y_tr),
+                            arrowprops=dict(arrowstyle="->", color=c, lw=1.5), zorder=4)
+        elif te_rmse == te_rmse and np.isfinite(te_rmse) and te_r2 == te_r2 and np.isfinite(te_r2):
+            ax.scatter(te_rmse, te_r2, color=c, s=160, marker="o", zorder=6)
+
+    best_recs = _best_per_type(groups)
+    all_te_rmse = [_split_scalar(r, "test", "rmse_pooled") for r in best_recs]
+    all_te_r2   = [_split_scalar(r, "test", "r2_overall")  for r in best_recs]
+    vr  = [v for v in all_te_rmse if v == v and np.isfinite(v)]
+    vr2 = [v for v in all_te_r2   if v == v and np.isfinite(v)]
+    if vr and vr2:
+        ax.annotate("Ideal",
+                    (min(vr) * 0.99, max(vr2) * 1.002),
+                    textcoords="offset points", xytext=(-50, 6),
+                    fontsize=11, color="#228822", fontweight="bold",
+                    arrowprops=dict(arrowstyle="->", color="#228822", lw=1.2))
+
+    type_handles = [Patch(color=type_colors[t], label=_arch_short_label(t)) for t in model_types]
     marker_handles = [
-        Line2D([0], [0], marker="o", color="w", markerfacecolor="gray", markersize=9, label="Validation  ○"),
-        Line2D([0], [0], marker="^", color="w", markerfacecolor="gray", markersize=9, label="Test  ▲"),
+        Line2D([0], [0], marker="o", color="gray", markerfacecolor="none",
+               markeredgewidth=2, markersize=10, linestyle="None", label="Train  (hollow)"),
+        Line2D([0], [0], marker="o", color="gray", markerfacecolor="gray",
+               markersize=10, linestyle="None", label="Test  (filled)"),
     ]
-    ax.set_xlabel("Pooled RMSE (N·m)  ← lower is better", fontsize=11)
-    ax.set_ylabel("R² overall  ↑ higher is better", fontsize=11)
+    ax.set_xlabel("Pooled RMSE (N.m)  lower is better", fontsize=12)
+    ax.set_ylabel("R2 overall  higher is better", fontsize=12)
     ax.grid(True, alpha=0.3)
     fig.tight_layout(rect=[0, 0.10, 1, 1])
-    fig.legend(
-        handles=type_handles + marker_handles,
-        loc="lower center", bbox_to_anchor=(0.5, 0.02),
-        ncol=len(type_handles) + 2, fontsize=9,
-    )
+    fig.legend(handles=type_handles + marker_handles,
+               loc="lower center", bbox_to_anchor=(0.5, 0.02),
+               ncol=len(type_handles) + 2, fontsize=10)
 
     _save_fig(fig, output_dir / "fig6_r2_vs_rmse_scatter.png")
 
 
 # ---------------------------------------------------------------------------
-# Fig 7 — MAE & NRMSE Comparison
+# Fig 7 - MAE & NRMSE Comparison (Train vs Test)
 # ---------------------------------------------------------------------------
 
 def plot_mae_nrmse_comparison(
@@ -932,73 +1042,62 @@ def plot_mae_nrmse_comparison(
         return
 
     type_colors = _type_color_map(list(groups.keys()))
-    bar_colors = [type_colors.get(r.get("model_type", "?"), "steelblue") for r in all_recs]
-    labels = [_model_label(r) for r in all_recs]
+    bar_colors = [type_colors.get(r.get("model_type", "?"), "#888888") for r in all_recs]
+    labels = [_arch_short_label(r.get("model_type", "?")) for r in all_recs]
 
     n = len(all_recs)
     x = np.arange(n)
-    bw = 0.22
+    bw = 0.32
 
-    fig, (ax_mae, ax_nrmse) = plt.subplots(
-        1, 2,
-        figsize=(max(13, n * 3.2), 7),
-        num="Fig 7 — MAE and NRMSE Comparison (best per type)",
-    )
-    fig.suptitle(
-        "Fig 7 — MAE (N·m) and NRMSE  —  Best Model per Type  (↓ lower is better)\n"
-        "Solid = Val  ·  Hatched = Test  ·  Δ = Test − Val  (red = test worse, green = test better)",
-        fontsize=12, fontweight="bold",
-    )
+    fig, (ax_mae, ax_nrmse) = plt.subplots(1, 2, figsize=(max(11, n * 3.2), 6))
 
-    for ax, key, ylabel, title in [
-        (ax_mae,   "mae_mean",   "Mean Absolute Error (N·m)  ↓ lower is better", "MAE per Model Type"),
-        (ax_nrmse, "nrmse_mean", "Normalised RMSE  ↓ lower is better",           "NRMSE per Model Type"),
+    for ax, key, ylabel, title, letter in [
+        (ax_mae,   "mae_mean",   "Mean Absolute Error (N.m)  lower is better", "(a) MAE",   "a"),
+        (ax_nrmse, "nrmse_mean", "Normalised RMSE  lower is better",            "(b) NRMSE", "b"),
     ]:
-        vv = [_split_scalar(r, "val",  key) for r in all_recs]
-        tv = [_split_scalar(r, "test", key) for r in all_recs]
-        dv = [t - v if (t == t and v == v) else float("nan") for t, v in zip(tv, vv)]
+        tr_v = [_split_scalar(r, "train", key) for r in all_recs]
+        te_v = [_split_scalar(r, "test",  key) for r in all_recs]
 
-        bv = ax.bar(x - bw, vv, bw, color=bar_colors, alpha=0.85, edgecolor="white")
-        bt = ax.bar(x,      tv, bw, color=bar_colors, alpha=0.55, edgecolor="white", hatch="///")
-        bd = ax.bar(x + bw, dv, bw, color="#b0b0b0",  alpha=0.80, edgecolor="#888888", hatch="xxx")
+        b_tr = ax.bar(x - bw / 2, tr_v, bw, color=bar_colors, alpha=0.90,
+                      edgecolor="white", linewidth=0.8)
+        b_te = ax.bar(x + bw / 2, te_v, bw, color=bar_colors, alpha=0.60,
+                      edgecolor="white", linewidth=0.8, hatch="////")
 
-        _annotate_bars(ax, bv, vv, fontsize=8, rotation=75)
-        _annotate_bars(ax, bt, tv, fontsize=8, rotation=75)
+        for b, v in zip(b_tr, tr_v):
+            if v == v and np.isfinite(v):
+                ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.00005,
+                        f"{v:.4f}", ha="center", va="bottom", fontsize=9, rotation=75)
+        for b, v in zip(b_te, te_v):
+            if v == v and np.isfinite(v):
+                ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.00005,
+                        f"{v:.4f}", ha="center", va="bottom", fontsize=9, rotation=75)
 
-        for bar, v in zip(bd, dv):
-            if v == v:
-                colour = "#cc2222" if v > 0 else "#228822"
-                ax.text(
-                    bar.get_x() + bar.get_width() / 2,
-                    max(bar.get_height(), 0) + 0.00005,
-                    f"{v:+.4f}",
-                    ha="center", va="bottom", fontsize=7.5, rotation=75, color=colour, fontweight="bold",
-                )
+        valid = [v for v in tr_v + te_v if v == v and np.isfinite(v)]
+        if valid:
+            ax.set_ylim(max(0.0, min(valid) * 0.97), max(valid) * 1.10)
 
         ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=10, fontweight="bold")
-        ax.set_xlabel("Model Architecture", fontsize=11)
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.set_title(title, fontsize=12, fontweight="bold")
+        ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=11, fontweight="bold")
+        ax.set_xlabel("Architecture", fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(title, fontsize=13, fontweight="bold")
         ax.set_xlim(-0.6, n - 0.4)
+        _panel_label(ax, letter)
 
-    type_handles = [Patch(color=type_colors[t], label=t) for t in sorted(type_colors)]
-    style_handles = [
-        Patch(facecolor="gray", alpha=0.85, label="Solid = Val"),
-        Patch(facecolor="gray", alpha=0.55, hatch="///", label="Hatched = Test"),
-        Patch(facecolor="#b0b0b0", hatch="xxx", label="Δ = Test − Val"),
-    ]
-    fig.tight_layout(rect=[0, 0.17, 1, 1])
-    fig.legend(
-        handles=type_handles + style_handles,
-        loc="lower center", bbox_to_anchor=(0.5, 0.02), ncol=4, fontsize=9,
-    )
+    proxy_tr = Patch(facecolor="#888888", alpha=0.90, label="Train")
+    proxy_te = Patch(facecolor="#888888", alpha=0.60, hatch="////", label="Test")
+    arch_handles = [Patch(facecolor=type_colors[t], label=_arch_short_label(t))
+                    for t in sorted(type_colors)]
+    fig.tight_layout(rect=[0, 0.11, 1, 1])
+    fig.legend(handles=arch_handles + [proxy_tr, proxy_te],
+               loc="lower center", bbox_to_anchor=(0.5, 0.02),
+               ncol=len(arch_handles) + 2, fontsize=10)
 
     _save_fig(fig, output_dir / "fig7_mae_nrmse_comparison.png")
 
 
 # ---------------------------------------------------------------------------
-# Fig 8 — EDR Physics Correction Magnitudes (conditional)
+# Fig 8 - EDR Physics Correction Magnitudes (unchanged)
 # ---------------------------------------------------------------------------
 
 def plot_edr_physics_corrections(
@@ -1007,43 +1106,29 @@ def plot_edr_physics_corrections(
 ) -> None:
     edr_recs = groups.get("EDR", [])
     if not edr_recs:
-        logger.info("No EDR models — skipping Fig 8.")
+        logger.info("No EDR models - skipping Fig 8.")
         return
 
-    edr_with_history = [
-        r for r in edr_recs
-        if "mean_abs_delta_g" in r.get("_history", {})
-    ]
+    edr_with_history = [r for r in edr_recs if "mean_abs_delta_g" in r.get("_history", {})]
     if not edr_with_history:
-        logger.info("No EDR correction history found — skipping Fig 8.")
+        logger.info("No EDR correction history found - skipping Fig 8.")
         return
 
     best_edr = min(edr_with_history, key=lambda r: _split_scalar(r, "test", "rmse_pooled"))
     edr_with_data = [best_edr]
 
     corr_cols = [
-        ("mean_abs_delta_g",     "δg — gravity correction  (mean |δg|)"),
-        ("mean_frob_delta_M",    "δM — inertia correction  (Frobenius norm)"),
-        ("mean_abs_delta_C_qd",  "δC·q̇ — Coriolis correction  (mean |δC·q̇|)"),
-        ("mean_abs_delta_tau_f", "δτ_f — friction correction  (mean |δτ_f|)"),
+        ("mean_abs_delta_g",     "delta_g gravity correction"),
+        ("mean_frob_delta_M",    "delta_M inertia correction (Frobenius)"),
+        ("mean_abs_delta_C_qd",  "delta_C*qd Coriolis correction"),
+        ("mean_abs_delta_tau_f", "delta_tau_f friction correction"),
     ]
 
-    cmap = matplotlib.colormaps["tab10"]
-    model_colors = {
-        r.get("run_id", str(i)): cmap(i % 10)
-        for i, r in enumerate(edr_with_data)
-    }
+    cmap_edr = matplotlib.colormaps["tab10"]
+    model_colors = {r.get("run_id", str(i)): cmap_edr(i % 10)
+                    for i, r in enumerate(edr_with_data)}
 
-    fig, axes = plt.subplots(
-        2, 2,
-        figsize=(16, 9),
-        num="Fig 8 — EDR Physics Correction Magnitudes",
-    )
-    fig.suptitle(
-        "Fig 8 — EDR Physics Correction Magnitudes Over Training  (best EDR model)\n"
-        "★ = best checkpoint epoch  ·  larger value = greater learnable correction applied",
-        fontsize=12, fontweight="bold",
-    )
+    fig, axes = plt.subplots(2, 2, figsize=(16, 9))
 
     for ax, (col, title) in zip(axes.flatten(), corr_cols):
         for rec in edr_with_data:
@@ -1062,15 +1147,16 @@ def plot_edr_physics_corrections(
                 bi = best_ep - 1
                 ax.scatter([ep_arr[bi]], [vals[bi]], color=c, s=70, zorder=5, marker="*")
 
-        ax.set_title(title, fontsize=10, fontweight="bold")
-        ax.set_xlabel("Epoch", fontsize=10)
-        ax.set_ylabel("Correction Magnitude", fontsize=10)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_xlabel("Epoch", fontsize=11)
+        ax.set_ylabel("Correction Magnitude", fontsize=11)
         ax.grid(True, alpha=0.3)
 
     h, lbls = axes[0, 0].get_legend_handles_labels()
     if h:
         fig.tight_layout(rect=[0, 0.10, 1, 1])
-        fig.legend(h, lbls, loc="lower center", bbox_to_anchor=(0.5, 0.02), ncol=len(h), fontsize=9)
+        fig.legend(h, lbls, loc="lower center", bbox_to_anchor=(0.5, 0.02),
+                   ncol=len(h), fontsize=10)
     else:
         fig.tight_layout()
 
@@ -1078,7 +1164,7 @@ def plot_edr_physics_corrections(
 
 
 # ---------------------------------------------------------------------------
-# Fig 9 — Per-Joint R² and RMSE Breakdown  (best per type)
+# Fig 9 - Per-Joint R2 and RMSE Breakdown (Val vs Test, simplified)
 # ---------------------------------------------------------------------------
 
 def plot_per_joint_r2_breakdown(
@@ -1091,135 +1177,84 @@ def plot_per_joint_r2_breakdown(
 
     type_colors = _type_color_map(list(groups.keys()))
     n_models = len(all_recs)
-    model_labels = [_model_label(r) for r in all_recs]
-    colors = [type_colors.get(r.get("model_type", "?"), "steelblue") for r in all_recs]
+    model_labels = [_arch_short_label(r.get("model_type", "?")) for r in all_recs]
+    colors = [type_colors.get(r.get("model_type", "?"), "#888888") for r in all_recs]
 
-    test_r2_mat   = np.array([_split_joints(r, "test", "r2")   for r in all_recs])
-    val_r2_mat    = np.array([_split_joints(r, "val",  "r2")   for r in all_recs])
-    test_rmse_mat = np.array([_split_joints(r, "test", "rmse") for r in all_recs])
-    val_rmse_mat  = np.array([_split_joints(r, "val",  "rmse") for r in all_recs])
-    delta_r2_mat   = test_r2_mat   - val_r2_mat
-    delta_rmse_mat = test_rmse_mat - val_rmse_mat
+    test_r2_mat   = np.array([_split_joints(r, "test",  "r2")   for r in all_recs])
+    train_r2_mat  = np.array([_split_joints(r, "train", "r2")   for r in all_recs])
+    test_rmse_mat = np.array([_split_joints(r, "test",  "rmse") for r in all_recs])
+    train_rmse_mat = np.array([_split_joints(r, "train", "rmse") for r in all_recs])
 
     x = np.arange(N_JOINTS)
-    bw = 0.80 / (n_models * 2)
-    grp_bw = bw * 2 + 0.03
-    grp_offsets = np.linspace(
-        -(n_models - 1) / 2.0, (n_models - 1) / 2.0, n_models
-    ) * grp_bw
+    bw = 0.70 / (n_models * 2)
+    grp_bw = bw * 2 + 0.04
+    grp_offsets = np.linspace(-(n_models - 1) / 2.0, (n_models - 1) / 2.0, n_models) * grp_bw
 
-    fig, axes = plt.subplots(
-        2, 2,
-        figsize=(20, 11),
-        num="Fig 9 — Per-Joint R² and RMSE Breakdown (best per type)",
-    )
-    fig.suptitle(
-        "Fig 9 — Per-Joint R² and RMSE  —  Best Model per Type\n"
-        "Top: Val vs Test side-by-side  ·  Bottom: Δ = Test − Val  (red = test worse, green = test better)",
-        fontsize=12, fontweight="bold",
-    )
+    fig, axes = plt.subplots(1, 2, figsize=(18, 7))
 
-    for ax, val_mat, test_mat, title, ylabel in [
-        (axes[0, 0], val_r2_mat,   test_r2_mat,   "R² per Joint (↑ higher is better)", "R²"),
-        (axes[0, 1], val_rmse_mat, test_rmse_mat, "RMSE per Joint  (↓ lower is better)", "RMSE (N·m)"),
+    for ax, train_mat, test_mat, title, ylabel, higher_better in [
+        (axes[0], train_r2_mat,   test_r2_mat,
+         "(a) R2 per Joint", "R2", True),
+        (axes[1], train_rmse_mat, test_rmse_mat,
+         "(b) RMSE per Joint (N.m)", "RMSE (N.m)", False),
     ]:
         for mi, (goff, c, lbl) in enumerate(zip(grp_offsets, colors, model_labels)):
-            vv = val_mat[mi]
-            tv = test_mat[mi]
-            bv = ax.bar(x + goff - bw / 2, vv, bw, color=c, alpha=0.85, edgecolor="white",
-                        label=f"{lbl} Val")
-            bt = ax.bar(x + goff + bw / 2, tv, bw, color=c, alpha=0.50, edgecolor="white",
-                        hatch="///", label=f"{lbl} Test")
-            _annotate_bars(ax, bv, list(vv), fontsize=6.5, rotation=75)
-            _annotate_bars(ax, bt, list(tv), fontsize=6.5, rotation=75)
+            ax.bar(x + goff - bw / 2, train_mat[mi], bw, color=c, alpha=0.88,
+                   edgecolor="white", linewidth=0.5)
+            ax.bar(x + goff + bw / 2, test_mat[mi],  bw, color=c, alpha=0.55,
+                   edgecolor="white", linewidth=0.5, hatch="////")
+
         ax.set_xticks(x)
-        ax.set_xticklabels(JOINT_NAMES, fontsize=11, fontweight="bold")
-        ax.set_xlabel("Joint", fontsize=11)
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.set_title(title, fontsize=12, fontweight="bold")
+        ax.set_xticklabels(JOINT_NAMES_SHORT, fontsize=12, fontweight="bold")
+        ax.set_xlabel("Joint", fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(title, fontsize=13, fontweight="bold")
 
-    delta_bw = 0.65 / n_models
-    delta_offsets = np.linspace(
-        -(n_models - 1) / 2.0, (n_models - 1) / 2.0, n_models
-    ) * (delta_bw + 0.04)
+        all_vals = list(train_mat.flatten()) + list(test_mat.flatten())
+        valid_vals = [v for v in all_vals if v == v and np.isfinite(v)]
+        if valid_vals:
+            lo = max(0.0, min(valid_vals) - 0.02) if higher_better else max(0.0, min(valid_vals) * 0.97)
+            hi = min(1.02, max(valid_vals) + 0.02) if higher_better else max(valid_vals) * 1.08
+            ax.set_ylim(lo, hi)
 
-    for ax, delta_mat, title, ylabel, higher_better in [
-        (axes[1, 0], delta_r2_mat,   "Δ R² per Joint  (Test − Val)", "Δ R²  (Test − Val)", True),
-        (axes[1, 1], delta_rmse_mat, "Δ RMSE per Joint  (Test − Val)", "Δ RMSE in N·m  (Test − Val)", False),
-    ]:
-        ax.axhline(0, color="#555555", lw=1.2, ls="--", zorder=2)
-        for mi, (doff, c, lbl) in enumerate(zip(delta_offsets, colors, model_labels)):
-            dv = delta_mat[mi]
-            bar_colors_d = []
-            for v in dv:
-                if v != v:
-                    bar_colors_d.append("#aaaaaa")
-                elif (higher_better and v >= 0) or (not higher_better and v <= 0):
-                    bar_colors_d.append("#228822")
-                else:
-                    bar_colors_d.append("#cc2222")
-            bars = ax.bar(
-                x + doff, dv, delta_bw * 0.90,
-                color=bar_colors_d, alpha=0.80, edgecolor="white", linewidth=0.5,
-                label=lbl,
-            )
-            for bar, v in zip(bars, dv):
-                if v == v:
-                    ypos = bar.get_height() + 0.00005 if v >= 0 else bar.get_height() - 0.00005
-                    ax.text(
-                        bar.get_x() + bar.get_width() / 2,
-                        ypos,
-                        f"{v:+.4f}",
-                        ha="center", va="bottom" if v >= 0 else "top",
-                        fontsize=6.5, rotation=75,
-                        color="#cc2222" if (
-                            (higher_better and v < 0) or (not higher_better and v > 0)
-                        ) else "#228822",
-                    )
-        ax.set_xticks(x)
-        ax.set_xticklabels(JOINT_NAMES, fontsize=11, fontweight="bold")
-        ax.set_xlabel("Joint", fontsize=11)
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.set_title(title, fontsize=12, fontweight="bold")
-
-    type_handles = [Patch(color=c, label=lbl) for c, lbl in zip(colors, model_labels)]
+    arch_handles = [Patch(facecolor=c, label=lbl) for c, lbl in zip(colors, model_labels)]
     style_handles = [
-        Patch(facecolor="gray", alpha=0.85, label="Solid = Val"),
-        Patch(facecolor="gray", alpha=0.50, hatch="///", label="Hatched = Test"),
-        Patch(facecolor="#228822", alpha=0.80, label="Δ green = test better"),
-        Patch(facecolor="#cc2222", alpha=0.80, label="Δ red = test worse"),
+        Patch(facecolor="#888888", alpha=0.88, label="Train"),
+        Patch(facecolor="#888888", alpha=0.55, hatch="////", label="Test"),
     ]
     fig.tight_layout(rect=[0, 0.10, 1, 1])
-    fig.legend(
-        handles=type_handles + style_handles,
-        loc="lower center", bbox_to_anchor=(0.5, 0.02), ncol=max(3, n_models + 2), fontsize=9,
-    )
+    fig.legend(handles=arch_handles + style_handles,
+               loc="lower center", bbox_to_anchor=(0.5, 0.02),
+               ncol=max(3, n_models + 2), fontsize=10)
 
     _save_fig(fig, output_dir / "fig9_per_joint_r2_breakdown.png")
 
 
 # ===========================================================================
-# ── GRID-SPECIFIC FIGURES (Fig 10–13) ────────────────────────────────────────
+# Grid-specific figures (Fig 10-13)
 # ===========================================================================
 
-
 def _estimate_params(hidden_layers: list[int], n_in: int = 15, n_out: int = 5) -> int:
-    """Estimate MLP trainable-parameter count from layer sizes."""
     sizes = [n_in] + list(hidden_layers) + [n_out]
     return sum(sizes[i] * sizes[i + 1] + sizes[i + 1] for i in range(len(sizes) - 1))
 
 
 def _hp_val_str(v: Any) -> str:
-    """Human-readable string for an HP value (handles lists like hidden_layers)."""
     if isinstance(v, list):
-        return "×".join(str(x) for x in v)
+        return "x".join(str(x) for x in v)
     if isinstance(v, float):
-        return f"{v:.0e}" if abs(v) < 0.01 or abs(v) > 999 else f"{v:.4g}"
-    return str(v)
+        if abs(v) < 0.01 or abs(v) > 999:
+            s = f"{v:.2e}"
+            s = re.sub(r"0\.00e\+00", "0", s)
+            return s
+        return f"{v:.4g}"
+    s = str(v)
+    s = re.sub(r"^0e\+00$", "0", s)
+    return s
 
 
 # ---------------------------------------------------------------------------
-# Fig 10 — Top-K Leaderboard per Architecture
+# Fig 10 - Top-K Leaderboard
 # ---------------------------------------------------------------------------
 
 def plot_topk_leaderboard(
@@ -1227,11 +1262,6 @@ def plot_topk_leaderboard(
     output_dir: Path,
     top_k: int = 10,
 ) -> None:
-    """Ranked table of the top-K models per architecture sorted by test RMSE.
-
-    Renders one sub-figure per architecture as a matplotlib table with key
-    metrics and the most informative HP values highlighted.
-    """
     arch_order = [t for t in ["BlackBoxFNN", "PhysicsRegularizedFNN", "ResidualCorrectionFNN", "EDR"]
                   if t in groups]
     arch_order += [t for t in sorted(groups) if t not in arch_order]
@@ -1239,98 +1269,91 @@ def plot_topk_leaderboard(
         return
 
     n_archs = len(arch_order)
-    fig_h = max(6.0, top_k * 0.55 + 2.5) * n_archs
-    fig, axes = plt.subplots(
-        n_archs, 1,
-        figsize=(22, fig_h),
-        num=f"Fig 10 — Top-{top_k} Leaderboard per Architecture",
-    )
+    fig_h = max(5.0, top_k * 0.52 + 2.0) * n_archs
+    fig, axes = plt.subplots(n_archs, 1, figsize=(22, fig_h))
     if n_archs == 1:
         axes = [axes]
-    fig.suptitle(
-        f"Fig 10 — Top-{top_k} Leaderboard per Architecture  (ranked by Test RMSE ↑ lower is better)\n"
-        "All metrics on held-out test split unless noted",
-        fontsize=13, fontweight="bold",
-    )
 
     for ax, mtype in zip(axes, arch_order):
         recs = sorted(groups[mtype], key=lambda r: _split_scalar(r, "test", "rmse_pooled"))
         recs = recs[:top_k]
-        hp_keys = _ARCH_HP_KEYS.get(mtype, _GRID_HP_KEYS_FNN)
+        hp_keys_all = _ARCH_HP_KEYS.get(mtype, _GRID_HP_KEYS_FNN)
 
-        col_headers = ["Rank", "Test RMSE↓", "Val RMSE↓", "Test R²↑", "Test MAE↓", "Epochs", "ES"] + hp_keys
+        # Drop HP columns that are constant across all top-k runs
+        varying_hp_keys: list[str] = []
+        for k in hp_keys_all:
+            vals = set(_hp_val_str(rec.get("hyperparams", {}).get(k, "-")) for rec in recs)
+            if len(vals) > 1:
+                varying_hp_keys.append(k)
+
+        _HP_HEADER = {
+            "hidden_layers": "Layers", "dropout": "Dropout",
+            "learning_rate": "LR", "weight_decay": "WD",
+            "batch_size": "BS", "activation": "Act",
+            "physics_weight": "Phys-W", "physics_warmup_fraction": "Phys-WF",
+            "phi_lr_ratio": "phi-LR", "alpha_reg_weight": "alpha-Reg",
+        }
+
+        col_headers = (
+            ["Rank", "Test RMSE", "Val RMSE", "Test R2", "Test MAE", "Epochs", "ES"]
+            + [_HP_HEADER.get(k, k) for k in varying_hp_keys]
+        )
         table_data = []
         for rank, rec in enumerate(recs, 1):
             hp = rec.get("hyperparams", {})
             row = [
                 str(rank),
-                f"{_split_scalar(rec, 'test', 'rmse_pooled'):.5f}",
-                f"{_split_scalar(rec, 'val',  'rmse_pooled'):.5f}",
+                f"{_split_scalar(rec, 'test', 'rmse_pooled'):.4f}",
+                f"{_split_scalar(rec, 'val',  'rmse_pooled'):.4f}",
                 f"{_split_scalar(rec, 'test', 'r2_overall'):.4f}",
-                f"{_split_scalar(rec, 'test', 'mae_mean'):.5f}",
+                f"{_split_scalar(rec, 'test', 'mae_mean'):.4f}",
                 str(rec.get("epochs_trained", "?")),
                 "Y" if rec.get("stopped_early") else "N",
             ]
-            for k in hp_keys:
-                row.append(_hp_val_str(hp.get(k, "—")))
+            for k in varying_hp_keys:
+                v = hp.get(k, "-")
+                if k == "learning_rate" and isinstance(v, float):
+                    row.append(f"{v:.1e}")
+                else:
+                    row.append(_hp_val_str(v))
             table_data.append(row)
 
         ax.axis("off")
-        tbl = ax.table(
-            cellText=table_data,
-            colLabels=col_headers,
-            loc="center",
-            cellLoc="center",
-        )
+        tbl = ax.table(cellText=table_data, colLabels=col_headers,
+                       loc="center", cellLoc="center")
         tbl.auto_set_font_size(False)
-        tbl.set_fontsize(8)
-        tbl.scale(1.0, 1.55)
+        tbl.set_fontsize(10)
+        tbl.scale(1.0, 1.60)
 
-        # Colour header row
         for col_idx in range(len(col_headers)):
-            tbl[(0, col_idx)].set_facecolor("#2c4770")
-            tbl[(0, col_idx)].set_text_props(color="white", fontweight="bold")
+            cell = tbl[(0, col_idx)]
+            cell.set_facecolor("#2c4770")
+            cell.set_text_props(color="white", fontweight="bold")
 
-        # Gradient colour for Test RMSE column (col index 1): best=green, worst=red
-        if len(recs) > 1:
-            rmse_vals = [_split_scalar(r, "test", "rmse_pooled") for r in recs]
-            lo, hi = min(rmse_vals), max(rmse_vals)
-            span = hi - lo if hi != lo else 1.0
-            cmap_g = matplotlib.colormaps["RdYlGn_r"]
-            for row_idx, rv in enumerate(rmse_vals, 1):
-                t = (rv - lo) / span
-                tbl[(row_idx, 1)].set_facecolor(cmap_g(t)[:3] + (0.6,))
-
-        # Alternating row backgrounds
         for row_idx in range(1, len(recs) + 1):
-            bg = "#f0f4ff" if row_idx % 2 == 0 else "white"
+            bg = "#f4f7fb" if row_idx % 2 == 0 else "white"
             for col_idx in range(len(col_headers)):
-                if col_idx != 1:  # skip RMSE col already coloured
-                    tbl[(row_idx, col_idx)].set_facecolor(bg)
+                tbl[(row_idx, col_idx)].set_facecolor(bg)
+
+        tbl[(1, 1)].set_text_props(fontweight="bold")
 
         ax.set_title(
-            f"{mtype}  —  Top {min(top_k, len(recs))} of {len(groups[mtype])} runs",
-            fontsize=11, fontweight="bold", pad=12,
-        )
+            f"{_arch_short_label(mtype)}  -  Top {min(top_k, len(recs))} of"
+            f" {len(groups[mtype])} runs  (ranked by Test RMSE)",
+            fontsize=12, fontweight="bold", pad=10)
 
-    fig.tight_layout(pad=1.2)
+    fig.tight_layout(pad=1.0)
     _save_fig(fig, output_dir / "fig10_topk_leaderboard.png")
 
 
 # ---------------------------------------------------------------------------
-# Fig 11 — HP Importance (mean test RMSE per HP value, per architecture)
+# Fig 11 - HP Importance (dynamic grid, truncated y-axis)
 # ---------------------------------------------------------------------------
 
 def plot_hp_importance(
     groups: dict[str, list[dict[str, Any]]],
     output_dir: Path,
 ) -> None:
-    """For each architecture, for each HP dimension that varies across the grid,
-    compute the mean test RMSE grouped by HP value and display as grouped bars.
-
-    This gives a quick read of which HP values (and which dimensions) have
-    the largest effect on test performance.
-    """
     arch_order = [t for t in ["BlackBoxFNN", "PhysicsRegularizedFNN", "ResidualCorrectionFNN"]
                   if t in groups]
     arch_order += [t for t in sorted(groups) if t not in arch_order]
@@ -1338,101 +1361,138 @@ def plot_hp_importance(
         return
 
     n_archs = len(arch_order)
-    fig_rows = n_archs
-    fig_cols_max = 7  # max HP dims per arch to show
 
-    fig, axes_grid = plt.subplots(
-        fig_rows, fig_cols_max,
-        figsize=(fig_cols_max * 3.5, fig_rows * 4.5),
-        squeeze=False,
-        num="Fig 11 — HP Importance (mean test RMSE per HP value)",
-    )
-    fig.suptitle(
-        "Fig 11 — Hyperparameter Importance  (mean test RMSE per HP value, per architecture)\n"
-        "Lower bar = better mean performance for that HP value  ·  error bars = ±1 std",
-        fontsize=13, fontweight="bold",
-    )
+    varying_by_arch: dict[str, list[str]] = {}
+    for mtype in arch_order:
+        recs = groups[mtype]
+        hp_keys = _ARCH_HP_KEYS.get(mtype, _GRID_HP_KEYS_FNN)
+        varying = []
+        for k in hp_keys:
+            vals = set()
+            for rec in recs:
+                hp = rec.get("hyperparams", {})
+                if k in hp:
+                    vals.add(_hp_val_str(hp[k]))
+            if len(vals) > 1:
+                varying.append(k)
+        varying_by_arch[mtype] = varying
+
+    max_cols = max((len(v) for v in varying_by_arch.values()), default=1)
+    if max_cols == 0:
+        logger.info("No varying HPs found - skipping Fig 11.")
+        return
+
+    # Pre-pass: compute global y-axis range across ALL arch × HP combinations
+    # so every subplot shares the same scale for honest comparison.
+    _all_means_flat: list[float] = []
+    _all_stds_flat:  list[float] = []
+    for _mtype_pre in arch_order:
+        for _k_pre in varying_by_arch[_mtype_pre]:
+            _bkt_pre: dict[str, list[float]] = defaultdict(list)
+            for _rec_pre in groups[_mtype_pre]:
+                _tr_pre = _split_scalar(_rec_pre, "test", "rmse_pooled")
+                if not (_tr_pre == _tr_pre and np.isfinite(_tr_pre)):
+                    continue
+                _hp_pre = _rec_pre.get("hyperparams", {})
+                if _k_pre in _hp_pre:
+                    _bkt_pre[_hp_val_str(_hp_pre[_k_pre])].append(_tr_pre)
+            for _vals_pre in _bkt_pre.values():
+                if _vals_pre:
+                    _m = float(np.mean(_vals_pre))
+                    _s = float(np.std(_vals_pre)) if len(_vals_pre) > 1 else 0.0
+                    _all_means_flat.append(_m)
+                    _all_stds_flat.append(_s)
+    if _all_means_flat:
+        _g_lo_raw = min(m - s for m, s in zip(_all_means_flat, _all_stds_flat))
+        _g_hi_raw = max(m + s for m, s in zip(_all_means_flat, _all_stds_flat))
+        _margin   = (_g_hi_raw - _g_lo_raw) * 0.15
+        _g_lo = max(0.0, _g_lo_raw - _margin)
+        _g_hi = _g_hi_raw + _margin * 2.0   # extra room for n= count labels
+    else:
+        _g_lo, _g_hi = 0.0, 1.0
+
+    fig, axes_grid = plt.subplots(n_archs, max_cols,
+                                  figsize=(max_cols * 3.5, n_archs * 4.5), squeeze=False)
 
     for arch_idx, mtype in enumerate(arch_order):
         recs = groups[mtype]
-        hp_keys = _ARCH_HP_KEYS.get(mtype, _GRID_HP_KEYS_FNN)
+        varying = varying_by_arch[mtype]
 
-        # Collect (hp_val_str → [test_rmse, ...]) for each HP key
-        hp_buckets: dict[str, dict[str, list[float]]] = {k: defaultdict(list) for k in hp_keys}
+        hp_buckets: dict[str, dict[str, list[float]]] = {k: defaultdict(list) for k in varying}
         for rec in recs:
             tr = _split_scalar(rec, "test", "rmse_pooled")
-            if tr != tr:
+            if tr != tr or not np.isfinite(tr):
                 continue
             hp = rec.get("hyperparams", {})
-            for k in hp_keys:
+            for k in varying:
                 if k in hp:
                     hp_buckets[k][_hp_val_str(hp[k])].append(tr)
 
-        shown = 0
-        for col_idx, k in enumerate(hp_keys):
+        for col_idx in range(max_cols):
             ax = axes_grid[arch_idx, col_idx]
-            bucket = hp_buckets[k]
-            if len(bucket) <= 1:
+            if col_idx >= len(varying):
                 ax.axis("off")
                 continue
 
-            # Sort by numeric value when possible, else lexicographic
+            k = varying[col_idx]
+            bucket = hp_buckets[k]
+
             def _sort_key(s: str) -> tuple:
                 try:
-                    return (0, float(s.replace("×", "0")))
+                    return (0, float(s.replace("x", "0")))
                 except ValueError:
                     return (1, s)
 
             sorted_vals = sorted(bucket.keys(), key=_sort_key)
             means = [float(np.mean(bucket[v])) for v in sorted_vals]
-            stds  = [float(np.std(bucket[v])) if len(bucket[v]) > 1 else 0.0 for v in sorted_vals]
+            stds  = [float(np.std(bucket[v]))  if len(bucket[v]) > 1 else 0.0
+                     for v in sorted_vals]
+            n_runs = [len(bucket[v]) for v in sorted_vals]
 
             x_pos = np.arange(len(sorted_vals))
-            bars = ax.bar(x_pos, means, color="steelblue", alpha=0.80, width=0.6)
+            bar_col = [_OKABE_ITO_PALETTE[arch_idx % len(_OKABE_ITO_PALETTE)]] * len(sorted_vals)
+            ax.bar(x_pos, means, color=bar_col, alpha=0.80, width=0.6)
             ax.errorbar(x_pos, means, yerr=stds, fmt="none", color="black",
                         capsize=4, linewidth=1.2)
 
-            # Highlight the best (lowest) bar in green
-            best_idx_bar = int(np.argmin(means))
-            bars[best_idx_bar].set_facecolor("#2e8b57")
-            bars[best_idx_bar].set_alpha(0.95)
+            # Annotate each bar with the run count
+            _lbl_y_cap = _g_hi - (_g_hi - _g_lo) * 0.07
+            for xi, (m_val, s_val, n_val) in enumerate(zip(means, stds, n_runs)):
+                _lbl_y = min(m_val + s_val + (_g_hi - _g_lo) * 0.02, _lbl_y_cap)
+                ax.text(xi, _lbl_y, f"n={n_val}",
+                        ha="center", va="bottom", fontsize=8, color="#555555")
 
+            ax.set_ylim(_g_lo, _g_hi)
+
+            clean_labels = [re.sub(r"^0e\+00$", "0", v) for v in sorted_vals]
+            rotate = max(len(v) for v in clean_labels) > 6
             ax.set_xticks(x_pos)
-            ax.set_xticklabels(sorted_vals, rotation=45, ha="right", fontsize=7)
-            ax.set_title(f"{k}", fontsize=9, fontweight="bold")
-            ax.set_ylabel("Mean Test RMSE (N·m)", fontsize=7)
-            ax.set_xlabel("HP value", fontsize=7)
-            ax.tick_params(labelsize=7)
+            ax.set_xticklabels(clean_labels,
+                               rotation=30 if rotate else 0,
+                               ha="right" if rotate else "center",
+                               fontsize=10)
+            ax.set_title(k, fontsize=11, fontweight="bold")
+            ax.tick_params(labelsize=10)
             ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%.4f"))
-            shown += 1
 
-        # Turn off unused columns
-        for col_idx in range(len(hp_keys), fig_cols_max):
-            axes_grid[arch_idx, col_idx].axis("off")
-
-        # Architecture label on the left
-        axes_grid[arch_idx, 0].set_ylabel(
-            f"{mtype}\nMean Test RMSE (N·m)", fontsize=8, fontweight="bold", labelpad=8
-        )
+            if col_idx == 0:
+                ax.set_ylabel(f"{_arch_short_label(mtype)}\nMean Test RMSE (N.m)",
+                              fontsize=10, fontweight="bold", labelpad=8)
+            else:
+                ax.set_ylabel("Mean Test RMSE (N.m)", fontsize=9)
 
     fig.tight_layout(pad=1.5)
     _save_fig(fig, output_dir / "fig11_hp_importance.png")
 
 
 # ---------------------------------------------------------------------------
-# Fig 12 — HP Pair Heatmaps (key 2-D interactions)
+# Fig 12 - HP Pair Heatmaps (viridis_r, shared colorbar, skip degenerate)
 # ---------------------------------------------------------------------------
 
 def plot_hp_pair_heatmaps(
     groups: dict[str, list[dict[str, Any]]],
     output_dir: Path,
 ) -> None:
-    """2-D heatmap of mean test RMSE for the most influential HP pairs.
-
-    For each architecture the pair (learning_rate × dropout) and
-    (hidden_layers × batch_size) are shown.  Cells with no data are masked.
-    """
-    # Key pairs to show per architecture
     _PAIR_DEFS: dict[str, list[tuple[str, str]]] = {
         "BlackBoxFNN":           [("learning_rate", "dropout"), ("hidden_layers", "batch_size")],
         "PhysicsRegularizedFNN": [("learning_rate", "physics_weight"), ("hidden_layers", "dropout")],
@@ -1447,60 +1507,38 @@ def plot_hp_pair_heatmaps(
         return
 
     n_pairs = 2
-    n_archs = len(arch_order)
-    fig, axes_grid = plt.subplots(
-        n_archs, n_pairs,
-        figsize=(n_pairs * 7, n_archs * 6.5),
-        squeeze=False,
-        num="Fig 12 — HP Pair Heatmaps (2-D RMSE interactions)",
-    )
-    fig.suptitle(
-        "Fig 12 — HP Pair Heatmaps  (mean test RMSE for 2-D HP interactions)\n"
-        "Darker cell = lower mean test RMSE = better  ·  'X' = no data for this combination",
-        fontsize=13, fontweight="bold",
-    )
 
-    cmap_hm = matplotlib.colormaps["RdYlGn_r"]
+    def _sort_hp(s: str) -> tuple:
+        try:
+            return (0, float(s.replace("x", "0")))
+        except ValueError:
+            return (1, s)
 
+    # First pass: collect non-degenerate panels
+    panel_info = []
     for arch_idx, mtype in enumerate(arch_order):
         recs = groups[mtype]
         pair_defs = _PAIR_DEFS.get(mtype, _PAIR_DEFS_DEFAULT)
 
         for pair_idx, (key_x, key_y) in enumerate(pair_defs[:n_pairs]):
-            ax = axes_grid[arch_idx, pair_idx]
-
-            # Collect all unique values and build a 2-D RMSE matrix
-            vals_x: list[Any] = []
-            vals_y: list[Any] = []
+            vals_x, vals_y = [], []
             for rec in recs:
                 hp = rec.get("hyperparams", {})
                 if key_x in hp and key_y in hp:
-                    vx = _hp_val_str(hp[key_x])
-                    vy = _hp_val_str(hp[key_y])
-                    if vx not in vals_x:
-                        vals_x.append(vx)
-                    if vy not in vals_y:
-                        vals_y.append(vy)
+                    vx = _hp_val_str(hp[key_x]); vy = _hp_val_str(hp[key_y])
+                    if vx not in vals_x: vals_x.append(vx)
+                    if vy not in vals_y: vals_y.append(vy)
 
-            def _sort_key_hp(s: str) -> tuple:
-                try:
-                    return (0, float(s.replace("×", "0")))
-                except ValueError:
-                    return (1, s)
+            vals_x = sorted(vals_x, key=_sort_hp)
+            vals_y = sorted(vals_y, key=_sort_hp)
 
-            vals_x = sorted(vals_x, key=_sort_key_hp)
-            vals_y = sorted(vals_y, key=_sort_key_hp)
-
-            if not vals_x or not vals_y:
-                ax.axis("off")
-                ax.set_title(f"{key_x} × {key_y}\n(no data)", fontsize=9)
+            if len(vals_x) <= 1 or len(vals_y) <= 1:
                 continue
 
-            # Accumulate test RMSE per cell
             cell_data: dict[tuple[str, str], list[float]] = defaultdict(list)
             for rec in recs:
                 tr = _split_scalar(rec, "test", "rmse_pooled")
-                if tr != tr:
+                if tr != tr or not np.isfinite(tr):
                     continue
                 hp = rec.get("hyperparams", {})
                 if key_x in hp and key_y in hp:
@@ -1509,143 +1547,343 @@ def plot_hp_pair_heatmaps(
             mat = np.full((len(vals_y), len(vals_x)), np.nan)
             for (vx, vy), rmse_list in cell_data.items():
                 if vx in vals_x and vy in vals_y:
-                    xi = vals_x.index(vx)
-                    yi = vals_y.index(vy)
-                    mat[yi, xi] = float(np.mean(rmse_list))
+                    mat[vals_y.index(vy), vals_x.index(vx)] = float(np.mean(rmse_list))
 
-            # Normalise for colour mapping
-            valid_vals = mat[~np.isnan(mat)]
-            if len(valid_vals) == 0:
-                ax.axis("off")
+            valid_v = mat[~np.isnan(mat)]
+            if len(valid_v) < 2:
                 continue
-            vmin, vmax = valid_vals.min(), valid_vals.max()
 
-            masked = np.ma.masked_invalid(mat)
-            im = ax.imshow(masked, cmap=cmap_hm, aspect="auto",
-                           vmin=vmin, vmax=vmax, interpolation="nearest")
-            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04,
-                         label="Mean Test RMSE (N·m)")
+            panel_info.append((arch_idx, pair_idx, mtype, key_x, key_y, mat, vals_x, vals_y))
 
-            ax.set_xticks(range(len(vals_x)))
-            ax.set_xticklabels(vals_x, rotation=45, ha="right", fontsize=8)
-            ax.set_yticks(range(len(vals_y)))
-            ax.set_yticklabels(vals_y, fontsize=8)
-            ax.set_xlabel(key_x, fontsize=9, fontweight="bold")
-            ax.set_ylabel(key_y, fontsize=9, fontweight="bold")
-            ax.set_title(
-                f"{mtype}\n{key_x} × {key_y}",
-                fontsize=10, fontweight="bold",
-            )
+    if not panel_info:
+        logger.info("No non-degenerate HP pairs found - skipping Fig 12.")
+        return
 
-            for yi in range(len(vals_y)):
-                for xi in range(len(vals_x)):
-                    v = mat[yi, xi]
-                    if np.isnan(v):
-                        ax.text(xi, yi, "X", ha="center", va="center",
-                                fontsize=9, color="#aaaaaa")
-                    else:
-                        brightness = (v - vmin) / (vmax - vmin) if vmax != vmin else 0.5
-                        txt_color = "white" if brightness > 0.6 else "black"
-                        ax.text(xi, yi, f"{v:.4f}", ha="center", va="center",
-                                fontsize=7.5, color=txt_color, fontweight="bold")
+    all_cell_vals = np.concatenate([info[5][~np.isnan(info[5])].flatten() for info in panel_info])
+    global_vmin = float(all_cell_vals.min())
+    global_vmax = float(all_cell_vals.max())
 
-    fig.tight_layout(pad=1.5)
+    n_panels = len(panel_info)
+    n_cols = min(n_pairs, n_panels)
+    n_rows = (n_panels + n_cols - 1) // n_cols
+
+    fig, axes_2d = plt.subplots(n_rows, n_cols, figsize=(n_cols * 7, n_rows * 6.0), squeeze=False)
+    axes_flat = [axes_2d[r][c] for r in range(n_rows) for c in range(n_cols)]
+
+    panel_letters = "abcdefghij"
+    im_last = None
+
+    for panel_num, (arch_idx, pair_idx, mtype, key_x, key_y,
+                    mat, vals_x, vals_y) in enumerate(panel_info):
+        ax = axes_flat[panel_num]
+        masked = np.ma.masked_invalid(mat)
+        im = ax.imshow(masked, cmap="viridis_r", aspect="auto",
+                       vmin=global_vmin, vmax=global_vmax, interpolation="nearest")
+        im_last = im
+
+        ax.set_xticks(range(len(vals_x)))
+        ax.set_xticklabels(vals_x, rotation=45, ha="right", fontsize=10)
+        ax.set_yticks(range(len(vals_y)))
+        ax.set_yticklabels(vals_y, fontsize=10)
+        ax.set_xlabel(key_x, fontsize=11, fontweight="bold")
+        ax.set_ylabel(key_y, fontsize=11, fontweight="bold")
+        letter = panel_letters[panel_num] if panel_num < len(panel_letters) else str(panel_num)
+        ax.set_title(f"({letter}) {_arch_short_label(mtype)}: {key_x} x {key_y}",
+                     fontsize=12, fontweight="bold")
+
+        for yi in range(len(vals_y)):
+            for xi in range(len(vals_x)):
+                v = mat[yi, xi]
+                if not np.isnan(v):
+                    norm_v = (v - global_vmin) / (global_vmax - global_vmin) if global_vmax > global_vmin else 0.5
+                    txt_c = "white" if norm_v < 0.5 else "black"
+                    ax.text(xi, yi, f"{v:.4f}", ha="center", va="center",
+                            fontsize=10, color=txt_c, fontweight="bold")
+                else:
+                    ax.text(xi, yi, "-", ha="center", va="center", fontsize=10, color="#aaaaaa")
+
+    for panel_num in range(len(panel_info), len(axes_flat)):
+        axes_flat[panel_num].axis("off")
+
+    if im_last is not None:
+        cbar = fig.colorbar(im_last, ax=axes_flat[:len(panel_info)],
+                            fraction=0.025, pad=0.03)
+        cbar.set_label("Mean Test RMSE (N.m)", fontsize=11)
+        cbar.ax.tick_params(labelsize=10)
+
+    fig.subplots_adjust(hspace=0.55, wspace=0.35)
     _save_fig(fig, output_dir / "fig12_hp_pair_heatmaps.png")
 
 
 # ---------------------------------------------------------------------------
-# Fig 13 — Pareto Front (test RMSE vs estimated parameter count)
+# Fig 13 - Architecture RMSE Distribution (Box + Strip plot)
 # ---------------------------------------------------------------------------
 
 def plot_pareto_front(
     groups: dict[str, list[dict[str, Any]]],
     output_dir: Path,
 ) -> None:
-    """Scatter of test RMSE vs estimated MLP parameter count for every run.
-
-    Points on the Pareto frontier (lowest RMSE for a given param budget)
-    are connected with a line to highlight the efficiency frontier.
-    """
+    """Box + strip plot of test RMSE distribution per architecture."""
     type_colors = _type_color_map(list(groups.keys()))
-    all_recs = [r for recs in groups.values() for r in recs]
+    arch_order = [t for t in ["BlackBoxFNN", "PhysicsRegularizedFNN", "ResidualCorrectionFNN"]
+                  if t in groups]
+    arch_order += [t for t in sorted(groups) if t not in arch_order and t != "EDR"]
 
-    fig, ax = plt.subplots(
-        figsize=(14, 8),
-        num="Fig 13 — Pareto Front (RMSE vs param count)",
-    )
-    fig.suptitle(
-        "Fig 13 — Pareto Front  —  Test RMSE vs Estimated Parameter Count\n"
-        "Each point = one trained run  ·  Pareto frontier per architecture highlighted",
-        fontsize=12, fontweight="bold",
-    )
+    arch_data: dict[str, list[float]] = {}
+    for mtype in arch_order:
+        vals = [_split_scalar(r, "test", "rmse_pooled") for r in groups[mtype]]
+        vals = [v for v in vals if v == v and np.isfinite(v)]
+        if vals:
+            arch_data[mtype] = vals
 
-    pareto_by_type: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    if not arch_data:
+        return
 
-    for rec in all_recs:
-        tr = _split_scalar(rec, "test", "rmse_pooled")
-        if tr != tr:
+    fig, ax = plt.subplots(figsize=(max(8, len(arch_data) * 3.0), 7))
+
+    x_positions = np.arange(len(arch_data))
+    rng = np.random.default_rng(42)
+
+    for xi, (mtype, vals) in enumerate(arch_data.items()):
+        c = type_colors.get(mtype, "#888888")
+        arr = np.array(vals)
+
+        ax.boxplot(arr, positions=[xi], widths=0.40, patch_artist=True,
+                   showfliers=False,
+                   medianprops=dict(color="black", linewidth=2.0),
+                   boxprops=dict(facecolor=c, alpha=0.35, linewidth=1.2),
+                   whiskerprops=dict(linewidth=1.2, color="#444444"),
+                   capprops=dict(linewidth=1.5, color="#444444"))
+
+        jitter = rng.uniform(-0.12, 0.12, size=len(arr))
+        ax.scatter(xi + jitter, arr, color=c, s=45, alpha=0.75, zorder=4,
+                   edgecolors="white", linewidths=0.5)
+
+        best_val = float(arr.min())
+        ax.annotate(f"Best: {best_val:.4f}",
+                    xy=(xi, best_val), xytext=(xi + 0.25, best_val - 0.0008),
+                    fontsize=9, color=c, fontweight="bold",
+                    arrowprops=dict(arrowstyle="->", color=c, lw=0.8))
+
+    all_vals = [v for vals in arch_data.values() for v in vals]
+    if all_vals:
+        ax.set_ylim(max(0.0, min(all_vals) * 0.994), max(all_vals) * 1.018)
+
+    short_labels = [_arch_short_label(t) for t in arch_data]
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(short_labels, fontsize=12, fontweight="bold")
+    ax.set_ylabel("Test RMSE (N.m)  lower is better", fontsize=12)
+    ax.set_xlabel("Architecture", fontsize=12)
+    ax.grid(True, axis="y", alpha=0.35)
+
+    arch_handles = [Patch(facecolor=type_colors.get(t, "#888888"),
+                          label=_arch_short_label(t), alpha=0.80)
+                    for t in arch_data]
+    fig.tight_layout(rect=[0, 0.10, 1, 1])
+    fig.legend(handles=arch_handles, loc="lower center",
+               bbox_to_anchor=(0.5, 0.02), ncol=len(arch_handles), fontsize=10)
+
+    _save_fig(fig, output_dir / "fig13_rmse_distribution.png")
+
+
+# ---------------------------------------------------------------------------
+# Fig 14 - Data Efficiency (data_train_fraction vs RMSE and R2)
+# ---------------------------------------------------------------------------
+
+def plot_data_efficiency(
+    groups: dict[str, list[dict[str, Any]]],
+    output_dir: Path,
+) -> None:
+    """Fig 14: Test RMSE and R2 vs training-data fraction, one line per architecture."""
+    arch_order = [t for t in ["BlackBoxFNN", "PhysicsRegularizedFNN", "ResidualCorrectionFNN"]
+                  if t in groups]
+    arch_order += [t for t in sorted(groups) if t not in arch_order]
+    if not arch_order:
+        return
+
+    type_colors = _type_color_map(list(groups.keys()))
+
+    frac_rmse: dict[str, dict[float, list[float]]] = {a: defaultdict(list) for a in arch_order}
+    frac_r2:   dict[str, dict[float, list[float]]] = {a: defaultdict(list) for a in arch_order}
+
+    for mtype in arch_order:
+        for rec in groups[mtype]:
+            frac = rec.get("hyperparams", {}).get("data_train_fraction")
+            if frac is None:
+                continue
+            frac = float(frac)
+            rmse = _split_scalar(rec, "test", "rmse_pooled")
+            r2   = _split_scalar(rec, "test", "r2_overall")
+            if rmse == rmse and np.isfinite(rmse):
+                frac_rmse[mtype][frac].append(rmse)
+            if r2 == r2 and np.isfinite(r2):
+                frac_r2[mtype][frac].append(r2)
+
+    all_fracs = sorted({f for a in arch_order for f in frac_rmse[a]})
+    if not all_fracs:
+        logger.info("No data_train_fraction data found - skipping Fig 14.")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    rng = np.random.default_rng(99)
+
+    for ax, metric_data, ylabel, title in [
+        (axes[0], frac_rmse, "Test RMSE (N\u00b7m)  lower is better",
+         "(a) Test RMSE vs Training Data Fraction"),
+        (axes[1], frac_r2,   "Test R\u00b2  higher is better",
+         "(b) Test R\u00b2 vs Training Data Fraction"),
+    ]:
+        for mtype in arch_order:
+            c = type_colors.get(mtype, "#888888")
+            fracs_sorted = sorted(metric_data[mtype].keys())
+            if not fracs_sorted:
+                continue
+
+            xs    = [f * 100 for f in fracs_sorted]
+            means = [float(np.mean(metric_data[mtype][f])) for f in fracs_sorted]
+            stds  = [float(np.std(metric_data[mtype][f])) if len(metric_data[mtype][f]) > 1 else 0.0
+                     for f in fracs_sorted]
+
+            ax.plot(xs, means, color=c, lw=2.2, marker="o", markersize=7, zorder=4,
+                    label=_arch_short_label(mtype))
+            ax.fill_between(xs,
+                            [m - s for m, s in zip(means, stds)],
+                            [m + s for m, s in zip(means, stds)],
+                            color=c, alpha=0.15)
+
+            for f in fracs_sorted:
+                vals = metric_data[mtype][f]
+                jitter = rng.uniform(-0.8, 0.8, size=len(vals))
+                ax.scatter([f * 100 + j for j in jitter], vals,
+                           color=c, s=22, alpha=0.55, zorder=3, edgecolors="none")
+
+        ax.set_xlabel("Training Data Fraction (%)", fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.set_xticks([f * 100 for f in all_fracs])
+        ax.set_xticklabels([f"{int(round(f * 100))}%" for f in all_fracs], fontsize=11)
+        ax.grid(True, axis="y", alpha=0.35)
+
+    arch_handles = [Patch(facecolor=type_colors.get(t, "#888888"), label=_arch_short_label(t))
+                    for t in arch_order]
+    fig.tight_layout(rect=[0, 0.10, 1, 1])
+    fig.legend(handles=arch_handles, loc="lower center", bbox_to_anchor=(0.5, 0.02),
+               ncol=len(arch_handles), fontsize=11)
+
+    _save_fig(fig, output_dir / "fig14_data_efficiency.png")
+
+
+# ---------------------------------------------------------------------------
+# Fig 15 - Physics Weight Impact (physics_weight vs RMSE and R2)
+# ---------------------------------------------------------------------------
+
+def plot_physics_weight_impact(
+    groups: dict[str, list[dict[str, Any]]],
+    output_dir: Path,
+) -> None:
+    """Fig 15: Test RMSE and R2 vs physics_weight for PhysicsRegularizedFNN,
+    with separate lines per data_train_fraction and a pooled-mean dashed line."""
+    recs = groups.get("PhysicsRegularizedFNN", [])
+    if not recs:
+        logger.info("No PhysicsRegularizedFNN models - skipping Fig 15.")
+        return
+
+    pw_frac_rmse: dict[float, dict[float, list[float]]] = defaultdict(lambda: defaultdict(list))
+    pw_frac_r2:   dict[float, dict[float, list[float]]] = defaultdict(lambda: defaultdict(list))
+
+    for rec in recs:
+        hp   = rec.get("hyperparams", {})
+        pw   = hp.get("physics_weight")
+        frac = hp.get("data_train_fraction")
+        if pw is None or frac is None:
             continue
-        hp = rec.get("hyperparams", {})
-        hl = hp.get("hidden_layers", [256, 512, 256])
-        n_params = _estimate_params(hl if isinstance(hl, list) else [256, 512, 256])
-        mtype = rec.get("model_type", "unknown")
-        c = type_colors.get(mtype, "gray")
-        ax.scatter(n_params, tr, color=c, s=35, alpha=0.35, zorder=3)
-        pareto_by_type[mtype].append((n_params, tr))
+        pw   = float(pw)
+        frac = float(frac)
+        rmse = _split_scalar(rec, "test", "rmse_pooled")
+        r2   = _split_scalar(rec, "test", "r2_overall")
+        if rmse == rmse and np.isfinite(rmse):
+            pw_frac_rmse[pw][frac].append(rmse)
+        if r2 == r2 and np.isfinite(r2):
+            pw_frac_r2[pw][frac].append(r2)
 
-    # Draw Pareto frontier for each architecture
-    for mtype, pts in pareto_by_type.items():
-        if not pts:
-            continue
-        pts_sorted = sorted(pts, key=lambda p: p[0])
-        # Keep only Pareto-optimal points (lower RMSE for same or fewer params)
-        pareto: list[tuple[float, float]] = []
-        best_rmse = float("inf")
-        for p, r in pts_sorted:
-            if r < best_rmse:
-                pareto.append((p, r))
-                best_rmse = r
-        if len(pareto) >= 2:
-            px, py = zip(*pareto)
-            c = type_colors.get(mtype, "gray")
-            ax.plot(px, py, color=c, lw=2.0, ls="-", marker="D",
-                    markersize=8, zorder=5, alpha=0.9, label=f"{mtype} frontier")
-            # Annotate the best point on the frontier
-            best_pt = min(pareto, key=lambda p: p[1])
-            ax.annotate(
-                f"best\n{best_pt[1]:.4f} N·m",
-                xy=best_pt, xytext=(10, -18),
-                textcoords="offset points", fontsize=8,
-                color=c, fontweight="bold",
-                arrowprops=dict(arrowstyle="->", color=c, lw=1.0),
-            )
+    all_pw   = sorted(pw_frac_rmse.keys())
+    all_frac = sorted({f for d in pw_frac_rmse.values() for f in d})
 
-    # Legend: one dot per type (all runs) + frontier line
-    type_handles = [
-        Line2D([0], [0], marker="o", color="w", markerfacecolor=type_colors.get(t, "gray"),
-               markersize=9, alpha=0.6, label=f"{t} (all runs)")
-        for t in sorted(type_colors)
+    if not all_pw:
+        logger.info("No physics_weight data found - skipping Fig 15.")
+        return
+
+    _frac_cmap = matplotlib.colormaps["viridis"]
+    frac_colors = {
+        f: _frac_cmap(0.15 + 0.70 * i / max(len(all_frac) - 1, 1))
+        for i, f in enumerate(all_frac)
+    }
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    rng = np.random.default_rng(77)
+    _x_range = max(all_pw) - min(all_pw) if len(all_pw) > 1 else 1.0
+
+    for ax, metric_data, ylabel, title in [
+        (axes[0], pw_frac_rmse, "Test RMSE (N\u00b7m)  lower is better",
+         "(a) Test RMSE vs Physics Weight (\u03bb)"),
+        (axes[1], pw_frac_r2,   "Test R\u00b2  higher is better",
+         "(b) Test R\u00b2 vs Physics Weight (\u03bb)"),
+    ]:
+        for frac in all_frac:
+            c = frac_colors[frac]
+            xs, means, stds = [], [], []
+            for pw in all_pw:
+                vals = metric_data[pw].get(frac, [])
+                if vals:
+                    xs.append(pw)
+                    means.append(float(np.mean(vals)))
+                    stds.append(float(np.std(vals)) if len(vals) > 1 else 0.0)
+            if len(xs) < 2:
+                continue
+
+            ax.plot(xs, means, color=c, lw=2.0, marker="D", markersize=7, zorder=4,
+                    label=f"{int(round(frac * 100))}% data")
+            ax.fill_between(xs,
+                            [m - s for m, s in zip(means, stds)],
+                            [m + s for m, s in zip(means, stds)],
+                            color=c, alpha=0.15)
+
+            for pw in xs:
+                vals = metric_data[pw].get(frac, [])
+                jitter = rng.uniform(-_x_range * 0.008, _x_range * 0.008, size=len(vals))
+                ax.scatter([pw + j for j in jitter], vals,
+                           color=c, s=22, alpha=0.55, zorder=3, edgecolors="none")
+
+        pooled_xs, pooled_means = [], []
+        for pw in all_pw:
+            all_vals = [v for frac_d in metric_data[pw].values() for v in frac_d]
+            if all_vals:
+                pooled_xs.append(pw)
+                pooled_means.append(float(np.mean(all_vals)))
+        if len(pooled_xs) >= 2:
+            ax.plot(pooled_xs, pooled_means, color="black", lw=2.5, ls="--",
+                    marker="s", markersize=8, zorder=5, label="All fractions (pooled)")
+
+        ax.set_xlabel("Physics Weight  (\u03bb)", fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.set_xticks(all_pw)
+        ax.set_xticklabels([str(p) for p in all_pw], fontsize=11)
+        ax.grid(True, axis="y", alpha=0.35)
+
+    frac_handles = [
+        Line2D([0], [0], color=frac_colors[f], lw=2, marker="D", markersize=7,
+               label=f"{int(round(f * 100))}% data")
+        for f in all_frac
     ]
-    frontier_handles = [
-        Line2D([0], [0], color=type_colors.get(t, "gray"), lw=2.0, ls="-",
-               marker="D", markersize=8, label=f"{t} Pareto frontier")
-        for t in sorted(type_colors) if t in pareto_by_type
-    ]
+    pooled_handle = Line2D([0], [0], color="black", lw=2.5, ls="--", marker="s",
+                           markersize=8, label="All fractions (pooled)")
+    fig.tight_layout(rect=[0, 0.10, 1, 1])
+    fig.legend(handles=frac_handles + [pooled_handle],
+               loc="lower center", bbox_to_anchor=(0.5, 0.02),
+               ncol=len(frac_handles) + 1, fontsize=10)
 
-    ax.set_xlabel("Estimated MLP Parameter Count  (lower = smaller model)", fontsize=11)
-    ax.set_ylabel("Test RMSE (N·m)  ↓ lower is better", fontsize=11)
-    ax.grid(True, alpha=0.3)
-    ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(
-        lambda v, _: f"{int(v):,}"
-    ))
-    fig.tight_layout(rect=[0, 0.12, 1, 1])
-    fig.legend(
-        handles=type_handles + frontier_handles,
-        loc="lower center", bbox_to_anchor=(0.5, 0.02),
-        ncol=min(6, len(type_handles) + len(frontier_handles)), fontsize=9,
-    )
-
-    _save_fig(fig, output_dir / "fig13_pareto_front.png")
+    _save_fig(fig, output_dir / "fig15_physics_weight_impact.png")
 
 
 # ---------------------------------------------------------------------------
@@ -1657,27 +1895,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Scan grid-search trained models and open interactive performance report.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
-        "--models-dir",
-        default=DEFAULT_MODELS_DIR,
-        help="Root directory containing trained model subdirectories.",
-    )
-    parser.add_argument(
-        "--no-plot",
-        action="store_true",
-        help="Skip all plots; print summary table only.",
-    )
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=10,
-        help="Number of top models to show in the leaderboard (Fig 10).",
-    )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Enable DEBUG logging.",
-    )
+    parser.add_argument("--models-dir", default=DEFAULT_MODELS_DIR,
+                        help="Root directory containing trained model subdirectories.")
+    parser.add_argument("--no-plot", action="store_true",
+                        help="Skip all plots; print summary table only.")
+    parser.add_argument("--top-k", type=int, default=10,
+                        help="Number of top models to show in the leaderboard (Fig 10).")
+    parser.add_argument("--no-train-metrics", action="store_true",
+                        help="Skip model inference for train metrics (faster, uses history RMSE only).")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable DEBUG logging.")
     return parser.parse_args(argv)
 
 
@@ -1706,12 +1932,15 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("No trained models found.  Nothing to report.")
         return 1
 
-    enrich_records(records)
+    compute_train = not args.no_train_metrics
+    if compute_train:
+        logger.info("Computing train metrics (model inference on training split)...")
+        logger.info("  Use --no-train-metrics to skip this step.")
+
+    enrich_records(records, compute_train=compute_train)
     groups = group_by_model_type(records)
-    logger.info(
-        "Found %d model(s) in %d type(s): %s",
-        len(records), len(groups), sorted(groups.keys()),
-    )
+    logger.info("Found %d model(s) in %d type(s): %s",
+                len(records), len(groups), sorted(groups.keys()))
 
     print_summary_table(groups)
 
@@ -1722,7 +1951,6 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Saving plots to: %s", output_dir)
     _setup_plot_style()
 
-    # ── Base figures (identical to analyze_models.py) ────────────────────────
     plot_training_dynamics(groups, output_dir)
     plot_rmse_comparison(groups, output_dir)
     plot_r2_comparison(groups, output_dir)
@@ -1733,16 +1961,17 @@ def main(argv: list[str] | None = None) -> int:
     plot_per_joint_r2_breakdown(groups, output_dir)
     plot_edr_physics_corrections(groups, output_dir)
 
-    # ── Grid-specific figures ─────────────────────────────────────────────────
     plot_topk_leaderboard(groups, output_dir, top_k=args.top_k)
     plot_hp_importance(groups, output_dir)
     plot_hp_pair_heatmaps(groups, output_dir)
     plot_pareto_front(groups, output_dir)
+    plot_data_efficiency(groups, output_dir)
+    plot_physics_weight_impact(groups, output_dir)
 
     n_base = 9 if groups.get("EDR") else 8
-    n_figs  = n_base + 4
+    n_figs  = n_base + 6
     print(f"\nPlots saved to: {output_dir}")
-    print(f"{n_figs} figure window(s) open — close all windows to exit.")
+    print(f"{n_figs} figure window(s) open - close all windows to exit.")
     plt.show(block=True)
 
     return 0
