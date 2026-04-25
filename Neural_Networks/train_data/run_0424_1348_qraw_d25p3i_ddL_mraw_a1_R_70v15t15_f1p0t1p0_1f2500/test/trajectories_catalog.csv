@@ -1,0 +1,7 @@
+source_file,geometry_type,radius_mm,planner,ctrl_hz,fb_hz,duration_sec,n_samples,ee_rms_err_mm,start_idx,end_idx_exclusive
+triangle_r135mm_az118el16_cxn204cy205cz265_ruckig_ctrlmax_fb240hz_001.json,triangle,134.9932,Ruckig,1189.45,239.924,7.50039,1765,24.6195,0,1765
+rectangle_r163mm_az-149el29_cxn209cyn160cz255_ruckig_ctrlmax_fb240hz_001.json,rectangle,163.2535,Ruckig,1105.66,246.733,9.94198,2340,17.755,1765,4105
+sine_wave_r100mm_yz_cx236cyn65cz189_ruckig_ctrlmax_fbmax_001.json,sine_wave,100.0921,Ruckig,305.376,305.379,7.76689,2326,13.9256,4105,6431
+square_r106mm_xz_cxn94cyn105cz365_ruckig_ctrlmax_fbmax_001.json,square,106.0639,Ruckig,304.363,304.362,16.9403,5038,5.5611,6431,11469
+regular_polygon_r75mm_xz_cxn94cyn105cz365_ruckig_ctrlmax_fbmax_001.json,regular_polygon,75.008,Ruckig,304.259,304.255,10.5077,3125,5.7229,11469,14594
+spiral_r100mm_yz_cxn264cy116cz136_trapezoidal_ctrlmax_fbmax_001.json,spiral,99.6955,Trapezoidal,305.222,305.222,11.4412,3425,19.7992,14594,18019

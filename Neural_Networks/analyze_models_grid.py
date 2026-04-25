@@ -27,7 +27,48 @@ import yaml
 # ---------------------------------------------------------------------------
 
 _NN_ROOT = Path(__file__).resolve().parent
-DEFAULT_MODELS_DIR = str(_NN_ROOT / "Trained_Models_Grid")
+_GRID_ROOT = _NN_ROOT / "Trained_Models_Grid"
+DEFAULT_MODELS_DIR = str(_GRID_ROOT)
+
+
+def _list_dataset_dirs(grid_root: Path) -> list[Path]:
+    """Return dataset subdirs that contain at least one metadata.yaml."""
+    MODEL_TYPES = {"FNN", "PhysicsRegularizedFNN", "ResidualCorrectionFNN", "EDR"}
+    candidates = []
+    for d in sorted(grid_root.iterdir()):
+        if not d.is_dir() or d.name.startswith("_") or d.name == "analysis":
+            continue
+        # A dataset dir has ModelType subdirs with runs inside, OR direct metadata.yaml files
+        has_models = any(d.rglob("metadata.yaml"))
+        if has_models:
+            candidates.append(d)
+    return candidates
+
+
+def _resolve_models_dir(models_dir: str) -> str:
+    """If models_dir is the grid root with no direct models, auto-select the
+    sole dataset or print a list and exit."""
+    p = Path(models_dir)
+    if not any(p.rglob("metadata.yaml")):
+        datasets = _list_dataset_dirs(p)
+        if not datasets:
+            return models_dir   # let the caller raise the error
+        if len(datasets) == 1:
+            chosen = datasets[0]
+            logger.info("Auto-selected dataset: %s", chosen.name)
+            return str(chosen)
+        # Multiple datasets — print and exit so user can choose.
+        print("\nMultiple training datasets found. Pass one with --models-dir:\n")
+        for i, d in enumerate(datasets, 1):
+            n = sum(1 for _ in d.rglob("metadata.yaml"))
+            print(f"  [{i}] {d.name}  ({n} runs)")
+        print(f"\nExample:")
+        print(f"  PYTHONPATH=. python -m Neural_Networks.analyze_models_grid \\")
+        print(f"    --models-dir {datasets[-1]}")
+        print()
+        import sys as _sys
+        _sys.exit(0)
+    return models_dir
 
 JOINT_NAMES = ["J1 (yaw)", "J2 (shoulder)", "J3 (elbow)", "J4 (wrist)", "J5 (wrist roll)"]
 JOINT_NAMES_SHORT = ["J1", "J2", "J3", "J4", "J5"]
@@ -438,8 +479,10 @@ def enrich_records(records: list[dict[str, Any]], compute_train: bool = True) ->
             tm = _compute_train_metrics(rec)
         else:
             tm = {}
-        # Do NOT fall back to _train_rmse_hist: that value is in normalised units,
-        # not physical N·m, so mixing it with test/val metrics causes 5-6× scale errors.
+        # ``_train_rmse_hist`` is in physical N·m as of the metrics-consistency
+        # fix; ``_compute_train_metrics`` still produces a richer per-joint
+        # breakdown (rmse / mae / r2) by re-running the model on the train
+        # split, so it remains the preferred source for table/plot rendering.
         rec["train_metrics"] = tm
 
 
@@ -460,6 +503,27 @@ def _best_per_type(groups: dict[str, list[dict[str, Any]]]) -> list[dict[str, An
         bests.append(best)
     bests.sort(key=lambda r: _split_scalar(r, "test", "rmse_pooled"))
     return bests
+
+
+def _best_blackbox_record(groups: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
+    """Best test-RMSE run among all BlackBoxFNN models, for Δ baseline."""
+    bbs = groups.get("BlackBoxFNN", [])
+    if not bbs:
+        return None
+    return min(bbs, key=lambda r: _split_scalar(r, "test", "rmse_pooled"))
+
+
+def _zoom_ylim_1d(
+    values: list[float], *, min_pad: float, pad_rel: float = 0.35
+) -> tuple[float, float]:
+    """Tight y-limits for small relative differences (e.g. zoomed test RMSE bars)."""
+    vv = [float(v) for v in values if v == v and np.isfinite(v)]
+    if not vv:
+        return 0.0, 1.0
+    lo, hi = min(vv), max(vv)
+    span = max(hi - lo, 1e-9)
+    pad = max(min_pad, pad_rel * span)
+    return lo - pad, hi + pad
 
 
 def _model_label(rec: dict[str, Any]) -> str:
@@ -656,7 +720,7 @@ def plot_training_dynamics(
 
 
 # ---------------------------------------------------------------------------
-# Fig 2 - RMSE Comparison (Train vs Test)
+# Fig 2 - RMSE Comparison (Train vs Test) + zoomed test + Δ vs Black-Box
 # ---------------------------------------------------------------------------
 
 def plot_rmse_comparison(
@@ -679,7 +743,8 @@ def plot_rmse_comparison(
     x = np.arange(n)
     bw = 0.32
 
-    fig, (ax_rmse, ax_r2) = plt.subplots(1, 2, figsize=(max(10, n * 2.8), 6))
+    fig, axes = plt.subplots(2, 2, figsize=(max(11, n * 2.9), 10.0))
+    ax_rmse, ax_r2, ax_z, ax_d = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
 
     # Panel (a): Train vs Test RMSE
     b_train = ax_rmse.bar(x - bw / 2, train_rmse, bw, color=bar_colors,
@@ -709,7 +774,7 @@ def plot_rmse_comparison(
 
     proxy_train = Patch(facecolor="#888888", alpha=0.90, label="Train RMSE")
     proxy_test  = Patch(facecolor="#888888", alpha=0.60, hatch="////", label="Test RMSE")
-    ax_rmse.legend(handles=[proxy_train, proxy_test], fontsize=10, loc="upper right")
+    ax_rmse.legend(handles=[proxy_train, proxy_test], fontsize=9, loc="upper right")
 
     # Panel (b): Test R2
     b_r2 = ax_r2.bar(x, test_r2, 0.50, color=bar_colors, alpha=0.82,
@@ -731,17 +796,80 @@ def plot_rmse_comparison(
     ax_r2.set_xlim(-0.6, n - 0.4)
     _panel_label(ax_r2, "b")
 
+    # Panel (c): Test RMSE only — zoomed y-axis
+    b_te_solo = ax_z.bar(x, test_rmse, 0.55, color=bar_colors, alpha=0.88,
+                         edgecolor="white", linewidth=0.8)
+    for b, v in zip(b_te_solo, test_rmse):
+        if v == v and np.isfinite(v):
+            ax_z.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.0001,
+                      f"{v:.4f}", ha="center", va="bottom", fontsize=9, fontweight="bold")
+    tmin, tmax = _zoom_ylim_1d(test_rmse, min_pad=0.0008, pad_rel=0.4)
+    ax_z.set_ylim(tmin, tmax)
+    fr = [v for v in test_rmse if v == v and np.isfinite(v)]
+    range_txt = f"Test RMSE full range: [{min(fr):.4f}, {max(fr):.4f}] N·m" if fr else ""
+    ax_z.set_xticks(x)
+    ax_z.set_xticklabels(labels, rotation=0, ha="center", fontsize=11, fontweight="bold")
+    ax_z.set_xlabel("Architecture", fontsize=12)
+    ax_z.set_ylabel("Test RMSE (N·m)  zoomed", fontsize=12)
+    ax_z.set_xlim(-0.6, n - 0.4)
+    ax_z.set_title("Best-per-type: magnified test RMSE", fontsize=12, fontweight="bold", pad=6)
+    if range_txt:
+        ax_z.text(0.99, 0.04, range_txt, transform=ax_z.transAxes, fontsize=8,
+                  ha="right", va="bottom", color="#444444", style="italic")
+    _panel_label(ax_z, "c")
+    ax_z.grid(True, axis="y", alpha=0.4)
+
+    # Panel (d): Improvement vs best Black-Box test RMSE  (RMSE_bb − RMSE_i; mN·m)
+    bb = _best_blackbox_record(groups)
+    if bb is not None:
+        rmse_ref = _split_scalar(bb, "test", "rmse_pooled")
+        delta_mnm = [((rmse_ref - v) * 1000.0) if (v == v and np.isfinite(v)) else float("nan")
+                     for v in test_rmse]
+        colors_d = [("#2b8a3e" if (d == d and d > 0) else "#c92a2a" if (d == d and d < 0) else "#666666")
+                    for d in delta_mnm]
+    else:
+        delta_mnm = [float("nan")] * n
+        colors_d = ["#666666"] * n
+    b_d = ax_d.bar(x, delta_mnm, 0.55, color=colors_d, alpha=0.85, edgecolor="white", linewidth=0.6)
+    ax_d.axhline(0.0, color="#333333", lw=1.0)
+    finite_d = [float(d) for d in delta_mnm if d == d and np.isfinite(d)]
+    if finite_d:
+        lo, hi = min(finite_d), max(finite_d)
+        pad = max(0.4, 0.12 * (hi - lo + 1e-9))
+        ax_d.set_ylim(lo - pad, hi + pad)
+    for b, d in zip(b_d, delta_mnm):
+        if d == d and np.isfinite(d):
+            y0 = float(b.get_height())
+            ylim = ax_d.get_ylim()
+            h = ylim[1] - ylim[0]
+            off = 0.03 * h * (1 if y0 >= 0 else -1)
+            ax_d.text(
+                b.get_x() + b.get_width() / 2, y0 + off, f"{d:+.1f}",
+                ha="center", va="bottom" if y0 >= 0 else "top", fontsize=8, fontweight="bold",
+            )
+    ax_d.set_xticks(x)
+    ax_d.set_xticklabels(labels, rotation=0, ha="center", fontsize=11, fontweight="bold")
+    ax_d.set_xlabel("Architecture", fontsize=12)
+    ax_d.set_ylabel("Δ test RMSE vs Black-Box  (mN·m)\n+ = better (lower N·m than Black-Box)", fontsize=10)
+    ax_d.set_xlim(-0.6, n - 0.4)
+    _panel_label(ax_d, "d")
+    if bb is None:
+        ax_d.text(0.5, 0.5, "No BlackBoxFNN in grid —\nbaseline for Δ not defined.",
+                  ha="center", va="center", transform=ax_d.transAxes, fontsize=10, color="#666666")
+    else:
+        ax_d.grid(True, axis="y", alpha=0.4)
+
     arch_handles = [Patch(facecolor=type_colors[t], label=_arch_short_label(t))
                     for t in sorted(type_colors)]
-    fig.tight_layout(rect=[0, 0.10, 1, 1])
+    fig.tight_layout(rect=[0, 0.06, 1, 1])
     fig.legend(handles=arch_handles, loc="lower center",
-               bbox_to_anchor=(0.5, 0.02), ncol=len(arch_handles), fontsize=10)
+               bbox_to_anchor=(0.5, 0.01), ncol=len(arch_handles), fontsize=9)
 
     _save_fig(fig, output_dir / "fig2_rmse_comparison.png")
 
 
 # ---------------------------------------------------------------------------
-# Fig 3 - R2 and Pearson Comparison (Train vs Test)
+# Fig 3 - R2 and Pearson Comparison (Train vs Test) + zoomed test + ΔR² vs Black-Box
 # ---------------------------------------------------------------------------
 
 def plot_r2_comparison(
@@ -760,15 +888,27 @@ def plot_r2_comparison(
     x = np.arange(n)
     bw = 0.32
 
-    panels = [
-        ("r2_overall",     "(a) R2 Overall",    "R2"),
-        ("r2_mean",        "(b) R2 Mean",        "R2"),
-        ("pearson_r_mean", "(c) Pearson rho Mean", "rho"),
+    row0_titles = [
+        "(a) R2 overall (train vs test)",
+        "(b) R2 mean (train vs test)",
+        "(c) Pearson \u03c1 mean (train vs test)",
+    ]
+    row1_titles = [
+        "(d) Test R2 overall — magnified",
+        "(e) Test R2 mean — magnified",
+        "(f) Test Pearson \u03c1 — magnified",
+    ]
+    panels: list[tuple[str, str]] = [
+        ("r2_overall", "R2"),
+        ("r2_mean", "R2"),
+        ("pearson_r_mean", "\u03c1"),
     ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(max(14, n * 4.0), 6))
+    fig, axes = plt.subplots(2, 3, figsize=(max(15, n * 3.0), 10.0))
 
-    for ax, (metric_key, title, ylabel), letter in zip(axes, panels, "abc"):
+    for j, (metric_key, ylabel) in enumerate(panels):
+        ax = axes[0, j]
+        ax_d = axes[1, j]
         tv  = [_split_scalar(r, "test",  metric_key) for r in all_recs]
         trv = [_split_scalar(r, "train", metric_key) for r in all_recs]
 
@@ -780,33 +920,62 @@ def plot_r2_comparison(
         for b, v in zip(b_tr, trv):
             if v == v and np.isfinite(v):
                 ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.0008,
-                        f"{v:.4f}", ha="center", va="bottom", fontsize=8.5, rotation=75)
+                        f"{v:.4f}", ha="center", va="bottom", fontsize=7.5, rotation=75)
         for b, v in zip(b_te, tv):
             if v == v and np.isfinite(v):
                 ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.0008,
-                        f"{v:.4f}", ha="center", va="bottom", fontsize=8.5, rotation=75)
+                        f"{v:.4f}", ha="center", va="bottom", fontsize=7.5, rotation=75)
 
         valid = [v for v in trv + tv if v == v and np.isfinite(v)]
         lo = max(0.0, min(valid) - 0.03) if valid else 0.7
         hi = min(1.03, max(valid) + 0.03) if valid else 1.03
         ax.set_ylim(lo, hi)
-        ax.axhline(1.0, color="#888888", lw=0.9, alpha=0.4, ls="--")
+        if metric_key.startswith("r2"):
+            ax.axhline(1.0, color="#888888", lw=0.9, alpha=0.4, ls="--")
         ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=11, fontweight="bold")
-        ax.set_xlabel("Architecture", fontsize=12)
+        ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=10, fontweight="bold")
+        ax.set_xlabel("Architecture", fontsize=11)
         ax.set_ylabel(ylabel, fontsize=12)
-        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.set_title(row0_titles[j], fontsize=12, fontweight="bold")
         ax.set_xlim(-0.6, n - 0.4)
-        _panel_label(ax, letter)
+        _panel_label(ax, "abc"[j])
+
+        t_zoom = [v for v in tv if v == v and np.isfinite(v)]
+        b_z = ax_d.bar(x, tv, 0.55, color=bar_colors, alpha=0.88, edgecolor="white", linewidth=0.6)
+        for b, v in zip(b_z, tv):
+            if v == v and np.isfinite(v):
+                ax_d.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.0001,
+                          f"{v:.4f}", ha="center", va="bottom", fontsize=7.5, fontweight="bold")
+        if t_zoom:
+            zlo, zhi = _zoom_ylim_1d(tv, min_pad=0.0006 if j < 2 else 0.0003, pad_rel=0.45)
+            ax_d.set_ylim(zlo, zhi)
+            ax_d.text(
+                0.99, 0.05,
+                f"Test-only zoom  |  full: [{min(t_zoom):.4f}, {max(t_zoom):.4f}]",
+                transform=ax_d.transAxes, fontsize=7, ha="right", va="bottom", color="#555555",
+                style="italic",
+            )
+        ax_d.set_xticks(x)
+        ax_d.set_xticklabels(labels, rotation=0, ha="center", fontsize=10, fontweight="bold")
+        ax_d.set_xlabel("Architecture", fontsize=11)
+        ax_d.set_ylabel("Test R2 (zoomed)" if j < 2 else "Test Pearson \u03c1 (zoomed)", fontsize=11)
+        ax_d.set_title(row1_titles[j], fontsize=11, fontweight="bold", pad=4)
+        ax_d.set_xlim(-0.6, n - 0.4)
+        ax_d.grid(True, axis="y", alpha=0.35)
+        _panel_label(ax_d, "def"[j])
 
     proxy_tr = Patch(facecolor="#888888", alpha=0.90, label="Train")
     proxy_te = Patch(facecolor="#888888", alpha=0.60, hatch="////", label="Test")
     arch_handles = [Patch(facecolor=type_colors[t], label=_arch_short_label(t))
                     for t in sorted(type_colors)]
-    fig.tight_layout(rect=[0, 0.11, 1, 1])
-    fig.legend(handles=arch_handles + [proxy_tr, proxy_te],
-               loc="lower center", bbox_to_anchor=(0.5, 0.02),
-               ncol=len(arch_handles) + 2, fontsize=10)
+    fig.tight_layout(rect=[0, 0.08, 1, 1])
+    fig.legend(
+        handles=arch_handles + [proxy_tr, proxy_te],
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.01),
+        ncol=len(arch_handles) + 2,
+        fontsize=9,
+    )
 
     _save_fig(fig, output_dir / "fig3_r2_comparison.png")
 
@@ -954,8 +1123,14 @@ def plot_parallel_coordinates(
     legend_handles = [Patch(color=type_colors[t], label=_arch_short_label(t))
                       for t in sorted(drawn_types)]
     fig.tight_layout(rect=[0, 0.10, 1, 1])
-    fig.legend(handles=legend_handles, loc="lower center",
-               bbox_to_anchor=(0.5, 0.02), ncol=len(drawn_types), fontsize=10)
+    if legend_handles:
+        fig.legend(
+            handles=legend_handles,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.02),
+            ncol=min(len(legend_handles), 6),
+            fontsize=10,
+        )
 
     _save_fig(fig, output_dir / "fig5_parallel_coordinates.png")
 
@@ -1667,7 +1842,13 @@ def plot_pareto_front(
 
     all_vals = [v for vals in arch_data.values() for v in vals]
     if all_vals:
-        ax.set_ylim(max(0.0, min(all_vals) * 0.994), max(all_vals) * 1.018)
+        zlo, zhi = _zoom_ylim_1d(all_vals, min_pad=0.0004, pad_rel=0.12)
+        ax.set_ylim(zlo, zhi)
+        ax.text(
+            0.99, 0.98,
+            f"Y-axis: zoomed to run spread  |  global min/max: [{min(all_vals):.4f}, {max(all_vals):.4f}] N·m",
+            transform=ax.transAxes, fontsize=8, ha="right", va="top", color="#444444", style="italic",
+        )
 
     short_labels = [_arch_short_label(t) for t in arch_data]
     ax.set_xticks(x_positions)
@@ -1887,16 +2068,222 @@ def plot_physics_weight_impact(
 
 
 # ---------------------------------------------------------------------------
+# Fig 16 - Train vs test generalization gap (best-per-type)
+# ---------------------------------------------------------------------------
+
+def plot_train_test_gaps(
+    groups: dict[str, list[dict[str, Any]]],
+    output_dir: Path,
+) -> None:
+    """RMSE: test - train (positive = worse on test). R2: train - test (positive = R2 drop)."""
+    all_recs = _best_per_type(groups)
+    if not all_recs:
+        return
+
+    type_colors = _type_color_map(list(groups.keys()))
+    bar_colors = [type_colors.get(r.get("model_type", "?"), "#888888") for r in all_recs]
+    labels = [_arch_short_label(r.get("model_type", "?")) for r in all_recs]
+    n = len(all_recs)
+    x = np.arange(n)
+    tr_rmse = [_split_scalar(r, "train", "rmse_pooled") for r in all_recs]
+    te_rmse = [_split_scalar(r, "test",  "rmse_pooled") for r in all_recs]
+    tr_r2   = [_split_scalar(r, "train", "r2_overall")   for r in all_recs]
+    te_r2   = [_split_scalar(r, "test",  "r2_overall")   for r in all_recs]
+
+    gap_rmse = [(t - s) if (s == s and t == t) else float("nan") for s, t in zip(tr_rmse, te_rmse)]
+    gap_r2   = [(a - b) if (a == a and b == b) else float("nan") for a, b in zip(tr_r2, te_r2)]
+
+    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(max(10, n * 2.4), 5.0))
+
+    b0 = ax0.bar(x, gap_rmse, 0.55, color=bar_colors, alpha=0.88, edgecolor="white", linewidth=0.6)
+    ax0.axhline(0.0, color="#333333", lw=1.0)
+    for b, g in zip(b0, gap_rmse):
+        if g == g and np.isfinite(g):
+            h = b.get_height()
+            ax0.text(
+                b.get_x() + b.get_width() / 2, h + 0.0015 * (np.sign(h) or 1),
+                f"{g:+.4f}", ha="center", va="bottom" if h >= 0 else "top", fontsize=8, fontweight="bold",
+            )
+    ax0.set_xticks(x)
+    ax0.set_xticklabels(labels, fontsize=11, fontweight="bold")
+    ax0.set_ylabel("Test RMSE − Train RMSE  (N·m)\n+ implies worse generalization (higher test error)", fontsize=10)
+    ax0.set_xlabel("Architecture (best-per-type run)", fontsize=11)
+    ax0.set_xlim(-0.6, n - 0.4)
+    ax0.set_title("Generalization gap — pooled RMSE", fontsize=12, fontweight="bold")
+    ax0.grid(True, axis="y", alpha=0.35)
+    _panel_label(ax0, "a")
+    gfin = [g for g in gap_rmse if g == g and np.isfinite(g)]
+    if gfin:
+        ax0.text(0.02, 0.95, f"min={min(gfin):.4f}  max={max(gfin):.4f} N·m", transform=ax0.transAxes,
+                 fontsize=8, va="top", color="#555555", style="italic")
+
+    b1 = ax1.bar(x, gap_r2, 0.55, color=bar_colors, alpha=0.88, edgecolor="white", linewidth=0.6)
+    ax1.axhline(0.0, color="#333333", lw=1.0)
+    for b, g in zip(b1, gap_r2):
+        if g == g and np.isfinite(g):
+            h = b.get_height()
+            ax1.text(
+                b.get_x() + b.get_width() / 2, h + 0.001 * (np.sign(h) or 1),
+                f"{g:+.4f}", ha="center", va="bottom" if h >= 0 else "top", fontsize=8, fontweight="bold",
+            )
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels, fontsize=11, fontweight="bold")
+    ax1.set_ylabel("Train R2 − Test R2\n+ indicates higher R2 on train than test", fontsize=10)
+    ax1.set_xlabel("Architecture (best-per-type run)", fontsize=11)
+    ax1.set_xlim(-0.6, n - 0.4)
+    ax1.set_title("Generalization gap — R2 overall", fontsize=12, fontweight="bold")
+    ax1.grid(True, axis="y", alpha=0.35)
+    _panel_label(ax1, "b")
+
+    fig.tight_layout()
+    _save_fig(fig, output_dir / "fig16_train_test_generalization_gap.png")
+
+
+# ---------------------------------------------------------------------------
+# Fig 17 - Test R2 distribution (all runs) per architecture
+# ---------------------------------------------------------------------------
+
+def plot_test_r2_distribution(
+    groups: dict[str, list[dict[str, Any]]],
+    output_dir: Path,
+) -> None:
+    """Box + strip for test r2_overall, same style as fig13 RMSE distribution."""
+    type_colors = _type_color_map(list(groups.keys()))
+    arch_order = [t for t in ["BlackBoxFNN", "PhysicsRegularizedFNN", "ResidualCorrectionFNN"] if t in groups]
+    arch_order += [t for t in sorted(groups) if t not in arch_order and t != "EDR"]
+
+    arch_data: dict[str, list[float]] = {}
+    for mtype in arch_order:
+        vals = [_split_scalar(r, "test", "r2_overall") for r in groups[mtype]]
+        vals = [v for v in vals if v == v and np.isfinite(v)]
+        if vals:
+            arch_data[mtype] = vals
+
+    if not arch_data:
+        return
+
+    fig, ax = plt.subplots(figsize=(max(8, len(arch_data) * 3.0), 7))
+    x_positions = np.arange(len(arch_data))
+    rng = np.random.default_rng(43)
+
+    for xi, (mtype, vals) in enumerate(arch_data.items()):
+        c = type_colors.get(mtype, "#888888")
+        arr = np.array(vals, dtype=np.float64)
+
+        ax.boxplot(
+            arr, positions=[xi], widths=0.40, patch_artist=True, showfliers=False,
+            medianprops=dict(color="black", linewidth=2.0),
+            boxprops=dict(facecolor=c, alpha=0.35, linewidth=1.2),
+            whiskerprops=dict(linewidth=1.2, color="#444444"),
+            capprops=dict(linewidth=1.5, color="#444444"),
+        )
+        jitter = rng.uniform(-0.12, 0.12, size=len(arr))
+        ax.scatter(xi + jitter, arr, color=c, s=45, alpha=0.75, zorder=4,
+                   edgecolors="white", linewidths=0.5)
+        best_val = float(arr.max())
+        ax.annotate(
+            f"Best: {best_val:.4f}", xy=(xi, best_val), xytext=(xi + 0.25, best_val + 0.0005),
+            fontsize=9, color=c, fontweight="bold", arrowprops=dict(arrowstyle="->", color=c, lw=0.8),
+        )
+
+    all_vals = [v for vals in arch_data.values() for v in vals]
+    if all_vals:
+        zlo, zhi = _zoom_ylim_1d(all_vals, min_pad=0.0008, pad_rel=0.1)
+        ax.set_ylim(zlo, zhi)
+        ax.text(
+            0.99, 0.02, f"Y zoomed  |  full range: [{min(all_vals):.4f}, {max(all_vals):.4f}]",
+            transform=ax.transAxes, fontsize=8, ha="right", va="bottom", color="#444444", style="italic",
+        )
+
+    short_labels = [_arch_short_label(t) for t in arch_data]
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(short_labels, fontsize=12, fontweight="bold")
+    ax.set_ylabel("Test R2  (all grid runs)  higher is better", fontsize=12)
+    ax.set_xlabel("Architecture", fontsize=12)
+    ax.set_title("Test R2 distribution", fontsize=13, fontweight="bold")
+    ax.grid(True, axis="y", alpha=0.35)
+
+    arch_handles = [Patch(facecolor=type_colors.get(t, "#888888"), label=_arch_short_label(t), alpha=0.80)
+                    for t in arch_data]
+    fig.tight_layout(rect=[0, 0.10, 1, 1])
+    fig.legend(handles=arch_handles, loc="lower center", bbox_to_anchor=(0.5, 0.02),
+               ncol=len(arch_handles), fontsize=10)
+    _save_fig(fig, output_dir / "fig17_r2_test_distribution.png")
+
+
+# ---------------------------------------------------------------------------
+# summary_table.md — best-per-type + per-family run ranges
+# ---------------------------------------------------------------------------
+
+def export_summary_markdown(
+    groups: dict[str, list[dict[str, Any]]],
+    output_dir: Path,
+) -> None:
+    best_list = _best_per_type(groups)
+    lines: list[str] = [
+        "# Grid search — best run per architecture",
+        "",
+        "Best = minimum **test** `rmse_pooled` within each `model_type`.",
+        "",
+        "| Architecture | test RMSE (N·m) | test R2 overall | test MAE | run id |",
+        "|-------------|-----------------|----------------|----------|--------|",
+    ]
+    for r in best_list:
+        mtype = r.get("model_type", "?")
+        run_id = str(r.get("run_id", ""))[:80]
+        trmse = _split_scalar(r, "test", "rmse_pooled")
+        tr2   = _split_scalar(r, "test", "r2_overall")
+        mae   = _split_scalar(r, "test", "mae_mean")
+        lines.append(
+            f"| {_arch_short_label(mtype)} | {trmse:.5f} | {tr2:.5f} | {mae:.5f} | `{run_id}` |"
+        )
+    lines.extend(["", "## Test RMSE range across *all* runs in grid", ""])
+
+    for mtype in sorted(groups.keys()):
+        recs = groups[mtype]
+        rmses: list[float] = []
+        r2s: list[float] = []
+        for r in recs:
+            a = _split_scalar(r, "test", "rmse_pooled")
+            b = _split_scalar(r, "test", "r2_overall")
+            if a == a and np.isfinite(a):
+                rmses.append(a)
+            if b == b and np.isfinite(b):
+                r2s.append(b)
+        if rmses:
+            lines.append(
+                f"- **{_arch_short_label(mtype)}** ({mtype}): RMSE in [{min(rmses):.5f}, {max(rmses):.5f}] "
+                f"N·m over {len(rmses)} run(s); R2 in [{min(r2s):.5f}, {max(r2s):.5f}]."
+            )
+
+    out = output_dir / "summary_table.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info("Wrote: %s", out)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Scan grid-search trained models and open interactive performance report.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "Analyse grid-search trained models.\n\n"
+            "Models are stored as:\n"
+            "  Trained_Models_Grid/<dataset>/ModelType/<run>/\n\n"
+            "Pass a dataset folder to analyse one dataset, or omit --models-dir\n"
+            "to auto-select (single dataset) or list available datasets."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--models-dir", default=DEFAULT_MODELS_DIR,
-                        help="Root directory containing trained model subdirectories.")
+    parser.add_argument(
+        "--models-dir", default=DEFAULT_MODELS_DIR,
+        help="Dataset folder to analyse, e.g. Trained_Models_Grid/run_0424_1348_...  "
+             "Defaults to Trained_Models_Grid root (auto-selects if only one dataset exists).",
+    )
+    parser.add_argument("--list-datasets", action="store_true",
+                        help="List available dataset folders and exit.")
     parser.add_argument("--no-plot", action="store_true",
                         help="Skip all plots; print summary table only.")
     parser.add_argument("--top-k", type=int, default=10,
@@ -1918,7 +2305,22 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s  %(message)s",
     )
 
-    models_dir = args.models_dir
+    if args.list_datasets:
+        datasets = _list_dataset_dirs(_GRID_ROOT)
+        if not datasets:
+            print(f"No dataset folders found under {_GRID_ROOT}")
+            return 1
+        print(f"\nAvailable datasets in {_GRID_ROOT}:\n")
+        for i, d in enumerate(datasets, 1):
+            n = sum(1 for _ in d.rglob("metadata.yaml"))
+            print(f"  [{i}] {d.name}  ({n} runs)")
+        print(f"\nUsage example:")
+        print(f"  PYTHONPATH=. python -m Neural_Networks.analyze_models_grid \\")
+        print(f"    --models-dir {datasets[-1]}")
+        print()
+        return 0
+
+    models_dir = _resolve_models_dir(args.models_dir)
     output_dir = Path(models_dir) / "analysis"
 
     logger.info("Scanning: %s", models_dir)
@@ -1967,9 +2369,12 @@ def main(argv: list[str] | None = None) -> int:
     plot_pareto_front(groups, output_dir)
     plot_data_efficiency(groups, output_dir)
     plot_physics_weight_impact(groups, output_dir)
+    plot_train_test_gaps(groups, output_dir)
+    plot_test_r2_distribution(groups, output_dir)
+    export_summary_markdown(groups, output_dir)
 
     n_base = 9 if groups.get("EDR") else 8
-    n_figs  = n_base + 6
+    n_figs  = n_base + 6 + 2
     print(f"\nPlots saved to: {output_dir}")
     print(f"{n_figs} figure window(s) open - close all windows to exit.")
     plt.show(block=True)

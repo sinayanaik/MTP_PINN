@@ -90,7 +90,7 @@ class BlackBoxFNN(nn.Module):
 
 
 class PhysicsRegularizedFNN(nn.Module):
-    """MLP head τ̂(features) plus learnable affine calibration on summed analytical τ."""
+    """MLP: [q, qd, qdd, τ_phys_sum] → τ̂, with learnable per-joint RNEA calibration in loss."""
 
     def __init__(
         self,
@@ -109,35 +109,34 @@ class PhysicsRegularizedFNN(nn.Module):
             "dropout": dropout,
             "activation": activation,
         }
+        # Input is kinematics (3·J) + normalised RNEA sum (J) = 4·J
         self.net = build_mlp(
-            in_dim=n_joints * 3,
+            in_dim=n_joints * 4,
             hidden_layers=hidden_layers,
             out_dim=n_joints,
             activation=activation,
             dropout=dropout,
         )
-        self.tau_scale = nn.Parameter(torch.ones(n_joints))
-        self.tau_bias = nn.Parameter(torch.zeros(n_joints))
         for m in self.net.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_normal_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+        # Learnable affine calibration applied to τ_ref inside the physics loss.
+        # Initialised to identity so epoch-0 behaviour is unchanged.
+        self.cal_scale = nn.Parameter(torch.ones(n_joints))
+        self.cal_bias  = nn.Parameter(torch.zeros(n_joints))
 
-    def calibrated_phys(self, physics: torch.Tensor) -> torch.Tensor:
-        s = reduce_physics_to_total(physics, self.n_joints)
-        return self.tau_scale * s + self.tau_bias
-
-    def forward(self, features: torch.Tensor, physics: torch.Tensor | None = None) -> torch.Tensor:
-        del physics
-        return self.net(features)
+    def forward(self, features: torch.Tensor, physics: torch.Tensor) -> torch.Tensor:
+        tau_phys = reduce_physics_to_total(physics, self.n_joints)
+        return self.net(torch.cat([features, tau_phys], dim=-1))
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
 class ResidualCorrectionFNN(nn.Module):
-    """τ̂ = τ_phys + Δ(features)."""
+    """τ̂ = τ_phys + Δ([q, qd, qdd, τ_phys_sum]). Correction net sees the physics estimate."""
 
     def __init__(
         self,
@@ -156,24 +155,34 @@ class ResidualCorrectionFNN(nn.Module):
             "dropout": dropout,
             "activation": activation,
         }
+        # Input is kinematics (3·J) + normalised RNEA sum (J) = 4·J
         self.net = build_mlp(
-            in_dim=n_joints * 3,
+            in_dim=n_joints * 4,
             hidden_layers=hidden_layers,
             out_dim=n_joints,
             activation=activation,
             dropout=dropout,
         )
+        last_linear: nn.Linear | None = None
         for m in self.net.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_normal_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+                last_linear = m
+        # Warm-start: output layer initialised near-zero so Δ ≈ 0 at epoch 0.
+        if last_linear is not None:
+            with torch.no_grad():
+                last_linear.weight.mul_(1e-2)
+                if last_linear.bias is not None:
+                    last_linear.bias.mul_(1e-2)
 
     def forward(self, features: torch.Tensor, physics: torch.Tensor | None = None) -> torch.Tensor:
         if physics is None:
             raise ValueError("ResidualCorrectionFNN requires physics (decomposed τ) from the loader.")
         tau_phys = reduce_physics_to_total(physics, self.n_joints)
-        delta = self.net(features)
+        feat_aug = torch.cat([features, tau_phys], dim=-1)
+        delta = self.net(feat_aug)
         return tau_phys + delta
 
     def count_parameters(self) -> int:

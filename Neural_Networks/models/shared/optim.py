@@ -20,18 +20,6 @@ def build_optimizer_default(model: torch.nn.Module, hp: dict[str, Any]) -> torch
     return AdamW(model.parameters(), lr=lr, weight_decay=wd)
 
 
-def build_optimizer_physics_regularized(model: Any, hp: dict[str, Any]) -> torch.optim.Optimizer:
-    lr = float(hp.get("learning_rate", 3e-4))
-    wd = float(hp.get("weight_decay", 2e-3))
-    phi_lr = lr * float(hp.get("phi_lr_ratio", 0.1))
-    return AdamW(
-        [
-            {"params": list(model.net.parameters()), "lr": lr, "weight_decay": wd},
-            {"params": [model.tau_scale, model.tau_bias], "lr": phi_lr, "weight_decay": 0.0},
-        ]
-    )
-
-
 def build_scheduler(optimizer, hp: dict[str, Any], n_train_batches: int):
     sched_name = str(hp.get("lr_scheduler", "reduce_on_plateau")).lower()
     epochs = int(hp.get("epochs", 1000))

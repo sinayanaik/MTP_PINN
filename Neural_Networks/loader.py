@@ -442,6 +442,10 @@ def make_dataloaders(
             rng    = _np.random.default_rng(int(data_train_seed))
             idx    = rng.permutation(n_full)[:n_keep]
             ds     = _AttrPassthroughSubset(ds, idx.tolist())
+        # Only drop the last incomplete batch when the dataset is large enough
+        # to guarantee at least 2 full batches — otherwise drop_last would
+        # silently empty the DataLoader (0 batches, no training, no error).
+        _eff_drop_last = drop_last and (split == "train") and (len(ds) >= 2 * batch_size)
         loaders[split] = torch.utils.data.DataLoader(
             ds, batch_size=batch_size,
             shuffle=(split == "train"),
@@ -449,6 +453,6 @@ def make_dataloaders(
             pin_memory=pin_memory,
             persistent_workers=(num_workers > 0),
             prefetch_factor=prefetch_factor if num_workers > 0 else None,
-            drop_last=(drop_last and split == "train"),
+            drop_last=_eff_drop_last,
         )
     return loaders

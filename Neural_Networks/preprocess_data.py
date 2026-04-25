@@ -743,6 +743,12 @@ class PreprocessApp:
         self._geom_rows: dict = {}
         self._total_budget_var = tk.IntVar(value=0)
         self._geom_comp_inner: tk.Frame | None = None
+        self._assignment_mode_var = tk.StringVar(value="auto")
+        self._comp_frame: tk.LabelFrame | None = None
+        self._geom_hdr: tk.Frame | None = None
+        self._split_mode_widget = None
+        self._row2_for_split: tk.Frame | None = None
+        self._row2b_for_split: tk.Frame | None = None
 
         # ── Top bar ───────────────────────────────────────────────────────
         top = tk.Frame(self.root, bg="#2e3040")
@@ -992,25 +998,47 @@ class PreprocessApp:
             font=("sans-serif", 9, "bold"), padx=4, pady=4,
         )
         comp_frame.pack(fill=tk.X, pady=(4, 2))
+        self._comp_frame = comp_frame
 
-        budget_row = tk.Frame(comp_frame, bg=BG_BUILD)
-        budget_row.pack(fill=tk.X, pady=(0, 2))
-        tk.Label(budget_row, text="Total trajectories:", bg=BG_BUILD,
+        mode_row = tk.Frame(comp_frame, bg=BG_BUILD)
+        mode_row.pack(fill=tk.X, pady=(0, 2))
+        tk.Label(
+            mode_row, text="Split assignment:", bg=BG_BUILD, font=("sans-serif", 9, "bold"),
+        ).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Radiobutton(
+            mode_row, text="Auto (ratios + smart stratify)", variable=self._assignment_mode_var,
+            value="auto", bg=BG_BUILD, font=("sans-serif", 8),
+            command=self._on_assignment_mode_changed,
+        ).pack(side=tk.LEFT, padx=2)
+        tk.Radiobutton(
+            mode_row, text="Manual (train/val/test per geometry)", variable=self._assignment_mode_var,
+            value="manual", bg=BG_BUILD, font=("sans-serif", 8),
+            command=self._on_assignment_mode_changed,
+        ).pack(side=tk.LEFT, padx=2)
+        _tip(
+            mode_row,
+            "Auto: use global train/val/test ratios and per-geometry assignment / counts.\n"
+            "Manual: set how many trajectories of each geometry go to train, val, and test.",
+        )
+
+        self._budget_row = tk.Frame(comp_frame, bg=BG_BUILD)
+        self._budget_row.pack(fill=tk.X, pady=(0, 2))
+        tk.Label(self._budget_row, text="Total trajectories:", bg=BG_BUILD,
                  font=("sans-serif", 9)).pack(side=tk.LEFT)
         self._budget_spin = tk.Spinbox(
-            budget_row, from_=1, to=9999, width=5,
+            self._budget_row, from_=1, to=9999, width=5,
             textvariable=self._total_budget_var,
             font=("sans-serif", 9), command=self._auto_distribute,
         )
         self._budget_spin.pack(side=tk.LEFT, padx=4)
         self._budget_avail_label = tk.Label(
-            budget_row, text="of 0 available", bg=BG_BUILD,
+            self._budget_row, text="of 0 available", bg=BG_BUILD,
             font=("sans-serif", 8), fg="#555",
         )
         self._budget_avail_label.pack(side=tk.LEFT, padx=4)
-        tk.Button(budget_row, text="Auto-Distribute", command=self._auto_distribute,
+        tk.Button(self._budget_row, text="Auto-Distribute", command=self._auto_distribute,
                   font=("sans-serif", 8)).pack(side=tk.LEFT, padx=6)
-        tk.Button(budget_row, text="Refresh Scan", command=self._geom_scan,
+        tk.Button(self._budget_row, text="Refresh Scan", command=self._geom_scan,
                   font=("sans-serif", 8)).pack(side=tk.LEFT)
         _tip(
             self._budget_spin,
@@ -1018,13 +1046,8 @@ class PreprocessApp:
             "proportionally across all included geometry types.",
         )
 
-        # Column headers
-        hdr = tk.Frame(comp_frame, bg="#d0d8c0")
-        hdr.pack(fill=tk.X)
-        for txt, w in [("✓", 3), ("Geometry Type", 18), ("Available", 8),
-                       ("Use Count", 9), ("Assignment", 22)]:
-            tk.Label(hdr, text=txt, bg="#d0d8c0", font=("sans-serif", 8, "bold"),
-                     width=w, anchor=tk.W).pack(side=tk.LEFT, padx=2)
+        self._geom_hdr = tk.Frame(comp_frame, bg="#d0d8c0")
+        self._geom_hdr.pack(fill=tk.X)
 
         # Scrollable composition rows
         geom_canvas = tk.Canvas(comp_frame, bg=BG_BUILD, height=160, highlightthickness=0)
@@ -1050,6 +1073,7 @@ class PreprocessApp:
         # Split ratios
         row2 = tk.Frame(bf, bg=BG_BUILD)
         row2.pack(fill=tk.X, pady=2)
+        self._row2_for_split = row2
         tk.Label(row2, text="Split:", bg=BG_BUILD, font=("sans-serif", 9)).pack(side=tk.LEFT)
         self._split_train = tk.Entry(row2, width=5, font=("sans-serif", 8))
         self._split_train.insert(0, "0.70")
@@ -1083,6 +1107,8 @@ class PreprocessApp:
             state="readonly", width=18, font=("sans-serif", 8),
         )
         _split_mode_cb.pack(side=tk.LEFT, padx=4)
+        self._split_mode_widget = _split_mode_cb
+        self._row2b_for_split = row2b
         _tip(
             _split_mode_cb,
             "stratified (smart): each geometry type is proportionally represented.\n"
@@ -1154,10 +1180,44 @@ class PreprocessApp:
         m = _re.match(r'^([a-z_]+?)_r\d', stem)
         return m.group(1) if m else "unknown"
 
+    def _on_assignment_mode_changed(self) -> None:
+        self._update_split_controls_for_assignment_mode()
+        self._geom_scan()
+
+    def _update_split_controls_for_assignment_mode(self) -> None:
+        is_manual = self._assignment_mode_var.get() == "manual"
+        state = "disabled" if is_manual else "normal"
+        for w in (getattr(self, "_split_train", None), getattr(self, "_split_val", None),
+                  getattr(self, "_split_test", None)):
+            if w is not None:
+                w.config(state=state)
+        if self._split_mode_widget is not None:
+            self._split_mode_widget.config(state="disabled" if is_manual else "readonly")
+        for w in (getattr(self, "_budget_spin", None),):
+            if w is not None:
+                w.config(state="disabled" if is_manual else "normal")
+
     def _geom_scan(self):
         d = self._dir_var.get() if hasattr(self, "_dir_var") else str(RAW_DIR)
         if not os.path.isdir(d):
             return
+
+        is_manual = self._assignment_mode_var.get() == "manual"
+
+        for w in self._geom_hdr.winfo_children():
+            w.destroy()
+        if is_manual:
+            for txt, w in [
+                ("✓", 3), ("Geometry", 14), ("Avail", 6), ("→ Train", 7),
+                ("→ Val", 7), ("→ Test", 7), ("∑/avail", 9),
+            ]:
+                tk.Label(self._geom_hdr, text=txt, bg="#d0d8c0", font=("sans-serif", 8, "bold"),
+                         width=w, anchor=tk.W).pack(side=tk.LEFT, padx=1)
+        else:
+            for txt, w in [("✓", 3), ("Geometry Type", 18), ("Available", 8),
+                           ("Use Count", 9), ("Assignment", 22)]:
+                tk.Label(self._geom_hdr, text=txt, bg="#d0d8c0", font=("sans-serif", 8, "bold"),
+                         width=w, anchor=tk.W).pack(side=tk.LEFT, padx=2)
 
         grps: dict[str, list[str]] = collections.defaultdict(list)
         for f in sorted(os.listdir(d)):
@@ -1166,14 +1226,19 @@ class PreprocessApp:
 
         total_avail = sum(len(v) for v in grps.values())
 
-        prev = {
-            gt: {
-                "include": info["include"].get(),
-                "count":   info["count"].get(),
-                "assign":  info["assign"].get(),
-            }
-            for gt, info in self._geom_rows.items()
-        }
+        prev: dict = {}
+        for gtp, info in self._geom_rows.items():
+            p: dict = {}
+            p["include"] = info["include"].get() if "include" in info else True
+            if "count" in info:
+                p["count"] = info["count"].get()
+            if "assign" in info:
+                p["assign"] = info["assign"].get()
+            if "m_train" in info:
+                p["m_train"] = info["m_train"].get()
+                p["m_val"] = info["m_val"].get()
+                p["m_test"] = info["m_test"].get()
+            prev[gtp] = p
 
         for w in self._geom_comp_inner.winfo_children():
             w.destroy()
@@ -1197,15 +1262,90 @@ class PreprocessApp:
         for row_idx, (gt, files) in enumerate(sorted(grps.items())):
             avail = len(files)
             rg = "#f5f5ee" if row_idx % 2 == 0 else BG_BUILD
-
-            include_v = tk.BooleanVar(value=prev.get(gt, {}).get("include", True))
-            count_v   = tk.IntVar(value=min(prev.get(gt, {}).get("count", avail), avail))
-            assign_v  = tk.StringVar(
-                value=prev.get(gt, {}).get("assign", "all splits (stratified)")
-            )
+            p0 = prev.get(gt, {})
+            include_v = tk.BooleanVar(value=p0.get("include", True))
 
             row_f = tk.Frame(self._geom_comp_inner, bg=rg)
             row_f.pack(fill=tk.X)
+
+            if is_manual:
+                pmt = int(p0.get("m_train", 0))
+                pmv = int(p0.get("m_val", 0))
+                pme = int(p0.get("m_test", 0))
+                if pmt + pmv + pme > avail or min(pmt, pmv, pme) < 0:
+                    pmt, pmv, pme = 0, 0, 0
+                pmt, pmv, pme = min(pmt, avail), min(pmv, avail), min(pme, avail)
+                m_tr = tk.IntVar(value=pmt)
+                m_vl = tk.IntVar(value=pmv)
+                m_te = tk.IntVar(value=pme)
+                sum_lbl = tk.StringVar()
+
+                def _make_toggle_m(rf=row_f, iv=include_v):
+                    def _toggle(*_):
+                        col = "#e8e8d8" if iv.get() else "#e0e0e0"
+                        rf.configure(bg=col)
+                        for w2 in rf.winfo_children():
+                            try:
+                                w2.configure(bg=col)
+                            except tk.TclError:
+                                pass
+                    return _toggle
+
+                toggle_m = _make_toggle_m()
+
+                def _upd_sum(
+                    *_, mv_tr=m_tr, mv_vl=m_vl, mv_te=m_te, sl=sum_lbl, av=avail,
+                ):
+                    tr, vl, te = max(0, mv_tr.get()), max(0, mv_vl.get()), max(0, mv_te.get())
+                    s = tr + vl + te
+                    if s > av:
+                        sl.set(f"INVALID {s} > {av}!")
+                    else:
+                        sl.set(f"{s}/{av}")
+
+                m_tr.trace_add("write", _upd_sum)
+                m_vl.trace_add("write", _upd_sum)
+                m_te.trace_add("write", _upd_sum)
+                include_v.trace_add("write", lambda *_: toggle_m())
+
+                tk.Checkbutton(row_f, variable=include_v, bg=rg, command=toggle_m).pack(
+                    side=tk.LEFT, padx=2,
+                )
+                tk.Label(row_f, text=gt, bg=rg, font=("sans-serif", 8),
+                         width=14, anchor=tk.W).pack(side=tk.LEFT, padx=2)
+                tk.Label(row_f, text=str(avail), bg=rg, font=("sans-serif", 8),
+                         width=6, anchor=tk.CENTER).pack(side=tk.LEFT, padx=1)
+                sb_tr = tk.Spinbox(
+                    row_f, from_=0, to=avail, width=4, textvariable=m_tr, font=("sans-serif", 8),
+                )
+                sb_vl = tk.Spinbox(
+                    row_f, from_=0, to=avail, width=4, textvariable=m_vl, font=("sans-serif", 8),
+                )
+                sb_te = tk.Spinbox(
+                    row_f, from_=0, to=avail, width=4, textvariable=m_te, font=("sans-serif", 8),
+                )
+                sb_tr.pack(side=tk.LEFT, padx=1)
+                sb_vl.pack(side=tk.LEFT, padx=1)
+                sb_te.pack(side=tk.LEFT, padx=1)
+                tk.Label(
+                    row_f, textvariable=sum_lbl, bg=rg, font=("sans-serif", 8),
+                    width=9, anchor=tk.W, fg="#333",
+                ).pack(side=tk.LEFT, padx=1)
+
+                self._geom_rows[gt] = {
+                    "include": include_v,
+                    "m_train": m_tr, "m_val": m_vl, "m_test": m_te,
+                    "sum_lbl": sum_lbl,
+                    "avail":   avail,
+                }
+                toggle_m()
+                _upd_sum()
+                continue
+
+            count_v   = tk.IntVar(value=min(p0.get("count", avail), avail))
+            assign_v  = tk.StringVar(
+                value=p0.get("assign", "all splits (stratified)"),
+            )
 
             def _make_toggle(av=assign_v, rf=row_f, iv=include_v):
                 def _toggle(*_):
@@ -1250,12 +1390,17 @@ class PreprocessApp:
         self._budget_spin.config(to=total_avail)
         self._budget_avail_label.config(text=f"of {total_avail} available")
         self._geom_canvas.configure(scrollregion=self._geom_canvas.bbox("all"))
+        self._update_split_controls_for_assignment_mode()
 
     def _auto_distribute(self, *_):
+        if self._assignment_mode_var.get() == "manual":
+            return
         included = [
             (gt, info)
             for gt, info in self._geom_rows.items()
-            if info["include"].get() and info.get("assign", tk.StringVar()).get() != "exclude"
+            if info["include"].get()
+            and "assign" in info
+            and info["assign"].get() != "exclude"
         ]
         if not included:
             return
@@ -1297,16 +1442,20 @@ class PreprocessApp:
         if not run_dir:
             messagebox.showerror("Error", "Output directory is empty.")
             return
-        try:
-            tr = float(self._split_train.get())
-            vl = float(self._split_val.get())
-            te = float(self._split_test.get())
-        except ValueError:
-            messagebox.showerror("Error", "Split ratios must be numbers.")
-            return
-        if abs(tr + vl + te - 1.0) > 0.01:
-            messagebox.showerror("Error", f"Splits must sum to 1.0 (got {tr+vl+te:.3f})")
-            return
+        amode = self._assignment_mode_var.get()
+        if amode == "auto":
+            try:
+                tr = float(self._split_train.get())
+                vl = float(self._split_val.get())
+                te = float(self._split_test.get())
+            except ValueError:
+                messagebox.showerror("Error", "Split ratios must be numbers.")
+                return
+            if abs(tr + vl + te - 1.0) > 0.01:
+                messagebox.showerror("Error", f"Splits must sum to 1.0 (got {tr+vl+te:.3f})")
+                return
+        else:
+            tr, vl, te = 0.33, 0.33, 0.34  # placeholder; not used in manual split
 
         q_enabled, q_win, q_poly      = self._panels[0].get_sg_params()
         _, d_win, d_poly               = self._panels[1].get_sg_params()
@@ -1339,11 +1488,15 @@ class PreprocessApp:
                 f"savgol(win={qdd_w}, poly={qdd_p}, "
                 f"mode={qdd_panel.get_mode()}, deriv=2)"
             )
+        if amode == "auto":
+            split_line = f"  Split:          {tr}/{vl}/{te}  ({self._split_mode_var.get()})"
+        else:
+            split_line = "  Split:          MANUAL (per-geometry train/val/test counts)"
         msg = (
             f"Build dataset\n\n"
             f"  Source:         {raw_dir}\n"
             f"  Output:         {run_dir}\n"
-            f"  Split:          {tr}/{vl}/{te}  ({self._split_mode_var.get()})\n"
+            f"{split_line}\n"
             f"  Trim:           {trim_fp}% front, {trim_bp}% back\n\n"
             f"  q smooth:       {'savgol(win='+str(q_win)+',poly='+str(q_poly)+')' if q_enabled else 'none'}\n"
             f"  qd deriv:       savgol(win={d_win}, poly={d_poly}, mode={d_mode}, deriv=1)\n"
@@ -1359,6 +1512,7 @@ class PreprocessApp:
         params: dict = {
             "raw_dir": raw_dir, "run_dir": run_dir,
             "split_mode": split_mode,
+            "assignment_mode": amode,
             "train_ratio": tr, "val_ratio": vl, "test_ratio": te,
             "trim_front_pct": trim_fp, "trim_back_pct": trim_bp,
             "q_smooth_enabled": q_enabled, "q_window": q_win, "q_polyorder": q_poly,
@@ -1376,25 +1530,78 @@ class PreprocessApp:
             params["qdd_mode"]      = qdd_panel.get_mode()
 
         geom_config: dict = {}
-        for gt, info in self._geom_rows.items():
-            assign = info["assign"].get()
-            included = info["include"].get() and assign != "exclude"
-            geom_config[gt] = {
-                "include":    included,
-                "count":      info["count"].get() if included else 0,
-                "assignment": assign,
-                "avail":      info["avail"],
-            }
+        manual_alloc: dict = {}
+        if amode == "manual":
+            tot_tr = tot_vl = tot_te = 0
+            for gt, info in self._geom_rows.items():
+                if not info["include"].get():
+                    geom_config[gt] = {
+                        "include": False, "count": 0, "assignment": "exclude",
+                        "avail": info["avail"],
+                    }
+                    continue
+                ntr = int(info["m_train"].get())
+                nvl = int(info["m_val"].get())
+                nte = int(info["m_test"].get())
+                av = int(info["avail"])
+                if ntr < 0 or nvl < 0 or nte < 0:
+                    messagebox.showerror("Error", f"Negative trajectory count for {gt!r}.")
+                    return
+                if ntr + nvl + nte > av:
+                    messagebox.showerror(
+                        "Error",
+                        f"{gt!r}: train+val+test ({ntr + nvl + nte}) exceeds available ({av}).",
+                    )
+                    return
+                if ntr + nvl + nte == 0:
+                    geom_config[gt] = {
+                        "include": False, "count": 0, "assignment": "exclude",
+                        "avail": av,
+                    }
+                    continue
+                manual_alloc[gt] = {"train": ntr, "val": nvl, "test": nte}
+                tot_tr += ntr
+                tot_vl += nvl
+                tot_te += nte
+                geom_config[gt] = {
+                    "include": True,
+                    "count": ntr + nvl + nte,
+                    "assignment": "manual",
+                    "avail": av,
+                }
+            if not manual_alloc:
+                messagebox.showerror("Error", "Manual mode: assign at least one trajectory (include a row with T+V+T > 0).")
+                return
+            if tot_tr < 1 or tot_vl < 1 or tot_te < 1:
+                messagebox.showerror(
+                    "Error",
+                    "Manual mode: need at least one trajectory in each of train, val, and test.",
+                )
+                return
+            params["manual_alloc"] = manual_alloc
+        else:
+            params["manual_alloc"] = {}
+            for gt, info in self._geom_rows.items():
+                assign = info["assign"].get()
+                included = info["include"].get() and assign != "exclude"
+                geom_config[gt] = {
+                    "include":    included,
+                    "count":      info["count"].get() if included else 0,
+                    "assignment": assign,
+                    "avail":      info["avail"],
+                }
+
         params["geom_config"] = geom_config
 
-        selected_total = sum(v["count"] for v in geom_config.values() if v["include"])
-        if selected_total < 3:
-            messagebox.showerror(
-                "Error",
-                f"Only {selected_total} trajectories selected — need at least 3 "
-                f"(one per split). Adjust counts or uncheck Exclude.",
-            )
-            return
+        if amode == "auto":
+            selected_total = sum(v["count"] for v in geom_config.values() if v["include"])
+            if selected_total < 3:
+                messagebox.showerror(
+                    "Error",
+                    f"Only {selected_total} trajectories selected — need at least 3 "
+                    f"(one per split). Adjust counts or uncheck Exclude.",
+                )
+                return
 
         self._build_btn.config(state=tk.DISABLED, text="Building …")
         self._log("Build started …")
@@ -1481,6 +1688,8 @@ def _do_build(params: dict) -> dict:
         return m.group(1) if m else "unknown"
 
     geom_config: dict = params.get("geom_config", {})
+    assignment_mode = str(params.get("assignment_mode", "auto")).lower()
+    manual_alloc = params.get("manual_alloc") or {}
     if geom_config:
         grps_by_type: dict = collections.defaultdict(list)
         for jf in json_files:
@@ -1500,7 +1709,13 @@ def _do_build(params: dict) -> dict:
             if assign == "exclude":
                 _log(f"  {gt:<22} {len(files_for_gt):>6}  {'--':>5}  EXCLUDED")
                 continue
-            n_sel = max(1, min(cfg.get("count", len(files_for_gt)), len(files_for_gt)))
+            if assignment_mode == "manual" and assign == "manual":
+                n_sel = min(int(cfg.get("count", 0)), len(files_for_gt))
+                if n_sel <= 0:
+                    _log(f"  {gt:<22} {len(files_for_gt):>6}  {'0':>5}  manual (skip)")
+                    continue
+            else:
+                n_sel = max(1, min(cfg.get("count", len(files_for_gt)), len(files_for_gt)))
             shuffled = list(files_for_gt)
             rng_sel.shuffle(shuffled)
             filtered_files.extend(shuffled[:n_sel])
@@ -1650,7 +1865,50 @@ def _do_build(params: dict) -> dict:
     # ── Splitting ──────────────────────────────────────────────────────────
     split_mode = str(params.get("split_mode", "stratified")).strip().lower()
 
-    if split_mode == "temporal":
+    if assignment_mode == "manual":
+        groups: dict = collections.defaultdict(list)
+        for idx, traj in enumerate(all_trajectories):
+            groups[traj["geometry_type"]].append(idx)
+        rng_m = np.random.default_rng(42)
+        final_train: list = []
+        final_val: list = []
+        final_test: list = []
+        _log("Split mode: manual (per-geometry train/val/test counts, seed=42)")
+        _log(f"  {'Geometry':<26} {'Have':>5}  {'T':>4} {'V':>4} {'Te':>4}  {'→Tr':>5}  {'→V':>5}  {'→Te':>5}")
+        for gtype in sorted(groups):
+            idx_list = groups[gtype]
+            ma = manual_alloc.get(gtype) or {"train": 0, "val": 0, "test": 0}
+            n_tr = int(ma.get("train", 0))
+            n_vl = int(ma.get("val", 0))
+            n_te = int(ma.get("test", 0))
+            need = n_tr + n_vl + n_te
+            if need == 0:
+                continue
+            if len(idx_list) < need:
+                raise RuntimeError(
+                    f"Geometry {gtype!r}: manual split needs {need} trajectories but only "
+                    f"{len(idx_list)} were successfully processed (some JSON files may have been "
+                    f"skipped). Reduce counts or fix bad logs."
+                )
+            shuffled = list(idx_list)
+            rng_m.shuffle(shuffled)
+            take_tr = shuffled[:n_tr]
+            take_vl = shuffled[n_tr:n_tr + n_vl]
+            take_te = shuffled[n_tr + n_vl:n_tr + n_vl + n_te]
+            final_train.extend(take_tr)
+            final_val.extend(take_vl)
+            final_test.extend(take_te)
+            _log(
+                f"  {gtype:<26} {len(idx_list):>5}  {n_tr:>4} {n_vl:>4} {n_te:>4}  "
+                f"{len(take_tr):>5}  {len(take_vl):>5}  {len(take_te):>5}",
+            )
+        splits = {"train": final_train, "val": final_val, "test": final_test}
+        rng_s3m = np.random.default_rng(42)
+        rng_s3m.shuffle(splits["train"])
+        rng_s3m.shuffle(splits["val"])
+        rng_s3m.shuffle(splits["test"])
+
+    elif split_mode == "temporal":
         indices = np.arange(len(all_trajectories), dtype=np.int64)
         n_train = int(len(indices) * tr_ratio)
         n_val   = int(len(indices) * vl_ratio)
@@ -1745,11 +2003,14 @@ def _do_build(params: dict) -> dict:
         rng_s3.shuffle(final_val)
         rng_s3.shuffle(final_test)
 
-        for split_name, lst in (("train", final_train), ("val", final_val), ("test", final_test)):
-            if not lst:
-                _log(f"  WARNING: {split_name} split is empty — check assignment pins")
-
         splits = {"train": final_train, "val": final_val, "test": final_test}
+
+    for _sn in ("train", "val", "test"):
+        if not splits[_sn]:
+            raise RuntimeError(
+                f"Split {_sn!r} is empty — adjust global split ratios, geometry assignment pins, "
+                f"or manual per-geometry counts. Build aborted (no CSVs written)."
+            )
 
     # ── Write CSVs ─────────────────────────────────────────────────────────
     header = ",".join(JOINT_NAMES)
@@ -1950,9 +2211,13 @@ def _do_build(params: dict) -> dict:
             },
         },
         "split": {
-            "mode": split_mode,
+            "mode": (split_mode if assignment_mode != "manual" else "manual"),
+            "assignment_mode": assignment_mode,
+            "manual_alloc": manual_alloc if assignment_mode == "manual" else None,
             "strategy": (
-                "stratified_by_geometry_type" if split_mode == "stratified" else split_mode
+                "manual_per_geometry"
+                if assignment_mode == "manual"
+                else ("stratified_by_geometry_type" if split_mode == "stratified" else split_mode)
             ),
             "geometry_distribution": geom_dist,
             "geometry_config": geom_config if geom_config else None,

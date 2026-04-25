@@ -2,20 +2,54 @@
 
 from __future__ import annotations
 
-import math
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+# ---------------------------------------------------------------------------
+# Train-epoch return type
+# ---------------------------------------------------------------------------
+#
+# Strategies return a ``TrainEpochMetrics`` so the pipeline can derive
+# physically-meaningful train_rmse (N·m) and a train_loss that is directly
+# comparable to val_loss.  The two key invariants exposed here:
+#
+#   loss_data_unw : unweighted per-element MSE on the **target** torque
+#                   (same formulation as the per-strategy eval_epoch's
+#                   val_loss → directly comparable on the same plot).
+#   sse_per_joint : per-joint summed squared errors in **normalised**
+#                   target space (shape (n_joints,)).  Multiplied by
+#                   ``std_tau_per_joint`` in the pipeline to obtain the
+#                   physical-units macro RMSE that matches val_rmse.
+#
+# ``loss_total`` remains the actual objective being optimised (joint-weighted
+# MSE for the data-only baseline, blended (1-α)·data + α·phys for PhysReg,
+# data + α_reg·||δ||² for Residual, …).  The pipeline records it as
+# ``train_loss_obj`` for diagnostics but does NOT plot it against val_loss
+# (their formulations differ).
+@dataclass(frozen=True)
+class TrainEpochMetrics:
+    loss_total:    float
+    loss_data_unw: float
+    grad_norm:     float
+    sse_per_joint: np.ndarray
+    n_samples:     int
+    extras:        dict[str, Any] | None = None
+
+
+def _accumulate_sse(running: np.ndarray | None, batch_sse: np.ndarray) -> np.ndarray:
+    return batch_sse if running is None else running + batch_sse
+
 from Neural_Networks.loader import ACTIVE_JOINTS
-from Neural_Networks.models.shared.optim import (
-    build_optimizer_default,
-    build_optimizer_physics_regularized,
-)
+from Neural_Networks.models.shared.optim import build_optimizer_default
 from Neural_Networks.models.torque_models import (
     BlackBoxFNN,
     PhysicsRegularizedFNN,
@@ -29,7 +63,6 @@ DEFAULT_EXHAUSTIVE_PLAIN: dict[str, Any] = {
     "batch_size": 512,
     "epochs": 500,
     "learning_rate": 3e-4,
-    "optimizer": "adamw",
     "lr_scheduler": "warmup_cosine",
     "weight_decay": 5e-3,
     "dropout": 0.1,
@@ -47,7 +80,6 @@ DEFAULT_EXHAUSTIVE_PLAIN: dict[str, Any] = {
     "seq_len": 50,
     "torch_compile": False,
     "torch_compile_mode": "default",
-    "snapshot_every": 0,
     "seed": 42,
 }
 
@@ -55,12 +87,11 @@ DEFAULT_EXHAUSTIVE_PHYSICS_REG = {
     **DEFAULT_EXHAUSTIVE_PLAIN,
     "physics_weight": 0.1,
     "physics_warmup_fraction": 0.05,
-    "phi_lr_ratio": 0.1,
 }
 
 DEFAULT_EXHAUSTIVE_RESIDUAL = {
     **DEFAULT_EXHAUSTIVE_PLAIN,
-    "alpha_reg_weight": 0.05,
+    "alpha_reg_weight": 0.01,
 }
 
 RUN_ID_KEYS_PLAIN: list[tuple[str, str]] = [
@@ -107,12 +138,13 @@ def _train_epoch_plain(
     _epoch: int,
     onecycle_sched,
     scaler,
-) -> tuple[float, float, float]:
+) -> TrainEpochMetrics:
     model.train()
     total_loss = 0.0
+    total_loss_data_unw = 0.0
     total_gnorm = 0.0
-    total_sse = 0.0
-    total_elem = 0
+    sse_per_joint: np.ndarray | None = None
+    n_samples = 0
     use_amp = scaler is not None
     n_batches = len(loader)
     _jw = torch.tensor([1.0, 2.5, 1.0, 1.0, 1.0], device=device)
@@ -144,11 +176,18 @@ def _train_epoch_plain(
         total_loss += float(loss.item())
         with torch.no_grad():
             d = tau_hat.detach() - target
-            total_sse += float((d * d).sum().item())
-            total_elem += d.numel()
+            sse_per_joint = _accumulate_sse(sse_per_joint, (d * d).sum(dim=0).cpu().numpy())
+            n_samples += int(d.shape[0])
+            total_loss_data_unw += float(F.mse_loss(tau_hat.detach(), target).item())
         del tau_hat, loss, d
-    train_rmse = math.sqrt(total_sse / max(1, total_elem))
-    return total_loss / n_batches, total_gnorm / n_batches, train_rmse
+    return TrainEpochMetrics(
+        loss_total=total_loss / n_batches,
+        loss_data_unw=total_loss_data_unw / n_batches,
+        grad_norm=total_gnorm / n_batches,
+        sse_per_joint=sse_per_joint if sse_per_joint is not None else np.zeros(ACTIVE_JOINTS),
+        n_samples=n_samples,
+        extras=None,
+    )
 
 
 def _eval_epoch_plain(model: nn.Module, loader, device: torch.device) -> tuple[float, np.ndarray, np.ndarray]:
@@ -193,12 +232,15 @@ def _train_epoch_physics_reg(
     epoch: int,
     onecycle_sched,
     scaler,
-) -> tuple[float, float, float]:
+) -> TrainEpochMetrics:
     model.train()
     total_loss = 0.0
+    total_l_data_jw = 0.0
+    total_l_phys_jw = 0.0
+    total_loss_data_unw = 0.0
     total_gnorm = 0.0
-    total_sse = 0.0
-    total_elem = 0
+    sse_per_joint: np.ndarray | None = None
+    n_samples = 0
     use_amp = scaler is not None
     n_batches = len(loader)
     _jw = torch.tensor([1.0, 2.5, 1.0, 1.0, 1.0], device=device)
@@ -206,6 +248,15 @@ def _train_epoch_physics_reg(
     epochs_max = max(1, int(hp.get("epochs", 500)))
     warmup_ep = max(1, int(float(hp.get("physics_warmup_fraction", 0.05)) * epochs_max))
     pw = float(hp.get("physics_weight", 0.1))
+    # STRICT INVARIANT: PhysReg blends data and physics with weights summing to
+    # exactly 1 (linear combination), and physics_weight is bounded above at 0.8
+    # so the data signal is always at least 20% of the objective.  Both
+    # invariants are validated up-front to fail loud if the grid is misconfigured.
+    if not (0.0 <= pw <= 0.8):
+        raise ValueError(
+            f"physics_weight must lie in [0.0, 0.8] (got {pw}). The blended "
+            f"loss is (1-α)·L_data + α·L_phys; values >0.8 starve the data term."
+        )
     alpha_eff = pw * min(1.0, float(epoch) / float(warmup_ep))
     optimizer.zero_grad(set_to_none=True)
     for _batch_idx, (features, target, physics) in enumerate(loader):
@@ -216,9 +267,11 @@ def _train_epoch_physics_reg(
             features = features + torch.randn_like(features) * float(hp["feature_noise_std"])
         with torch.autocast(device_type=device.type, enabled=use_amp):
             tau_hat = model(features, physics)
-            tau_ref = model.calibrated_phys(physics)
+            tau_ref = reduce_physics_to_total(physics, model.n_joints)
+            # Learnable per-joint affine calibration corrects systematic RNEA bias.
+            tau_ref_cal = model.cal_scale * tau_ref + model.cal_bias
             l_data = _loss_mse(tau_hat, target, _jw)
-            l_phys = F.mse_loss(tau_hat, tau_ref)
+            l_phys = _loss_mse(tau_hat, tau_ref_cal, _jw)
             loss = (1.0 - alpha_eff) * l_data + alpha_eff * l_phys
         if scaler is not None:
             scaler.scale(loss).backward()
@@ -235,13 +288,27 @@ def _train_epoch_physics_reg(
         if onecycle_sched is not None:
             onecycle_sched.step()
         total_loss += float(loss.item())
+        total_l_data_jw += float(l_data.item())
+        total_l_phys_jw += float(l_phys.item())
         with torch.no_grad():
             d = tau_hat.detach() - target
-            total_sse += float((d * d).sum().item())
-            total_elem += d.numel()
-        del tau_hat, loss, d, l_data, l_phys, tau_ref
-    train_rmse = math.sqrt(total_sse / max(1, total_elem))
-    return total_loss / n_batches, total_gnorm / n_batches, train_rmse
+            sse_per_joint = _accumulate_sse(sse_per_joint, (d * d).sum(dim=0).cpu().numpy())
+            n_samples += int(d.shape[0])
+            total_loss_data_unw += float(F.mse_loss(tau_hat.detach(), target).item())
+        del tau_hat, loss, d, l_data, l_phys, tau_ref, tau_ref_cal
+    return TrainEpochMetrics(
+        loss_total=total_loss / n_batches,
+        loss_data_unw=total_loss_data_unw / n_batches,
+        grad_norm=total_gnorm / n_batches,
+        sse_per_joint=sse_per_joint if sse_per_joint is not None else np.zeros(ACTIVE_JOINTS),
+        n_samples=n_samples,
+        extras={
+            "l_data_jw": total_l_data_jw / n_batches,
+            "l_phys_jw": total_l_phys_jw / n_batches,
+            "alpha_eff": float(alpha_eff),
+            "physics_weight": float(pw),
+        },
+    )
 
 
 def _eval_epoch_physics_reg(
@@ -288,17 +355,21 @@ def _train_epoch_residual(
     _epoch: int,
     onecycle_sched,
     scaler,
-) -> tuple[float, float, float]:
+) -> TrainEpochMetrics:
     model.train()
     total_loss = 0.0
+    total_loss_data_unw = 0.0
     total_gnorm = 0.0
-    total_sse = 0.0
-    total_elem = 0
+    sse_per_joint: np.ndarray | None = None
+    n_samples = 0
     use_amp = scaler is not None
     n_batches = len(loader)
     _jw = torch.tensor([1.0, 2.5, 1.0, 1.0, 1.0], device=device)
     _grad_clip = float(hp.get("grad_clip_norm", 5.0))
     ar = float(hp.get("alpha_reg_weight", 0.05))
+    delta_abs_sum = 0.0
+    tau_phys_abs_sum = 0.0
+    delta_denom = 0
     optimizer.zero_grad(set_to_none=True)
     for _batch_idx, (features, target, physics) in enumerate(loader):
         features = features.to(device, non_blocking=True)
@@ -308,9 +379,14 @@ def _train_epoch_residual(
             features = features + torch.randn_like(features) * float(hp["feature_noise_std"])
         with torch.autocast(device_type=device.type, enabled=use_amp):
             tau_phys = reduce_physics_to_total(physics, model.n_joints)
-            delta = model.net(features)
+            feat_aug = torch.cat([features, tau_phys], dim=-1)
+            delta = model.net(feat_aug)
             tau_hat = tau_phys + delta
             loss = _loss_mse(tau_hat, target, _jw) + ar * (delta**2).mean()
+        with torch.no_grad():
+            delta_abs_sum += float(delta.detach().abs().sum().item())
+            tau_phys_abs_sum += float(tau_phys.detach().abs().sum().item())
+            delta_denom += delta.numel()
         if scaler is not None:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -328,11 +404,22 @@ def _train_epoch_residual(
         total_loss += float(loss.item())
         with torch.no_grad():
             d = tau_hat.detach() - target
-            total_sse += float((d * d).sum().item())
-            total_elem += d.numel()
+            sse_per_joint = _accumulate_sse(sse_per_joint, (d * d).sum(dim=0).cpu().numpy())
+            n_samples += int(d.shape[0])
+            total_loss_data_unw += float(F.mse_loss(tau_hat.detach(), target).item())
         del tau_hat, loss, d, delta, tau_phys
-    train_rmse = math.sqrt(total_sse / max(1, total_elem))
-    return total_loss / n_batches, total_gnorm / n_batches, train_rmse
+    delta_ratio: float | None = None
+    if delta_denom > 0 and tau_phys_abs_sum > 0.0:
+        delta_ratio = (delta_abs_sum / delta_denom) / ((tau_phys_abs_sum / delta_denom) + 1e-12)
+        logger.info("residual δ-ratio  E[|δ|]/E[|τ_phys|] = %.4f  (alpha_reg=%.3f)", delta_ratio, ar)
+    return TrainEpochMetrics(
+        loss_total=total_loss / n_batches,
+        loss_data_unw=total_loss_data_unw / n_batches,
+        grad_norm=total_gnorm / n_batches,
+        sse_per_joint=sse_per_joint if sse_per_joint is not None else np.zeros(ACTIVE_JOINTS),
+        n_samples=n_samples,
+        extras={"alpha_reg_weight": ar, "delta_ratio": delta_ratio},
+    )
 
 
 def _eval_epoch_residual(
@@ -381,7 +468,7 @@ class TorqueTrainStrategy:
     run_id_hp_keys: list[tuple[str, str]]
     make_model: Callable[[torch.device, dict[str, Any]], nn.Module]
     build_optimizer: Callable[[nn.Module, dict[str, Any]], torch.optim.Optimizer]
-    train_epoch: Callable[..., tuple[float, ...]]  # Usually 3 floats; EDR returns 5 (l_data, l_corr means).
+    train_epoch: Callable[..., TrainEpochMetrics]
     eval_epoch: Callable[[nn.Module, Any, torch.device], tuple[float, np.ndarray, np.ndarray]]
     physics_sched_metadata: Callable[[dict[str, Any]], dict[str, Any] | None]
 
@@ -400,7 +487,7 @@ PHYSICS_REG_STRATEGY = TorqueTrainStrategy(
     default_exhaustive_hp=DEFAULT_EXHAUSTIVE_PHYSICS_REG,
     run_id_hp_keys=RUN_ID_KEYS_PHYSICS_REG,
     make_model=_make_model_physics_reg,
-    build_optimizer=build_optimizer_physics_regularized,
+    build_optimizer=build_optimizer_default,
     train_epoch=_train_epoch_physics_reg,
     eval_epoch=_eval_epoch_physics_reg,
     physics_sched_metadata=_sched_physics_reg,

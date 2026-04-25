@@ -40,7 +40,7 @@ from Neural_Networks.models.shared.checkpointing import (
 )
 from Neural_Networks.models.shared.metrics_numpy import compute_metrics, macro_rmse_numpy
 from Neural_Networks.models.shared.optim import build_scheduler
-from Neural_Networks.models.shared.strategies import TorqueTrainStrategy
+from Neural_Networks.models.shared.strategies import TorqueTrainStrategy, TrainEpochMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +211,21 @@ def run_training(
     best_val_loss_track = math.inf
     _snapshot_every = int(hp.get("snapshot_every", 0))
     _print_every = max(1, int(hp.get("print_every", 10)))
-    history: dict[str, list] = {"train_loss": [], "val_loss": [], "train_rmse": [], "val_rmse": []}
+    # History keys with consistent semantics across train/val:
+    #   train_loss / val_loss : unweighted per-element MSE on (tau_hat, target)
+    #                           in normalised target space — directly comparable.
+    #   train_rmse / val_rmse : per-joint RMSE in physical N·m, then macro-mean
+    #                           over joints — directly comparable.
+    #   train_loss_obj        : the *actual* objective being optimised (joint-
+    #                           weighted, blended for PhysReg, includes the δ
+    #                           regulariser for Residual, etc.).  Tracked for
+    #                           diagnostics but not plotted against val_loss.
+    history: dict[str, list] = {
+        "train_loss": [], "val_loss": [],
+        "train_rmse": [], "val_rmse": [],
+        "train_loss_obj": [],
+    }
+    _tau_std_train = np.asarray(loaders["train"].dataset.std_tau, dtype=np.float64)
     _tau_std_val = loaders["val"].dataset.std_tau
     _tau_mean_val = loaders["val"].dataset.mean_tau
     _val_trajectories: list[dict] = (
@@ -221,7 +235,7 @@ def run_training(
     t0 = time.time()
 
     # Per-component correction-magnitude history (optional; populated when the
-    # strategy's train_epoch returns a trailing telemetry dict).
+    # strategy's train_epoch returns extras["correction_magnitudes"]).
     history["correction_magnitudes"] = []
 
     seg_ep = int(hp.get("segment_epochs", 0) or 0)
@@ -244,7 +258,10 @@ def run_training(
         if scaler is not None and st.get("scaler_state") is not None:
             scaler.load_state_dict(st["scaler_state"])
         h_in = st.get("history", {})
-        for k in ("train_loss", "val_loss", "train_rmse", "val_rmse", "correction_magnitudes"):
+        for k in (
+            "train_loss", "val_loss", "train_rmse", "val_rmse",
+            "train_loss_obj", "correction_magnitudes",
+        ):
             if k in h_in:
                 history[k] = list(h_in[k])
         _bst = st.get("best_state")
@@ -273,31 +290,36 @@ def run_training(
         return 1
 
     for epoch in range(start_epoch, epoch_end + 1):
-        _train_ret = job.strategy.train_epoch(
+        _tm: TrainEpochMetrics = job.strategy.train_epoch(
             model, loaders["train"], optimizer, device, hp, epoch, onecycle_sched, scaler
         )
-        # Backward-compatible unpacking: strategies may return 3, 5, or 6
-        # elements.  The 6-element form adds a trailing ``correction_magnitudes``
-        # dict with per-δ-network mean magnitudes.
-        _corr_mags: dict[str, float] | None = None
-        if len(_train_ret) == 6:
-            (train_loss, _grad_norm, train_rmse_unw,
-             train_l_data_m, train_l_corr_m, _corr_mags) = _train_ret
-        elif len(_train_ret) == 5:
-            train_loss, _grad_norm, train_rmse_unw, train_l_data_m, train_l_corr_m = _train_ret
-        else:
-            train_loss, _grad_norm, train_rmse_unw = _train_ret
-            train_l_data_m = train_l_corr_m = None
+        _grad_norm = _tm.grad_norm
+        train_loss_obj = _tm.loss_total
+        train_loss_data = _tm.loss_data_unw
+        # Convert per-joint SSE in normalised target space to a physical-units
+        # macro RMSE — the per-joint MSE is multiplied by std_tau[j]² *before*
+        # the sqrt, then averaged across joints.  This matches the
+        # ``macro_rmse_numpy`` convention used for val/test (per-joint RMSE,
+        # mean over joints) and yields a value directly comparable to val_rmse.
+        _sse_j = np.asarray(_tm.sse_per_joint, dtype=np.float64)
+        _n_train = max(1, int(_tm.n_samples))
+        _train_rmse_phys_per_joint = np.sqrt(_sse_j / _n_train) * _tau_std_train
+        train_rmse_phys = float(_train_rmse_phys_per_joint.mean())
+        _extras = _tm.extras or {}
+        train_l_data_m = _extras.get("l_data_jw")
+        train_l_corr_m = _extras.get("l_corr")
+        _corr_mags = _extras.get("correction_magnitudes")
         history["correction_magnitudes"].append(_corr_mags)
         val_loss, _val_pred, _val_tgt = job.strategy.eval_epoch(model, loaders["val"], device)
         _val_rmse_unw = macro_rmse_numpy(_val_pred, _val_tgt, _val_trajectories)
         _val_pred_phys = _val_pred * _tau_std_val + _tau_mean_val
         _val_tgt_phys = _val_tgt * _tau_std_val + _tau_mean_val
         _val_rmse_phys = macro_rmse_numpy(_val_pred_phys, _val_tgt_phys, _val_trajectories)
-        history["train_loss"].append(train_loss)
+        history["train_loss"].append(train_loss_data)
         history["val_loss"].append(val_loss)
-        history["train_rmse"].append(train_rmse_unw)
+        history["train_rmse"].append(train_rmse_phys)
         history["val_rmse"].append(_val_rmse_phys)
+        history["train_loss_obj"].append(train_loss_obj)
 
         # Duck-typed hook: if the model supports it, let it record the latest
         # unnormalised val_rmse.  Used by EDR's adaptive phase-2 plateau detector.
@@ -337,43 +359,40 @@ def run_training(
         if progress_callback is not None:
             progress_callback(epoch, epochs, _val_rmse_phys, patience_counter, patience)
         elif epoch == 1 or epoch % _print_every == 0 or epoch == epochs or epoch == epoch_end:
-            if train_l_data_m is not None:
-                _corr_tag = ""
-                if _corr_mags is not None:
-                    _corr_tag = (
-                        f"  |δg|={_corr_mags['mean_abs_delta_g']:.3e}"
-                        f"  ||δM||_F={_corr_mags['mean_frob_delta_M']:.3e}"
-                        f"  |δC·q̇|={_corr_mags['mean_abs_delta_C_qd']:.3e}"
-                        f"  |δτ_f|={_corr_mags['mean_abs_delta_tau_f']:.3e}"
+            # Strategy-specific tail: only build it when extras carry the
+            # relevant fields.  Any missing key collapses cleanly to "".
+            _extra_tag = ""
+            if train_l_data_m is not None and train_l_corr_m is not None:
+                _extra_tag = f"  l_data={train_l_data_m:.5f}  l_corr={train_l_corr_m:.5f}"
+            elif train_l_data_m is not None:
+                _alpha = _extras.get("alpha_eff")
+                _l_phys = _extras.get("l_phys_jw")
+                if _alpha is not None and _l_phys is not None:
+                    _extra_tag = (
+                        f"  l_data={train_l_data_m:.5f}  l_phys={_l_phys:.5f}  α={_alpha:.3f}"
                     )
-                log.info(
-                    "epoch %4d/%d  train_loss=%.5f  train_l_data=%.5f  train_l_corr=%.5f  "
-                    "val_loss=%.5f  val_rmse_phys=%.5f N·m%s  best_ep=%d  patience=%d/%d",
-                    epoch,
-                    epochs,
-                    train_loss,
-                    train_l_data_m,
-                    train_l_corr_m,
-                    val_loss,
-                    _val_rmse_phys,
-                    _corr_tag,
-                    best_epoch_num,
-                    patience_counter,
-                    patience,
+            if _corr_mags is not None:
+                _extra_tag += (
+                    f"  |δg|={_corr_mags['mean_abs_delta_g']:.3e}"
+                    f"  ||δM||_F={_corr_mags['mean_frob_delta_M']:.3e}"
+                    f"  |δC·q̇|={_corr_mags['mean_abs_delta_C_qd']:.3e}"
+                    f"  |δτ_f|={_corr_mags['mean_abs_delta_tau_f']:.3e}"
                 )
-            else:
-                log.info(
-                    "epoch %4d/%d  train_loss=%.5f  val_loss=%.5f  val_rmse_phys=%.5f N·m  "
-                    "best_ep=%d  patience=%d/%d",
-                    epoch,
-                    epochs,
-                    train_loss,
-                    val_loss,
-                    _val_rmse_phys,
-                    best_epoch_num,
-                    patience_counter,
-                    patience,
-                )
+            log.info(
+                "epoch %4d/%d  train_loss=%.5f (obj=%.5f)  val_loss=%.5f  "
+                "train_rmse=%.5f  val_rmse=%.5f N·m%s  best_ep=%d  patience=%d/%d",
+                epoch,
+                epochs,
+                train_loss_data,
+                train_loss_obj,
+                val_loss,
+                train_rmse_phys,
+                _val_rmse_phys,
+                _extra_tag,
+                best_epoch_num,
+                patience_counter,
+                patience,
+            )
         if _run_gc:
             gc.collect()
             if device.type == "cuda":
@@ -514,25 +533,49 @@ def run_training(
     )
     save_architecture_summary(_unwrapped, os.path.join(save_dir, "architecture.txt"))
     _hist_png = os.path.join(save_dir, "training_history.png")
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(history["train_loss"], label="train loss", color="steelblue")
-    ax.plot(history["val_loss"], label="val loss", color="darkorange")
-    ax.set_xlabel("epoch")
-    ax.set_ylabel("MSE loss")
-    ax.set_title(f"Training History — {job.model_type}")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    # Two-panel history: comparable MSE losses (left) and comparable RMSEs in
+    # physical N·m (right).  Both panels now plot quantities computed on the
+    # same target space and same MSE formulation, so train/val curves are
+    # directly comparable.
+    fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+    ax_loss, ax_rmse = axes
+    ax_loss.plot(history["train_loss"], label="train (data MSE)", color="steelblue")
+    ax_loss.plot(history["val_loss"], label="val (data MSE)", color="darkorange")
+    if any(v is not None for v in history.get("train_loss_obj", [])):
+        ax_loss.plot(
+            history["train_loss_obj"],
+            label="train (objective)",
+            color="steelblue", linestyle="--", alpha=0.6,
+        )
+    ax_loss.set_xlabel("epoch")
+    ax_loss.set_ylabel("MSE (normalised target)")
+    ax_loss.set_title("Loss")
+    ax_loss.legend()
+    ax_loss.grid(True, alpha=0.3)
+    ax_rmse.plot(history["train_rmse"], label="train RMSE (N·m)", color="steelblue")
+    ax_rmse.plot(history["val_rmse"], label="val RMSE (N·m)", color="darkorange")
+    ax_rmse.set_xlabel("epoch")
+    ax_rmse.set_ylabel("macro RMSE (N·m)")
+    ax_rmse.set_title("RMSE (physical units)")
+    ax_rmse.legend()
+    ax_rmse.grid(True, alpha=0.3)
+    fig.suptitle(f"Training History — {job.model_type}")
     plt.tight_layout()
     plt.savefig(_hist_png, dpi=100)
     plt.close(fig)
     with open(os.path.join(save_dir, "training_history.csv"), "w", newline="") as csvf:
         w = csv.writer(csvf)
-        # Per-component correction-magnitude columns are added only if at least
-        # one epoch recorded them (strategies that don't emit the telemetry
-        # dict will store None).
+        # train_loss / val_loss : unweighted MSE in normalised target space.
+        # train_rmse / val_rmse : physical N·m macro RMSE.
+        # train_loss_obj        : the actual training objective (joint-weighted
+        #                         and possibly blended/regularised, depending
+        #                         on the strategy).  Diagnostics only.
         _corr_hist = history.get("correction_magnitudes", [])
         _has_corr = any(x is not None for x in _corr_hist)
-        header = ["epoch", "train_loss", "val_loss", "train_rmse", "val_rmse"]
+        header = [
+            "epoch", "train_loss", "val_loss",
+            "train_rmse", "val_rmse", "train_loss_obj",
+        ]
         if _has_corr:
             header += [
                 "mean_abs_delta_g",
@@ -541,6 +584,7 @@ def run_training(
                 "mean_abs_delta_tau_f",
             ]
         w.writerow(header)
+        _obj_hist = history.get("train_loss_obj", [])
         for i in range(len(history["train_loss"])):
             row = [
                 i + 1,
@@ -548,6 +592,7 @@ def run_training(
                 f"{history['val_loss'][i]:.8f}",
                 f"{history['train_rmse'][i]:.8f}",
                 f"{history['val_rmse'][i]:.8f}",
+                f"{_obj_hist[i]:.8f}" if i < len(_obj_hist) else "",
             ]
             if _has_corr:
                 c = _corr_hist[i] if i < len(_corr_hist) else None

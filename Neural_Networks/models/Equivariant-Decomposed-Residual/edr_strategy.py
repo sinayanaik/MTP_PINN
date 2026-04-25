@@ -70,7 +70,10 @@ from edr_model import EDRModel  # noqa: E402 — local sibling import
 # Absolute imports from the shared pipeline — always available from repo root.
 # ---------------------------------------------------------------------------
 from Neural_Networks.loader import ACTIVE_JOINTS  # noqa: E402
-from Neural_Networks.models.shared.strategies import TorqueTrainStrategy  # noqa: E402
+from Neural_Networks.models.shared.strategies import (  # noqa: E402
+    TorqueTrainStrategy,
+    TrainEpochMetrics,
+)
 from Neural_Networks.models.shared.optim import build_optimizer_default  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -413,7 +416,7 @@ def _train_epoch_edr(
     epoch:          int,
     onecycle_sched,
     scaler,         # Accepted but unconditionally ignored — EDR is float32 only.
-) -> tuple[float, float, float, float, float]:
+):
     """Run one training epoch for EDRModel.
 
     EDR-specific behaviour
@@ -444,11 +447,12 @@ def _train_epoch_edr(
 
     Returns
     -------
-    tuple[float, float, float, float, float]
-        ``(mean_train_loss, mean_grad_norm, train_rmse, mean_l_data, mean_l_corr)``
-        where ``mean_train_loss = mean_l_data + λ·mean_l_corr`` (plus passivity
-        term if enabled).  The shared pipeline logs ``mean_l_data`` /
-        ``mean_l_corr`` when present.
+    TrainEpochMetrics
+        Standard structured payload: ``loss_total`` is the EDR objective
+        (``l_data + λ·l_corr`` plus optional passivity), ``loss_data_unw`` is
+        the unweighted MSE matching ``val_loss``, ``sse_per_joint`` lets the
+        pipeline derive a physical-units macro RMSE, and ``extras`` carries
+        the per-component correction telemetry that the shared pipeline logs.
     """
     # ── Adaptive phase-2 transition (plateau detection) ──────────────────
     should_switch, reason = _should_transition_to_phase2(
@@ -492,9 +496,10 @@ def _train_epoch_edr(
     total_loss  = 0.0
     total_l_data = 0.0
     total_l_corr = 0.0
+    total_loss_data_unw = 0.0
     total_gnorm = 0.0
-    total_sse   = 0.0
-    total_elem  = 0
+    sse_per_joint: np.ndarray | None = None
+    n_samples = 0
     # Per-component correction-magnitude telemetry (for interpretability).
     # All are batch-mean scalars accumulated across the epoch.
     total_mag_g    = 0.0   # mean |δg| over batch+joints
@@ -583,8 +588,10 @@ def _train_epoch_edr(
         total_gnorm += gnorm.item() if hasattr(gnorm, "item") else float(gnorm)
         with torch.no_grad():
             d = tau_hat.detach() - target
-            total_sse  += float((d * d).sum().item())
-            total_elem += d.numel()
+            sse_batch = (d * d).sum(dim=0).cpu().numpy()  # (n_joints,)
+            sse_per_joint = sse_batch if sse_per_joint is None else sse_per_joint + sse_batch
+            n_samples += int(d.shape[0])
+            total_loss_data_unw += float(F.mse_loss(tau_hat.detach(), target).item())
             # Per-component magnitudes (detached — pure telemetry, no grad).
             total_mag_g    += float(delta_g.detach().abs().mean().item())
             total_mag_M    += float(
@@ -599,7 +606,6 @@ def _train_epoch_edr(
             delta_M_qdd, delta_C_qd, delta_tau_f, q, qd, qdd, tau_g, tau_M, tau_C, tau_f, inputs,
         )
 
-    train_rmse = math.sqrt(total_sse / max(1, total_elem))
     mean_l_data = total_l_data / n_batches
     mean_l_corr = total_l_corr / n_batches
     # Per-component correction-magnitude epoch means.
@@ -607,17 +613,21 @@ def _train_epoch_edr(
     mean_mag_M    = total_mag_M / n_batches
     mean_mag_C_qd = total_mag_C_qd / n_batches
     mean_mag_f    = total_mag_f / n_batches
-    return (
-        total_loss / n_batches,
-        total_gnorm / n_batches,
-        train_rmse,
-        mean_l_data,
-        mean_l_corr,
-        {
-            "mean_abs_delta_g":    mean_mag_g,
-            "mean_frob_delta_M":   mean_mag_M,
-            "mean_abs_delta_C_qd": mean_mag_C_qd,
-            "mean_abs_delta_tau_f": mean_mag_f,
+    return TrainEpochMetrics(
+        loss_total=total_loss / n_batches,
+        loss_data_unw=total_loss_data_unw / n_batches,
+        grad_norm=total_gnorm / n_batches,
+        sse_per_joint=sse_per_joint if sse_per_joint is not None else np.zeros(model.n_joints),
+        n_samples=n_samples,
+        extras={
+            "l_data_jw": mean_l_data,
+            "l_corr":    mean_l_corr,
+            "correction_magnitudes": {
+                "mean_abs_delta_g":     mean_mag_g,
+                "mean_frob_delta_M":    mean_mag_M,
+                "mean_abs_delta_C_qd":  mean_mag_C_qd,
+                "mean_abs_delta_tau_f": mean_mag_f,
+            },
         },
     )
 

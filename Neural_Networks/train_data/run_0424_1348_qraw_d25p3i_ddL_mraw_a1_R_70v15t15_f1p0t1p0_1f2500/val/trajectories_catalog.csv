@@ -1,0 +1,6 @@
+source_file,geometry_type,radius_mm,planner,ctrl_hz,fb_hz,duration_sec,n_samples,ee_rms_err_mm,start_idx,end_idx_exclusive
+helix_r57mm_az-45el0_cxn159cy220cz326_quintic_poly_ctrlmax_fbmax_001.json,helix,57.1686,Quintic Poly,302.061,302.059,22.5531,6704,16.0679,0,6704
+parabola_r116mm_yz_cx236cyn65cz226_ruckig_ctrlmax_fbmax_001.json,parabola,116.0787,Ruckig,304.889,304.89,6.24335,1869,12.0261,6704,8573
+circle_r50mm_xz_cxn274cy205cz175_ruckig_ctrlmax_fbmax_001.json,circle,50.0505,Ruckig,302.558,302.557,6.77797,2018,18.2464,8573,10591
+lissajous_r73mm_xz_cx66cyn265cz275_quintic_poly_ctrlmax_fbmax_001.json,lissajous,72.523,Quintic Poly,304.236,304.237,20.1524,5994,16.7033,10591,16585
+ellipse_r75mm_xz_cxn214cy205cz240_ruckig_ctrlmax_fbmax_001.json,ellipse,75.075,Ruckig,304.459,304.457,10.357,3083,13.8874,16585,19668
