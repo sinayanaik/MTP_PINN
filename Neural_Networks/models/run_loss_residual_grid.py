@@ -136,8 +136,8 @@ FIXED_HP: dict[str, Any] = {
     # Higher ceiling + patience so we can definitively say when each model plateaus.
     # With the frozen-cal PhysReg and widened Residual sweep, a thorough early-stop
     # is the guardrail — we want convergence, not time-boxing.
-    "epochs":                  1000,
-    "patience":                100,
+    "epochs":                  3000,
+    "patience":                200,
     "min_delta":               1e-4,
     "early_stopping":          True,
     "early_stop_metric":       "val_rmse",
@@ -520,6 +520,71 @@ def _compute_threads_per_worker(pool_size: int) -> int:
 
 
 # ============================================================================
+# ── ENVIRONMENT DETECTION ────────────────────────────────────────────────────
+# Classify the machine so callers can pick compile flags and pool parameters
+# without hardcoding hardware assumptions.
+# ============================================================================
+
+def _detect_env() -> str:
+    """Return 'hpc', 'workstation', or 'laptop' based on measured hardware.
+
+    Thresholds (all three must pass for the higher tier):
+      hpc         : cpu_phys >= 16  AND  ram_gb >= 32  AND  vram_gb >= 16
+      workstation : cpu_phys >= 8   AND  ram_gb >= 16  AND  vram_gb >= 6
+      laptop      : everything else
+    """
+    try:
+        import psutil
+        cpu_phys = psutil.cpu_count(logical=False) or 1
+        ram_gb   = psutil.virtual_memory().total / 1e9
+        vram_gb  = _query_total_vram_gb()
+        if cpu_phys >= 16 and ram_gb >= 32 and vram_gb >= 16:
+            return "hpc"
+        if cpu_phys >= 8  and ram_gb >= 16 and vram_gb >= 6:
+            return "workstation"
+    except Exception:
+        pass
+    return "laptop"
+
+
+def _compile_flags(env: str, arch: str) -> tuple[bool, str]:
+    """Return (torch_compile_enabled, mode) appropriate for env + arch.
+
+    torch.compile with reduce-overhead uses CUDA graphs: after a short warm-up
+    (~30 s on first trial) it replays the captured graph with near-zero Python
+    overhead — typically 20–40% faster for small fixed-shape MLPs on Ampere+ GPUs.
+    Not beneficial on laptops where the compile cost dwarfs the savings.
+
+    EDR uses autograd Jacobians which are incompatible with graph capture.
+    """
+    if arch == "edr":
+        return False, "default"            # Jacobian capture breaks torch.compile
+    if env == "hpc":
+        return True, "reduce-overhead"     # CUDA graphs, best for A100/H100
+    if env == "workstation":
+        return True, "default"             # safe general mode, mild speedup
+    return False, "default"                # laptop: compile overhead > savings
+
+
+def _maxtasks_for_env(env: str) -> int:
+    """Worker reuse limit before the process is recycled.
+
+    Recycling prevents unbounded memory growth across many trials in a long
+    grid.  On HPC the RAM headroom is huge, so we recycle rarely (less cold-
+    start overhead = faster grid).  On laptops we recycle aggressively.
+    """
+    return {"hpc": 64, "workstation": 16, "laptop": 4}.get(env, 8)
+
+
+def _apply_env_flags(env: str, trials: list[dict[str, Any]]) -> None:
+    """Stamp torch_compile / torch_compile_mode onto every trial's hp in place."""
+    for t in trials:
+        compile_on, compile_mode = _compile_flags(env, t["arch"])
+        t["hp"]["torch_compile"]      = compile_on
+        t["hp"]["torch_compile_mode"] = compile_mode
+
+
+# ============================================================================
 # ── SEQUENTIAL RUNNER ────────────────────────────────────────────────────────
 # ============================================================================
 
@@ -544,6 +609,9 @@ def _run_sequential(
     import psutil
     import torch
 
+    env = _detect_env()
+    _apply_env_flags(env, trials)
+
     # Thread setup — main process can use all cores now (no siblings).
     cpu_phys = psutil.cpu_count(logical=False) or 2
     torch_threads = max(1, cpu_phys - 1)
@@ -553,6 +621,9 @@ def _run_sequential(
         torch.set_float32_matmul_precision("high")
         torch.cuda.set_device(0)
         os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+        if env == "hpc":
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32        = True
     # Sequential main process IS NOT daemonic, so DataLoader worker subprocesses
     # are fine here. Pipeline's own auto-cap still applies (RAM-based ceiling).
     _seq_workers = str(min(4, max(1, (os.cpu_count() or 2) // 2)))
@@ -596,10 +667,9 @@ def _run_sequential(
             tqdm.write(f"  [SKIP]  {idx:{w}}/{total}  {desc}")
             continue
 
-        hp["torch_compile"]      = False
-        hp["torch_compile_mode"] = "default"
+        # torch_compile / torch_compile_mode already set by _apply_env_flags().
 
-        epochs_total = int(hp.get("epochs", 1000))
+        epochs_total = int(hp.get("epochs", 3000))
         bar = tqdm(
             total=epochs_total,
             desc=f"[{idx:{w}}/{total}] {desc}",
@@ -680,7 +750,7 @@ _POOL_PROGRESS_QUEUE: "mp.Queue | None" = None
 _POOL_THREADS_PER_WORKER: int = 2
 
 
-def _pool_init(progress_queue: "mp.Queue", threads_per_worker: int) -> None:
+def _pool_init(progress_queue: "mp.Queue", threads_per_worker: int, is_hpc: bool = False) -> None:
     """Pool initializer: runs ONCE per worker lifetime (on spawn and after each
     ``maxtasksperchild`` recycle).
 
@@ -716,7 +786,14 @@ def _pool_init(progress_queue: "mp.Queue", threads_per_worker: int) -> None:
         # If a prior import already kicked off parallel work, swallow quietly.
         pass
     if torch.cuda.is_available():
+        # TF32: ~3x faster float32 matmul on Ampere+ (A100/H100) with negligible
+        # precision loss for ML training.  set_float32_matmul_precision("high")
+        # enables both matmul and cuDNN paths.
         torch.set_float32_matmul_precision("high")
+        if is_hpc:
+            # Explicit TF32 flags in case an older torch ignores the above.
+            torch.backends.cuda.matmul.allow_tf32  = True
+            torch.backends.cudnn.allow_tf32        = True
 
 
 def _run_one_trial(
@@ -755,9 +832,8 @@ def _run_one_trial(
             q.put(("done", worker_slot, "skip"))
             return {"status": "skipped", "arch": arch, "hp": hp}
 
-        # torch.compile is net-negative on short local runs.
-        hp["torch_compile"]      = False
-        hp["torch_compile_mode"] = "default"
+        # torch_compile / torch_compile_mode already set by _apply_env_flags()
+        # in the main process before dispatch — no override here.
 
         # Late imports: don't touch CUDA libs at module level.
         from Neural_Networks.models.shared.pipeline import TrainJob, run_training
@@ -777,7 +853,8 @@ def _run_one_trial(
             run_help=run_help,
         )
 
-        q.put(("start", worker_slot, _hp_desc(arch, hp), int(hp.get("epochs", 1000))))
+        q.put(("start", worker_slot, _hp_desc(arch, hp),
+               int(hp.get("epochs", 3000)), int(hp.get("patience", 200))))
 
         def _cb(epoch: int, total_ep: int, val_rmse: float, pat_ctr: int, pat_max: int) -> None:
             q.put(("progress", worker_slot, int(epoch), int(total_ep),
@@ -818,7 +895,7 @@ class _SlotState:
     total_ep: int = 1
     val_rmse: float = float("nan")
     pat_ctr: int = 0
-    pat_max: int = 50
+    pat_max: int = 0   # filled from hp["patience"] in "start" message
     started_at: float | None = None
     status: str = "waiting"   # waiting | running | done
 
@@ -1118,6 +1195,11 @@ def _run_parallel_dynamic(
     Renders a live rich dashboard on TTY; falls back to periodic plain status
     lines when stdout/stderr are redirected.
     """
+    # Detect HPC/workstation/laptop once and stamp compile flags on every trial.
+    env = _detect_env()
+    _apply_env_flags(env, trials)
+    is_hpc = env == "hpc"
+
     original_total = len(trials)
     trials, n_pre_skip = _partition_trials_by_skip(trials)
     if n_pre_skip:
@@ -1181,16 +1263,16 @@ def _run_parallel_dynamic(
             with state.lock:
                 s = state.slots[slot]
                 if kind == "start":
-                    _, _, desc, epochs_total = msg
-                    s.hp_desc   = str(desc)
-                    s.arch      = str(desc).split()[0] if desc else ""
-                    s.epoch     = 0
-                    s.total_ep  = max(1, int(epochs_total))
-                    s.val_rmse  = float("nan")
-                    s.pat_ctr   = 0
-                    s.pat_max   = 50
+                    _, _, desc, epochs_total, patience = msg
+                    s.hp_desc    = str(desc)
+                    s.arch       = str(desc).split()[0] if desc else ""
+                    s.epoch      = 0
+                    s.total_ep   = max(1, int(epochs_total))
+                    s.val_rmse   = float("nan")
+                    s.pat_ctr    = 0
+                    s.pat_max    = int(patience)   # actual patience from hp, not hardcoded
                     s.started_at = time.time()
-                    s.status    = "running"
+                    s.status     = "running"
                 elif kind == "progress":
                     _, _, epoch, total_ep, val_rmse, pat_ctr, pat_max = msg
                     s.epoch    = int(epoch)
@@ -1361,11 +1443,12 @@ def _run_parallel_dynamic(
     _set_counts()
 
     # ── Pool + dashboard lifecycle ──────────────────────────────────────────
+    maxtasks = _maxtasks_for_env(env)   # hpc=64, workstation=16, laptop=4
     pool = ctx.Pool(
         processes=pool_size,
-        maxtasksperchild=4,   # reuse worker for up to 4 trials (saves ~3-5s cold-start each reuse)
+        maxtasksperchild=maxtasks,
         initializer=_pool_init,
-        initargs=(progress_q, threads_per_worker),
+        initargs=(progress_q, threads_per_worker, is_hpc),
     )
 
     live_cm = None
@@ -1448,13 +1531,18 @@ def main() -> None:
     log.info("  DATASET    : %s", _DATASET_NAME)
     log.info("  OUTPUT     : %s", DATASET_OUT_ROOT)
     log.info("  SKIP_EXIST : %s  (pre-dispatch)", SKIP_EXISTING)
-    log.info("  SPEED-UPS  : memmap=%s, maxtasksperchild=4, epoch_cap=%d,",
-             FIXED_HP.get("dataset_memmap", False), FIXED_HP.get("epochs", 500))
-    log.info("               pool_size=floor(vram_total/1.2) ∩ floor(cpu_phys/2)")
+    log.info("  SPEED-UPS  : memmap=%s, max_epochs=%d, patience=%d",
+             FIXED_HP.get("dataset_memmap", False),
+             FIXED_HP.get("epochs", 3000),
+             FIXED_HP.get("patience", 200))
+    log.info("               pool_size=min(floor(vram_total/0.8), cpu_phys-2)")
+    log.info("               maxtasksperchild: hpc=64  workstation=16  laptop=4")
+    log.info("               torch.compile:    hpc=reduce-overhead  workstation=default  laptop=off")
     log.info("  FIXES      : PhysReg cal frozen (l_phys anchored to sum(phys));")
     log.info("               Residual α∈{0,0.1,1.0}, final-layer init×1e-2")
     log.info("  GRID       : 3 fracs × {BlackBox, PhysReg{0,0.3,1.0}, Residual{0,0.1,1.0}}")
-    log.info("               × 2 seeds = 42 trials (minimal, converged via patience=100)")
+    log.info("               × 2 seeds = 42 trials (minimal, converged via patience=%d)",
+             FIXED_HP.get("patience", 200))
     log.info("=" * 72)
 
     if DRY_RUN:
@@ -1496,6 +1584,15 @@ def main() -> None:
         device_label = "cpu"
         log.info("device=cpu   RAM=%.1f GB free   CPU=%d phys", free_ram_gb, cpu_phys)
     log.info("pool_size=%d   threads_per_worker=%d", pool_size, threads_per_worker)
+
+    # Detect and log environment — transparent about what gets enabled.
+    env = _detect_env()
+    compile_on, compile_mode = _compile_flags(env, "fnn")   # representative arch
+    maxtasks = _maxtasks_for_env(env)
+    log.info(
+        "env=%s   torch_compile=%s  mode=%s   maxtasksperchild=%d",
+        env, compile_on, compile_mode, maxtasks,
+    )
 
     t_start = time.time()
     try:
