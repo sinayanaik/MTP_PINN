@@ -45,30 +45,208 @@ def _list_dataset_dirs(grid_root: Path) -> list[Path]:
     return candidates
 
 
+def _summarize_run(run_dir: Path) -> dict[str, Any]:
+    """Return brief metadata for the run-folder picker.
+
+    Tries the run's models_registry.yaml first (fast, single read). Falls
+    back to walking metadata.yaml files when the registry is missing.
+
+    Output keys: date (YYYY-MM-DD or "?"), total (int), by_arch (dict[str,int]),
+    best_test_rmse (float, NaN if unknown).
+    """
+    info: dict[str, Any] = {
+        "date": "?",
+        "total": 0,
+        "by_arch": {},
+        "best_test_rmse": float("nan"),
+    }
+
+    # Date inferred from the folder name "run_MMDD_HHMM_..." (current year).
+    m = re.match(r"^run_(\d{2})(\d{2})_", run_dir.name)
+    if m:
+        from datetime import datetime
+        info["date"] = f"{datetime.now().year}-{m.group(1)}-{m.group(2)}"
+
+    # Authoritative count: walk metadata.yaml files (registry can lag behind
+    # real disk state — observed in run_0425 where registry had 30 entries
+    # for 192 actual trials).
+    meta_paths = list(run_dir.rglob("metadata.yaml"))
+    info["total"] = len(meta_paths)
+
+    # Try the registry first as a fast path for per-arch + best_test_rmse.
+    registry = run_dir / "models_registry.yaml"
+    used_registry = False
+    if registry.is_file():
+        try:
+            with open(registry) as f:
+                reg = yaml.safe_load(f) or {}
+        except Exception:
+            reg = {}
+        models = reg.get("models") or []
+        last = reg.get("last_updated")
+        if isinstance(last, str) and len(last) >= 10:
+            info["date"] = last[:10]
+        if len(models) == info["total"] and models:
+            by_arch: dict[str, int] = {}
+            best = float("nan")
+            for entry in models:
+                if not isinstance(entry, dict):
+                    continue
+                mtype = (entry.get("metadata") or {}).get("model_type") \
+                        or entry.get("model_type") or "unknown"
+                by_arch[mtype] = by_arch.get(mtype, 0) + 1
+                tm = entry.get("test_metrics") or entry.get("metrics") or {}
+                r = tm.get("rmse_pooled")
+                if r is None:
+                    r = tm.get("rmse_mean")
+                try:
+                    rv = float(r)
+                    if np.isfinite(rv) and (not np.isfinite(best) or rv < best):
+                        best = rv
+                except (TypeError, ValueError):
+                    pass
+            info["by_arch"] = by_arch
+            info["best_test_rmse"] = best
+            used_registry = True
+
+    # Slow path: walk metadata.yaml files when the registry is stale/missing.
+    if not used_registry:
+        by_arch = {}
+        best = float("nan")
+        for meta_path in meta_paths:
+            try:
+                with open(meta_path) as f:
+                    meta = yaml.safe_load(f) or {}
+            except Exception:
+                continue
+            mtype = meta.get("model_type") or meta_path.parent.parent.name
+            by_arch[mtype] = by_arch.get(mtype, 0) + 1
+            tm = meta.get("test_metrics") or {}
+            r = tm.get("rmse_pooled") if isinstance(tm, dict) else None
+            if r is None and isinstance(tm, dict):
+                r = tm.get("rmse_mean")
+            try:
+                rv = float(r)
+                if np.isfinite(rv) and (not np.isfinite(best) or rv < best):
+                    best = rv
+            except (TypeError, ValueError):
+                pass
+        info["by_arch"] = by_arch
+        info["best_test_rmse"] = best
+    return info
+
+
+_ARCH_PICKER_ABBREV = [
+    ("BlackBoxFNN",           "FNN"),
+    ("PhysicsRegularizedFNN", "PhysReg"),
+    ("ResidualCorrectionFNN", "ResCorr"),
+    ("EDR",                   "EDR"),
+]
+
+
+def _format_run_row(idx: int, run_dir: Path, info: dict[str, Any]) -> str:
+    arch_str_parts: list[str] = []
+    for full, short in _ARCH_PICKER_ABBREV:
+        n = info["by_arch"].get(full, 0)
+        if n:
+            arch_str_parts.append(f"{short}: {n}")
+    for full, n in info["by_arch"].items():
+        if full not in {a for a, _ in _ARCH_PICKER_ABBREV} and n:
+            arch_str_parts.append(f"{full}: {n}")
+    arch_str = "  ".join(arch_str_parts) if arch_str_parts else "-"
+    best = info["best_test_rmse"]
+    best_str = f"{best:.4f}" if np.isfinite(best) else "    ?"
+    return (
+        f"  [{idx}] {run_dir.name}\n"
+        f"        {info['date']}   {info['total']:>3} trials   {arch_str}   "
+        f"best test RMSE: {best_str}"
+    )
+
+
+def _pick_run_interactive(datasets: list[Path]) -> Path | None:
+    """Show a numbered picker on stdin/stdout. Returns the chosen run, or
+    None if the user aborts."""
+    print("\nAvailable run folders:\n")
+    summaries = [_summarize_run(d) for d in datasets]
+    for i, (d, info) in enumerate(zip(datasets, summaries), 1):
+        print(_format_run_row(i, d, info))
+    print()
+
+    while True:
+        try:
+            raw = input(f"Select run [1-{len(datasets)}] (or q to quit): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        if not raw or raw.lower() in ("q", "quit", "exit"):
+            return None
+        if raw.isdigit():
+            i = int(raw)
+            if 1 <= i <= len(datasets):
+                return datasets[i - 1]
+            print(f"  out of range — pick 1..{len(datasets)}")
+            continue
+        # Substring match (must be unique).
+        matches = [d for d in datasets if raw in d.name]
+        if len(matches) == 1:
+            return matches[0]
+        if not matches:
+            print("  no folder name contains that substring")
+        else:
+            print(f"  ambiguous — {len(matches)} folders match")
+
+
+_ARCH_DIR_NAMES = {
+    "FNN", "BlackBoxFNN",
+    "PhysicsRegularizedFNN", "ResidualCorrectionFNN", "EDR",
+}
+
+
+def _is_run_folder(p: Path) -> bool:
+    """True if p is itself one run folder (vs. a parent containing runs).
+
+    A run folder is identified by having models_registry.yaml directly inside,
+    or by directly containing one of the known architecture subdirectories.
+    """
+    if (p / "models_registry.yaml").is_file():
+        return True
+    return any((p / name).is_dir() for name in _ARCH_DIR_NAMES)
+
+
 def _resolve_models_dir(models_dir: str) -> str:
-    """If models_dir is the grid root with no direct models, auto-select the
-    sole dataset or print a list and exit."""
+    """Resolve models_dir to a single run folder.
+
+    If models_dir is already a run folder, return it as-is.
+    Otherwise (grid root), auto-select the sole run, prompt interactively
+    on a TTY, or print and exit on non-TTY.
+    """
     p = Path(models_dir)
-    if not any(p.rglob("metadata.yaml")):
-        datasets = _list_dataset_dirs(p)
-        if not datasets:
-            return models_dir   # let the caller raise the error
-        if len(datasets) == 1:
-            chosen = datasets[0]
-            logger.info("Auto-selected dataset: %s", chosen.name)
-            return str(chosen)
-        # Multiple datasets — print and exit so user can choose.
-        print("\nMultiple training datasets found. Pass one with --models-dir:\n")
-        for i, d in enumerate(datasets, 1):
-            n = sum(1 for _ in d.rglob("metadata.yaml"))
-            print(f"  [{i}] {d.name}  ({n} runs)")
-        print(f"\nExample:")
-        print(f"  PYTHONPATH=. python -m Neural_Networks.analyze_models_grid \\")
-        print(f"    --models-dir {datasets[-1]}")
-        print()
-        import sys as _sys
-        _sys.exit(0)
-    return models_dir
+    if _is_run_folder(p):
+        return models_dir
+
+    datasets = _list_dataset_dirs(p)
+    if not datasets:
+        return models_dir   # let the caller raise the error
+    if len(datasets) == 1:
+        chosen = datasets[0]
+        logger.info("Auto-selected run folder: %s", chosen.name)
+        return str(chosen)
+    if sys.stdin.isatty():
+        chosen = _pick_run_interactive(datasets)
+        if chosen is None:
+            logger.info("No run selected — exiting.")
+            sys.exit(0)
+        return str(chosen)
+    # Non-TTY: keep print-and-exit so CI/scripts don't hang.
+    print("\nMultiple training runs found. Pass one with --models-dir:\n")
+    for i, d in enumerate(datasets, 1):
+        info = _summarize_run(d)
+        print(_format_run_row(i, d, info))
+    print(f"\nExample:")
+    print(f"  PYTHONPATH=. python -m Neural_Networks.analyze_models_grid \\")
+    print(f"    --models-dir {datasets[-1]}")
+    print()
+    sys.exit(0)
 
 JOINT_NAMES = ["J1 (yaw)", "J2 (shoulder)", "J3 (elbow)", "J4 (wrist)", "J5 (wrist roll)"]
 JOINT_NAMES_SHORT = ["J1", "J2", "J3", "J4", "J5"]
@@ -81,16 +259,27 @@ _TYPE_ABBREV: dict[str, str] = {
     "EDR": "EDR",
 }
 
-# Colorblind-safe Okabe-Ito palette
-_OKABE_ITO_PALETTE = [
-    "#E69F00",  # orange        -> BlackBoxFNN
-    "#56B4E9",  # sky blue      -> PhysicsRegularizedFNN
-    "#009E73",  # green         -> ResidualCorrectionFNN
-    "#F0E442",  # yellow
-    "#0072B2",  # blue
-    "#D55E00",  # vermillion
-    "#CC79A7",  # reddish purple
-    "#000000",  # black
+# Vivid, distinctive palette (NOT colorblind-safe — chosen for visual punch).
+# Stable architecture order is enforced in _type_color_map so the same model
+# class lands on the same colour across every figure.
+_VIVID_PALETTE = [
+    "#E63946",  # crimson red         -> BlackBoxFNN
+    "#1D4ED8",  # deep electric blue  -> PhysicsRegularizedFNN
+    "#10B981",  # emerald             -> ResidualCorrectionFNN
+    "#F59E0B",  # amber               -> EDR
+    "#9333EA",  # vivid purple
+    "#EC4899",  # hot pink
+    "#06B6D4",  # cyan
+    "#000000",  # black (fallback)
+]
+
+# Stable ordering for architecture colour assignment. Anything not listed
+# here gets appended alphabetically and assigned the next palette slot.
+_ARCH_COLOR_ORDER: list[str] = [
+    "BlackBoxFNN",
+    "PhysicsRegularizedFNN",
+    "ResidualCorrectionFNN",
+    "EDR",
 ]
 
 _GRID_HP_KEYS_FNN:      list[str] = ["hidden_layers", "dropout", "learning_rate", "weight_decay", "batch_size", "activation"]
@@ -110,19 +299,26 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _setup_plot_style() -> None:
+    from cycler import cycler
     plt.rcParams.update({
-        "figure.dpi": 100,
+        "figure.dpi": 110,
         "figure.facecolor": "white",
+        "savefig.dpi": 200,
+        "savefig.bbox": "tight",
         "axes.facecolor": "#f7f7f7",
-        "axes.edgecolor": "#cccccc",
+        "axes.edgecolor": "#bbbbbb",
+        "axes.linewidth": 1.0,
         "axes.spines.top": False,
         "axes.spines.right": False,
         "axes.titlepad": 10,
+        "axes.titleweight": "bold",
         "axes.labelpad": 7,
         "axes.grid": True,
         "axes.grid.axis": "y",
-        "grid.alpha": 0.40,
+        "axes.prop_cycle": cycler(color=_VIVID_PALETTE),
+        "grid.alpha": 0.50,
         "grid.color": "#c8c8c8",
+        "grid.linewidth": 0.7,
         "font.family": "serif",
         "font.serif": ["Times New Roman", "DejaVu Serif", "serif"],
         "font.size": 12,
@@ -273,7 +469,11 @@ def _compute_train_metrics(rec: dict[str, Any]) -> dict[str, Any]:
     Results cached to <run_dir>/train_metrics_cache.yaml.
     Returns empty dict if model/data unavailable.
     """
-    _CACHE_VERSION = 2
+    # v3: switched to canonical compute_metrics() from metrics_numpy so that
+    # train metrics use the same formulas as stored test/val metrics. v2
+    # caches used a std-denominator NRMSE that was incomparable with stored
+    # range-denominator NRMSE; bumping invalidates them.
+    _CACHE_VERSION = 3
 
     run_dir = Path(rec.get("_run_dir", ""))
     cache_path = run_dir / "train_metrics_cache.yaml"
@@ -303,6 +503,7 @@ def _compute_train_metrics(rec: dict[str, Any]) -> dict[str, Any]:
         from Neural_Networks.models.torque_models import (
             BlackBoxFNN, PhysicsRegularizedFNN, ResidualCorrectionFNN,
         )
+        from Neural_Networks.models.shared.metrics_numpy import compute_metrics
     except ImportError as exc:
         logger.debug("Cannot import torch/model modules: %s", exc)
         return {}
@@ -383,37 +584,9 @@ def _compute_train_metrics(rec: dict[str, Any]) -> dict[str, Any]:
         pred_np = np.concatenate(all_preds, axis=0)
         tgt_np  = np.concatenate(all_tgts,  axis=0)
 
-        rmse_j, r2_j, mae_j, nrmse_j, pearson_j = [], [], [], [], []
-        for j in range(N_JOINTS):
-            p_j = pred_np[:, j]; t_j = tgt_np[:, j]
-            res = t_j - p_j
-            ss_res = float(np.sum(res ** 2))
-            ss_tot = float(np.sum((t_j - t_j.mean()) ** 2))
-            r2   = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
-            rmse = float(np.sqrt(np.mean(res ** 2)))
-            mae  = float(np.mean(np.abs(res)))
-            nrmse = rmse / float(t_j.std()) if t_j.std() > 0 else float("nan")
-            corr  = float(np.corrcoef(p_j, t_j)[0, 1]) if len(p_j) > 1 else float("nan")
-            rmse_j.append(rmse); r2_j.append(r2); mae_j.append(mae)
-            nrmse_j.append(nrmse); pearson_j.append(corr)
-
-        pred_flat = pred_np.reshape(-1); tgt_flat = tgt_np.reshape(-1)
-        ss_res_pool = float(np.sum((tgt_flat - pred_flat) ** 2))
-        ss_tot_pool = float(np.sum((tgt_flat - tgt_flat.mean()) ** 2))
-        r2_pool   = 1.0 - ss_res_pool / ss_tot_pool if ss_tot_pool > 0 else float("nan")
-        rmse_pool = float(np.sqrt(np.mean((pred_flat - tgt_flat) ** 2)))
-
-        result: dict[str, Any] = {
-            "rmse": rmse_j, "r2": r2_j, "mae": mae_j,
-            "nrmse": nrmse_j, "pearson_r": pearson_j,
-            "rmse_mean": float(np.mean(rmse_j)),
-            "rmse_pooled": rmse_pool,
-            "r2_overall": r2_pool,
-            "r2_mean": float(np.nanmean(r2_j)),
-            "mae_mean": float(np.mean(mae_j)),
-            "nrmse_mean": float(np.nanmean(nrmse_j)),
-            "pearson_r_mean": float(np.nanmean(pearson_j)),
-        }
+        # Reuse the canonical metric routine that produces stored test/val
+        # metrics during training — guarantees train↔test/val comparability.
+        result: dict[str, Any] = dict(compute_metrics(pred_np, tgt_np))
 
         try:
             with open(cache_path, "w") as f:
@@ -453,9 +626,14 @@ def _arch_short_label(mtype: str) -> str:
 
 
 def _type_color_map(model_types: list[str]) -> dict[str, str]:
-    sorted_types = sorted(model_types)
-    return {t: _OKABE_ITO_PALETTE[i % len(_OKABE_ITO_PALETTE)]
-            for i, t in enumerate(sorted_types)}
+    """Architecture → vivid colour, with a stable ordering so the same
+    architecture always lands on the same colour across figures."""
+    seen = set(model_types)
+    ordered = [t for t in _ARCH_COLOR_ORDER if t in seen]
+    extras = sorted(t for t in seen if t not in _ARCH_COLOR_ORDER)
+    final = ordered + extras
+    return {t: _VIVID_PALETTE[i % len(_VIVID_PALETTE)]
+            for i, t in enumerate(final)}
 
 
 def _panel_label(ax: "plt.Axes", letter: str, fontsize: float = 13.0) -> None:
@@ -484,6 +662,25 @@ def enrich_records(records: list[dict[str, Any]], compute_train: bool = True) ->
         # breakdown (rmse / mae / r2) by re-running the model on the train
         # split, so it remains the preferred source for table/plot rendering.
         rec["train_metrics"] = tm
+
+    # Sanity log: confirm train and stored-test metrics are on the same scale.
+    # Picks the first record that has both populated and prints the side-by-side
+    # so a future denominator drift would be obvious in the run log.
+    if compute_train:
+        for rec in records:
+            tm = rec.get("train_metrics") or {}
+            te = rec.get("test_metrics") or {}
+            if tm.get("rmse_pooled") is not None and te.get("rmse_pooled") is not None:
+                logger.info(
+                    "Metric scale check (%s): train rmse_pooled=%.5f / test=%.5f  "
+                    "train nrmse_mean=%.5f / test=%.5f",
+                    Path(rec.get("_run_dir", "?")).name,
+                    float(tm.get("rmse_pooled", float("nan"))),
+                    float(te.get("rmse_pooled", float("nan"))),
+                    float(tm.get("nrmse_mean", float("nan"))),
+                    float(te.get("nrmse_mean", float("nan"))),
+                )
+                break
 
 
 # ---------------------------------------------------------------------------
@@ -1625,7 +1822,7 @@ def plot_hp_importance(
             n_runs = [len(bucket[v]) for v in sorted_vals]
 
             x_pos = np.arange(len(sorted_vals))
-            bar_col = [_OKABE_ITO_PALETTE[arch_idx % len(_OKABE_ITO_PALETTE)]] * len(sorted_vals)
+            bar_col = [_VIVID_PALETTE[arch_idx % len(_VIVID_PALETTE)]] * len(sorted_vals)
             ax.bar(x_pos, means, color=bar_col, alpha=0.80, width=0.6)
             ax.errorbar(x_pos, means, yerr=stds, fmt="none", color="black",
                         capsize=4, linewidth=1.2)
@@ -1752,7 +1949,7 @@ def plot_hp_pair_heatmaps(
                     mat, vals_x, vals_y) in enumerate(panel_info):
         ax = axes_flat[panel_num]
         masked = np.ma.masked_invalid(mat)
-        im = ax.imshow(masked, cmap="viridis_r", aspect="auto",
+        im = ax.imshow(masked, cmap="magma_r", aspect="auto",
                        vmin=global_vmin, vmax=global_vmax, interpolation="nearest")
         im_last = im
 
@@ -1994,7 +2191,7 @@ def plot_physics_weight_impact(
         logger.info("No physics_weight data found - skipping Fig 15.")
         return
 
-    _frac_cmap = matplotlib.colormaps["viridis"]
+    _frac_cmap = matplotlib.colormaps["plasma"]
     frac_colors = {
         f: _frac_cmap(0.15 + 0.70 * i / max(len(all_frac) - 1, 1))
         for i, f in enumerate(all_frac)
@@ -2310,10 +2507,9 @@ def main(argv: list[str] | None = None) -> int:
         if not datasets:
             print(f"No dataset folders found under {_GRID_ROOT}")
             return 1
-        print(f"\nAvailable datasets in {_GRID_ROOT}:\n")
+        print(f"\nAvailable run folders in {_GRID_ROOT}:\n")
         for i, d in enumerate(datasets, 1):
-            n = sum(1 for _ in d.rglob("metadata.yaml"))
-            print(f"  [{i}] {d.name}  ({n} runs)")
+            print(_format_run_row(i, d, _summarize_run(d)))
         print(f"\nUsage example:")
         print(f"  PYTHONPATH=. python -m Neural_Networks.analyze_models_grid \\")
         print(f"    --models-dir {datasets[-1]}")

@@ -10,6 +10,6 @@ Best = minimum **test** `rmse_pooled` within each `model_type`.
 
 ## Test RMSE range across *all* runs in grid
 
-- **Black-Box** (BlackBoxFNN): RMSE in [0.08303, 0.15778] N·m over 18 run(s); R2 in [0.76716, 0.92102].
-- **Physics-Reg** (PhysicsRegularizedFNN): RMSE in [0.07928, 0.15439] N·m over 110 run(s); R2 in [0.77706, 0.92799].
-- **Residual-Corr** (ResidualCorrectionFNN): RMSE in [0.08153, 0.12117] N·m over 74 run(s); R2 in [0.86268, 0.92384].
+- **Black-Box** (BlackBoxFNN): RMSE in [0.08303, 0.15778] N·m over 30 run(s); R2 in [0.76716, 0.92102].
+- **Physics-Reg** (PhysicsRegularizedFNN): RMSE in [0.07928, 0.15439] N·m over 230 run(s); R2 in [0.77706, 0.92799].
+- **Residual-Corr** (ResidualCorrectionFNN): RMSE in [0.08153, 0.12117] N·m over 134 run(s); R2 in [0.86268, 0.92384].
