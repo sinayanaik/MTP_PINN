@@ -1103,13 +1103,20 @@ def _render_dashboard(state: _TUIState) -> Any:
     res_outer.add_row(counts)
     resources_panel = Panel(res_outer, title="resources (live)", border_style="blue", padding=(0, 1))
 
-    # ── Active trials (two lines per slot) ──────────────────────────────────
+    # ── Active trials (two lines per slot, capped at 5 visible) ────────────
+    # Sort: running slots first, then waiting — so the most informative rows
+    # are always visible when pool_size > 5.
+    _TUI_MAX_SLOTS = 5
+    slots_sorted = sorted(slots, key=lambda s: (0 if s.status == "running" else 1, s.slot))
+    slots_visible = slots_sorted[:_TUI_MAX_SLOTS]
+    hidden = len(slots) - len(slots_visible)
+
     act = Table.grid(padding=(0, 0), expand=True)
     act.add_column()
 
     now = time.time()
     first = True
-    for s in slots:
+    for s in slots_visible:
         if not first:
             act.add_row("")   # visual separator between slots
         first = False
@@ -1144,7 +1151,9 @@ def _render_dashboard(state: _TUIState) -> Any:
             line1 = Text.assemble((f"{tag}  ", "dim"), ("waiting ...", "dim"))
             act.add_row(line1)
             act.add_row(Text("", style="dim"))
-    active_panel = Panel(act, title="active trials", border_style="cyan", padding=(0, 1))
+    if hidden > 0:
+        act.add_row(Text(f"  … {hidden} more slot(s) not shown (pool_size={pool_size})", style="dim"))
+    active_panel = Panel(act, title=f"active trials (showing {len(slots_visible)}/{pool_size})", border_style="cyan", padding=(0, 1))
 
     # ── Overall progress ────────────────────────────────────────────────────
     overall_bar_w = 40
@@ -1191,8 +1200,9 @@ def _render_dashboard(state: _TUIState) -> Any:
 
     # ── Assemble layout ─────────────────────────────────────────────────────
     layout = Layout()
-    # 2 content lines per slot + 1 separator between slots, plus 2 chrome lines.
-    active_h = 2 + 2 * len(slots) + max(0, len(slots) - 1)
+    # 2 content lines per visible slot + 1 separator + 1 "…N more" line if hidden.
+    n_vis = len(slots_visible)
+    active_h = 2 + 2 * n_vis + max(0, n_vis - 1) + (1 if hidden > 0 else 0)
     history_h = 3 + max(len(results), 1)        # chrome + header + rows
     layout.split_column(
         Layout(header_panel,    name="header",    size=3),
