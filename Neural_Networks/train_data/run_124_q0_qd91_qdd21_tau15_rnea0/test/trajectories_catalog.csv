@@ -1,0 +1,13 @@
+source_file,geometry_type,radius_mm,planner,ctrl_hz,fb_hz,duration_sec,n_samples,ee_rms_err_mm,start_idx,end_idx_exclusive
+lissajous_r78mm_yz_cxn264cy115cz145_ruckig_ctrlmax_fbmax_001.json,lissajous,78.1015,Ruckig,305.638,305.638,10.4561,3129,17.9722,0,3129
+circle_r150mm_az-17el16_cx236cy0cz295_quintic_poly_ctrlmax_fb240hz_001.json,circle,150.0192,Quintic Poly,1169.39,241.895,24.8614,5848,22.0809,3129,8977
+sine_wave_r70mm_az30el0_cx176cy75cz228_quintic_poly_ctrlmax_fbmax_001.json,sine_wave,70.0649,Quintic Poly,305.043,305.043,11.1313,3332,7.91278,8977,12309
+parabola_r87mm_xz_cxn94cyn105cz396_ruckig_ctrlmax_fbmax_001.json,parabola,87.0788,Ruckig,303.754,303.755,6.18484,1843,5.96726,12309,14152
+square_r99mm_yz_cx215cy35cz330_trapezoidal_ctrlmax_fbmax_001.json,square,98.9999,Trapezoidal,304.19,304.191,9.16916,2733,10.7527,14152,16885
+rectangle_r163mm_az-149el29_cxn209cyn160cz255_ruckig_ctrlmax_fb240hz_001.json,rectangle,163.2535,Ruckig,1105.66,246.733,9.94198,2340,17.755,16885,19225
+ellipse_r135mm_az118el16_cxn204cy205cz265_cubic_poly_ctrlmax_fb240hz_001.json,ellipse,135.012,Cubic Poly,1107.22,245.901,10.13,2385,24.0539,19225,21610
+spiral_r75mm_az-45el0_cxn159cy221cz313_ruckig_ctrlmax_fbmax_001.json,spiral,74.7723,Ruckig,303.833,303.833,17.1831,5116,14.1641,21610,26726
+ellipse_r65mm_xz_cx66cyn265cz275_quintic_poly_ctrlmax_fbmax_001.json,ellipse,65.0052,Quintic Poly,304.366,304.366,7.93715,2361,17.9138,26726,29087
+triangle_r100mm_yz_cxn264cy115cz145_ruckig_ctrlmax_fbmax_001.json,triangle,99.9908,Ruckig,305.064,305.063,5.87805,1761,20.4444,29087,30848
+regular_polygon_r140mm_az-149el29_cxn209cyn160cz255_quintic_poly_ctrlmax_fb240hz_001.json,regular_polygon,140.005,Quintic Poly,1144.51,243.156,24.1288,5676,19.5793,30848,36524
+helix_r66mm_xz_cxn94cyn105cz372_ruckig_ctrlmax_fbmax_001.json,helix,65.9678,Ruckig,302.789,302.787,28.1781,8378,5.65571,36524,44902
