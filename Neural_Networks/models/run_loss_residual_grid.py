@@ -78,7 +78,7 @@ SKIP_EXISTING: bool = True
 _NN_ROOT = Path(__file__).resolve().parent.parent
 TRAIN_DATA_RUN_DIR: str = os.environ.get("MTP_TRAIN_DATA_RUN") or str(
     _NN_ROOT / "train_data"
-    / "run_0425_1112_qraw_d25p3i_ddL_mraw_a1_R_70v15t15_f1p0t1p0_789d82"
+    / "run_train22_q0_qd91_qdd21_tau51_rnea15"
 )
 
 # Output root — completely separate from Trained_Models/.
@@ -508,29 +508,26 @@ def _measure_cuda_ctx_gb() -> float:
         return 0.35
 
 
-def _compute_pool_size(cuda_available: bool) -> int:
+def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
     """Derive an upper bound on concurrent workers from hardware alone.
 
-    This is the *pool capacity*, not a concurrency target; the admission loop
-    decides how many are actually in flight based on live free VRAM / RAM.
+    With multiple GPUs, workers on different GPUs execute independently on
+    separate hardware.  The CPU budget therefore scales with n_gpus: each GPU
+    gets its own share of ``(cpu_phys - 2)`` workers, and the total pool is
+    their sum.  Live-admission still enforces per-trial VRAM fit.
     """
     import psutil
     if not cuda_available:
-        return 1                                         # CPU ⇒ sequential
+        return 1                                             # CPU ⇒ sequential
     cpu_phys = psutil.cpu_count(logical=False) or 2
     vram_total = _query_total_vram_gb()
-    # One slot per ~0.8 GB of total VRAM (CUDA ctx ~0.35 + small MLP working
-    # set ~0.3 GB + framework overhead ~0.15).  4 GB → 5 slots, 8 GB → 10,
-    # 16 GB → 20.  Live-admission loop still enforces per-trial fit, so this
-    # is a concurrency ceiling only.
-    n_vram = max(1, int(vram_total / 0.8))               # 5 on 4 GB, 10 on 8 GB
-    # CPU budget: leave 2 physical cores for OS + main process + drain thread.
-    # threads_per_worker has a floor of 2 (single-thread torch is flaky).
-    # cpu_phys - 2 gives: 4-core → 2, 6-core → 4, 8-core → 6, matching the
-    # actual parallelism the machine can sustain with small MLP training.
-    n_cpu  = max(2, cpu_phys - 2)
+    n_vram = max(1, int(vram_total / 0.8))                  # VRAM-based ceiling
+    # CPU budget per GPU: leave 2 cores for OS/main/drain, then allocate
+    # remaining cores equally across GPUs.  Each GPU contributes its share to
+    # the total pool.  On single-GPU this is identical to the old formula.
+    n_cpu_per_gpu = max(2, cpu_phys - 2)
+    n_cpu = n_cpu_per_gpu * max(1, n_gpus)
     # Optional override: ``MTP_GRID_POOL_SIZE=N`` forces N regardless of heuristics.
-    # Useful when you know your workload is light enough to oversubscribe.
     override = os.environ.get("MTP_GRID_POOL_SIZE", "").strip()
     if override.isdigit() and int(override) >= 1:
         return int(override)
@@ -951,6 +948,7 @@ class _TUIState:
     total_trials: int
     threads_per_worker: int
     device_label: str
+    n_gpus: int = 1
     slots: list[_SlotState] = field(default_factory=list)
     in_flight: int = 0
     pending: int = 0
@@ -1027,6 +1025,7 @@ def _render_dashboard(state: _TUIState) -> Any:
         total       = state.total_trials
         tpw         = state.threads_per_worker
         device      = state.device_label
+        n_gpus      = state.n_gpus
         in_flight   = state.in_flight
         pending     = state.pending
         completed   = state.completed
@@ -1050,12 +1049,13 @@ def _render_dashboard(state: _TUIState) -> Any:
         t_start     = state.t_start
 
     # ── Header ──────────────────────────────────────────────────────────────
+    _per_gpu_str = f" ({pool_size // max(1, n_gpus)}/gpu)" if n_gpus > 1 else ""
     header = Text.assemble(
         ("Torque Grid Search", "bold cyan"),
         "   ARCH=", (str(ARCH), "bold"),
         f"   total={total}   ",
-        (f"pool_size={pool_size}", "bold"),
-        f"   threads/worker={tpw}   device={device}",
+        (f"pool={pool_size}{_per_gpu_str}", "bold"),
+        f"   gpus={n_gpus}   threads/worker={tpw}   device={device}",
     )
     header_panel = Panel(header, border_style="cyan", padding=(0, 1))
 
@@ -1234,6 +1234,7 @@ def _run_parallel_dynamic(
     device_label: str,
     log: logging.Logger,
     t_start: float,
+    n_gpus: int = 1,
 ) -> tuple[int, int, int]:
     """Submit trials while live free VRAM + RAM permit.  No hardcoded N.
 
@@ -1284,6 +1285,7 @@ def _run_parallel_dynamic(
         total_vram_gb=_query_total_vram_gb() or 0.0,
         total_ram_gb=_total_ram_gb,
         t_start=t_start,
+        n_gpus=n_gpus,
     )
     state.free_vram_gb = _query_free_vram_gb()
     state.free_ram_gb  = _query_free_ram_gb()
@@ -1491,7 +1493,6 @@ def _run_parallel_dynamic(
     maxtasks = _maxtasks_for_env(env)   # hpc=64, workstation=16, laptop=4
     # Build a GPU ticket queue: each worker pops its GPU ID on init.
     # Workers are distributed round-robin across available GPUs.
-    n_gpus = _query_n_gpus()
     gpu_ticket_q: mp.Queue = ctx.Queue()
     for i in range(pool_size):
         gpu_ticket_q.put(i % n_gpus)
@@ -1586,14 +1587,13 @@ def main() -> None:
              FIXED_HP.get("dataset_memmap", False),
              FIXED_HP.get("epochs", 3000),
              FIXED_HP.get("patience", 200))
-    log.info("               pool_size=min(floor(vram_total/0.8), cpu_phys-2)")
+    log.info("               pool_size=min(floor(vram_total/0.8), n_gpus*(cpu_phys-2))")
     log.info("               maxtasksperchild: hpc=64  workstation=16  laptop=4")
     log.info("               torch.compile:    hpc=reduce-overhead  workstation=default  laptop=off")
-    log.info("  FIXES      : PhysReg cal frozen (l_phys anchored to sum(phys));")
-    log.info("               Residual α∈{0,0.1,1.0}, final-layer init×1e-2")
-    log.info("  GRID       : 3 fracs × {BlackBox, PhysReg{0,0.3,1.0}, Residual{0,0.1,1.0}}")
-    log.info("               × 2 seeds = 42 trials (minimal, converged via patience=%d)",
-             FIXED_HP.get("patience", 200))
+    log.info("  ARCH       : PhysReg/Residual: 7J input (3J kin + 4J decomposed RNEA)")
+    log.info("               Residual: tanh-bounded correction (scale=%.2f), additive physics loss",
+             FIXED_HP.get("correction_scale", 0.5))
+    log.info("  GRID       : FNN=12, PhysReg=72, Residual=60  (total=%d)", total)
     log.info("=" * 72)
 
     if DRY_RUN:
@@ -1608,7 +1608,8 @@ def main() -> None:
 
     # Probe capabilities (no CUDA context created in the main process).
     cuda_ok = _query_cuda_available()
-    pool_size = _compute_pool_size(cuda_ok)
+    n_gpus = _query_n_gpus() if cuda_ok else 1
+    pool_size = _compute_pool_size(cuda_ok, n_gpus)
     threads_per_worker = _compute_threads_per_worker(pool_size)
 
     import psutil
@@ -1626,10 +1627,11 @@ def main() -> None:
             ).decode().strip().split("\n")[0]
         except Exception:
             gpu_name = "CUDA GPU"
-        device_label = f"cuda:0 ({gpu_name}, {total_vram_gb:.1f} GB)"
+        _gpu_suffix = f"×{n_gpus}" if n_gpus > 1 else ""
+        device_label = f"cuda{_gpu_suffix} ({gpu_name}, {total_vram_gb:.1f} GB total)"
         log.info(
-            "device=%s  VRAM=%.1f/%.1f GB free   RAM=%.1f GB free   CPU=%d phys",
-            device_label, free_vram_gb, total_vram_gb, free_ram_gb, cpu_phys,
+            "device=%s  gpus=%d  VRAM=%.1f/%.1f GB free   RAM=%.1f GB free   CPU=%d phys",
+            device_label, n_gpus, free_vram_gb, total_vram_gb, free_ram_gb, cpu_phys,
         )
     else:
         device_label = "cpu"
@@ -1652,6 +1654,7 @@ def main() -> None:
         else:
             n_ok, n_skip, n_fail = _run_parallel_dynamic(
                 trials, pool_size, threads_per_worker, device_label, log, t_start,
+                n_gpus=n_gpus,
             )
     except KeyboardInterrupt:
         log.warning("Interrupted by user — partial results preserved.")
