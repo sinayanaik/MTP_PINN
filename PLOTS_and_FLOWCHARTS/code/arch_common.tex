@@ -1,0 +1,152 @@
+% ============================================================
+%  arch_common.tex  --  shared TikZ styles for MTP-PINN figures
+%  All fonts bumped to \large; inner sep generous; no overlaps.
+% ============================================================
+\newcommand{\ArchBlockFont}{\large}
+\newcommand{\ArchPhaseHdr}{\large\bfseries\color{black!80}}
+
+%% --- Colour palette --------------------------------------------------------
+\definecolor{KinFill}{RGB}{224,247,250}
+\definecolor{KinDraw}{RGB}{0,131,143}
+\definecolor{PhyFill}{RGB}{255,243,224}
+\definecolor{PhyDraw}{RGB}{230,81,0}
+\definecolor{NrmFill}{RGB}{243,229,245}
+\definecolor{NrmDraw}{RGB}{106,27,154}
+\definecolor{CatFill}{RGB}{255,249,196}
+\definecolor{CatDraw}{RGB}{245,127,23}
+\definecolor{MlpFill}{RGB}{227,242,253}
+\definecolor{MlpDraw}{RGB}{21,101,192}
+\definecolor{TanhFill}{RGB}{237,231,246}
+\definecolor{TanhDraw}{RGB}{123,31,162}
+\definecolor{AddFill}{RGB}{241,248,233}
+\definecolor{AddDraw}{RGB}{85,139,47}
+\definecolor{OutFill}{RGB}{232,245,233}
+\definecolor{OutDraw}{RGB}{46,125,50}
+\definecolor{LossFill}{RGB}{255,235,238}
+\definecolor{LossDraw}{RGB}{183,28,28}
+\definecolor{PhysBpFill}{RGB}{255,248,225}
+\definecolor{PhysBpDraw}{RGB}{249,168,37}
+\definecolor{NoteFill}{RGB}{245,245,245}
+\definecolor{NoteDraw}{RGB}{100,100,100}
+
+%% --- TikZ styles -----------------------------------------------------------
+\tikzset{
+  every node/.style={align=center},
+  line cap=round,
+  %% base block
+  blk/.style={
+    draw=gray!55,
+    line width=1.6pt,
+    rounded corners=6pt,
+    inner sep=14pt,
+  },
+  %% domain blocks
+  kinBlk/.style={
+    blk, fill=KinFill, draw=KinDraw,
+    minimum width=4.2cm,
+    font=\ArchBlockFont,
+  },
+  phyBlk/.style={
+    blk, fill=PhyFill, draw=PhyDraw,
+    minimum width=5.8cm,
+    font=\ArchBlockFont,
+  },
+  nrmBlk/.style={
+    blk, fill=NrmFill, draw=NrmDraw,
+    minimum width=4.0cm,
+    font=\ArchBlockFont,
+  },
+  catBlk/.style={
+    blk, fill=CatFill, draw=CatDraw,
+    minimum width=2.2cm,
+    font=\ArchBlockFont,
+  },
+  mlpBlk/.style={
+    blk, fill=MlpFill, draw=MlpDraw,
+    minimum width=3.6cm,
+    font=\ArchBlockFont,
+  },
+  fcBlk/.style={
+    blk, fill=MlpFill, draw=MlpDraw,
+    minimum width=3.4cm,
+    font=\ArchBlockFont,
+  },
+  tanhBlk/.style={
+    blk, fill=TanhFill, draw=TanhDraw,
+    minimum width=3.4cm,
+    font=\ArchBlockFont,
+  },
+  outBlk/.style={
+    blk, fill=OutFill, draw=OutDraw,
+    minimum width=3.4cm,
+    font=\ArchBlockFont,
+  },
+  addBlk/.style={
+    circle,
+    draw=AddDraw,
+    fill=AddFill,
+    line width=1.5pt,
+    minimum size=1.4cm,
+    font=\LARGE\bfseries,
+  },
+  gtBlk/.style={
+    blk, draw=NoteDraw, fill=NoteFill,
+    line width=1.2pt,
+    rounded corners=5pt,
+    inner sep=12pt,
+    font=\ArchBlockFont,
+    minimum width=3.2cm,
+  },
+  lossBlk/.style={
+    blk, fill=LossFill, draw=LossDraw,
+    line width=1.4pt,
+    inner sep=16pt,
+    font=\ArchBlockFont,
+  },
+  bpBlk/.style={
+    blk, fill=PhysBpFill, draw=PhysBpDraw,
+    inner sep=10pt,
+    font=\ArchBlockFont,
+  },
+  %% arrows
+  arr/.style={
+    -{Stealth[length=11pt,width=9pt]},
+    line width=1.8pt,
+    black!80,
+  },
+  darr/.style={
+    -{Stealth[length=9pt,width=7.5pt]},
+    line width=1.5pt,
+    dashed,
+    dash pattern=on 5pt off 3pt,
+    black!50,
+  },
+  bparr/.style={
+    -{Stealth[length=11pt,width=9pt]},
+    line width=1.8pt,
+    PhyDraw!90,
+    rounded corners=4pt,
+  },
+  %% edge labels
+  dim/.style={
+    font=\large,
+    fill=white,
+    inner sep=3pt,
+    above=1pt,
+    midway,
+    sloped=false,
+  },
+  diml/.style={
+    font=\large,
+    fill=white,
+    inner sep=3pt,
+    below=1pt,
+    midway,
+  },
+  phaseHdr/.style={
+    font=\ArchPhaseHdr,
+    inner sep=0pt,
+    outer sep=0pt,
+    anchor=south west,
+  },
+}

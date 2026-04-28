@@ -1,6 +1,6 @@
 # Physics-Informed Neural Networks for Robot Inverse Dynamics: A Comparative Study of Black-Box, Physics-Regularized, and Residual-Correction Architectures
 
-**Abstract** — Accurate joint torque estimation is a fundamental requirement for model-based robot control, adaptive compensation, and safe human-robot interaction. Classical analytical inverse dynamics computed via Recursive Newton-Euler Algorithm (RNEA) provides a structured physical prior, but its accuracy is limited by uncertain inertial parameters, unmodeled friction, and discretization artifacts. This paper presents a systematic comparative study of three neural network architectures for inverse dynamics identification on a five-degree-of-freedom serial manipulator: (i) a fully data-driven feedforward neural network (BlackBox-FNN) that treats torque prediction as a pure regression problem; (ii) a physics-regularized FNN (PhysReg-FNN) that concatenates the normalized RNEA torque sum to the kinematic features (20-dim augmented input) and augments the data loss with a soft physics constraint using learnable per-joint affine RNEA calibration, providing physics as an explicit input at both training and inference time; and (iii) a residual-correction FNN (ResCorr-FNN) that learns a physics-context-aware additive correction $\boldsymbol{\delta}([\mathbf{x}, \boldsymbol{\tau}_{\text{phys}}])$ on top of the RNEA prediction from the same augmented 20-dim input. All three architectures share the same MLP backbone ([256–512–256] hidden units, GELU activations, LayerNorm), trained on 272,465 time steps collected across 11 distinct Cartesian motion geometries and evaluated on a held-out test set of 43,093 samples. A structured hyperparameter grid search covering 144 training runs is reported. Preliminary v1 results (pre-augmented-input architecture) achieve pooled test RMSE of **0.0793 N·m** (PhysReg), **0.0815 N·m** (ResCorr), and **0.0830 N·m** (BlackBox). The v2 architecture with physics as an explicit input feature and reduced correction regularization (α_r=0.01) is expected to substantially widen this gap, particularly at low data fractions where the physics prior provides the largest relative advantage.
+**Abstract** — Accurate joint torque estimation is a fundamental requirement for model-based robot control, adaptive compensation, and safe human-robot interaction. Classical analytical inverse dynamics computed via Recursive Newton-Euler Algorithm (RNEA) provides a structured physical prior, but its accuracy is limited by uncertain inertial parameters, unmodeled friction, and discretization artifacts. This paper presents a systematic comparative study of three neural network architectures for inverse dynamics identification on a five-degree-of-freedom serial manipulator: (i) a fully data-driven feedforward neural network (BlackBox-FNN) that treats torque prediction as a pure regression problem from kinematic inputs alone; (ii) a physics-regularized FNN (PhysReg-FNN) that concatenates the *full four-component decomposed* RNEA tensor $[\boldsymbol{\tau}_g, \boldsymbol{\tau}_M, \boldsymbol{\tau}_C, \boldsymbol{\tau}_f]$ (4·J = 20 features) to the kinematic vector (3·J = 15 features) for a 7·J = 35-dim augmented input, and augments the data loss with an additive Tikhonov physics penalty pulling the prediction toward the analytical RNEA sum; and (iii) a residual-correction FNN (ResCorr-FNN) that imposes a hard structural decomposition $\hat{\boldsymbol{\tau}} = \boldsymbol{\tau}_{\text{phys}} + c_s \cdot \tanh(\boldsymbol{\delta}_{\text{raw}})$ where the bounded correction cannot exceed $\pm c_s$ in normalised units, with $c_s = 0.5$ as a fixed (non-learnable) buffer providing a hard prior on physics reliance. All three architectures share a unified MLP backbone (LayerNorm + activation + Dropout, Xavier-normal init), trained on 272,465 time steps collected across 11 distinct Cartesian motion geometries and evaluated on a held-out test set of 43,093 samples. A structured hyperparameter grid search covering 144 training runs (FNN: 12, PhysReg: 72, ResCorr: 60) sweeps training data fraction (six levels from 2% to 100%), physics penalty weight $\lambda \in \{0.05, 0.1, 0.2, 0.5, 1.0, 2.0\}$, and L₂ correction penalty $\alpha_r \in \{0.005, 0.01, 0.05, 0.1, 0.5\}$ across two seeds. Preliminary results achieve pooled test RMSE of **0.0793 N·m** (PhysReg), **0.0815 N·m** (ResCorr), and **0.0830 N·m** (BlackBox).
 
 ---
 
@@ -120,164 +120,276 @@ This normalization preserves the identity $\sum_{k} \tilde{\phi}^{(k,j)} = \tild
 
 ## IV. Neural Network Architectures
 
-All three architectures share a common MLP backbone. Let $L$ denote the number of hidden layers with widths $h_1, h_2, \ldots, h_L$. The shared building block for each layer $l$ is:
+All three architectures share a unified MLP backbone, differing only in (i) input dimensionality (kinematic-only vs. kinematic + decomposed physics), (ii) the parameterisation of the output map (free regression vs. tanh-bounded residual), and (iii) the training loss (data-only vs. data + physics regulariser vs. data + correction-magnitude regulariser).
 
-$$\mathbf{a}^{(l)} = \text{Dropout}_p\!\left(\sigma\!\left(\text{LayerNorm}\!\left(\mathbf{W}^{(l)} \mathbf{a}^{(l-1)} + \mathbf{b}^{(l)}\right)\right)\right)$$
+### A. Shared MLP Backbone
 
-where $\sigma$ is the activation function, LayerNorm normalizes over the feature dimension, and Dropout applies Bernoulli masking with probability $p$. All weight matrices are initialized with Xavier-normal initialization; biases are initialized to zero. The final layer is a plain linear map without normalization or activation.
+Let $L$ denote the number of hidden layers with widths $h_1, h_2, \ldots, h_L$. Layer $l \in \{1, \ldots, L\}$ implements the post-norm block
 
-For all experiments: hidden widths $[h_1, h_2, h_3] = [256, 512, 256]$, activation $\sigma = \text{GELU}$, dropout $p = 0.1$. The BlackBox-FNN backbone (15-dim input) has **270,341 trainable parameters**. The PhysReg-FNN and ResCorr-FNN backbones (20-dim augmented input) have **271,621 parameters** for the MLP. PhysReg-FNN additionally includes 10 learnable calibration parameters ($\boldsymbol{s}, \boldsymbol{b} \in \mathbb{R}^5$) for a total of **271,631 parameters**. The 1,280-parameter increase over BlackBox-FNN reflects the 5 additional input weights in the first linear layer ($5 \times 256 = 1{,}280$).
+$$\mathbf{a}^{(l)} = \text{Dropout}_p\!\Big(\sigma\big(\text{LayerNorm}\big(\mathbf{W}^{(l)} \mathbf{a}^{(l-1)} + \mathbf{b}^{(l)}\big)\big)\Big),\qquad \mathbf{W}^{(l)} \in \mathbb{R}^{h_l \times h_{l-1}},\ \mathbf{b}^{(l)} \in \mathbb{R}^{h_l},$$
 
-### A. Black-Box FNN (BlackBox-FNN)
+with $\mathbf{a}^{(0)}$ the (possibly augmented) input and the output head $\mathbf{a}^{(L+1)} = \mathbf{W}^{(L+1)} \mathbf{a}^{(L)} + \mathbf{b}^{(L+1)}$ a plain linear map without normalisation, activation, or dropout. LayerNorm operates on the feature axis with learnable affine parameters $(\boldsymbol{\gamma}^{(l)}, \boldsymbol{\beta}^{(l)}) \in \mathbb{R}^{h_l} \times \mathbb{R}^{h_l}$:
+
+$$\text{LayerNorm}(\mathbf{z})_k = \gamma_k \cdot \frac{z_k - \bar{z}}{\sqrt{\widehat{\text{Var}}(\mathbf{z}) + \varepsilon}} + \beta_k,\qquad \bar{z} = \tfrac{1}{h}\textstyle\sum_k z_k.$$
+
+Dropout applies an i.i.d. Bernoulli mask $\mathbf{m}^{(l)} \sim \text{Bern}(1-p)^{h_l}$ scaled by $1/(1-p)$ at training time and the identity at evaluation time. All linear weights are initialised with Xavier-normal, $\mathbf{W}_{ij} \sim \mathcal{N}(0,\, 2/(h_{l-1}+h_l))$, and biases are initialised to zero.
+
+**Activation.** The activation $\sigma$ is selected from $\{\text{SiLU}, \text{GELU}, \text{ReLU}, \text{Tanh}, \text{ELU}, \text{LeakyReLU}\}$. All experiments in §VII use SiLU (single-architecture trainers) or GELU (grid sweep):
+
+$$\text{SiLU}(x) = x \cdot \sigma_{\text{logistic}}(x) = \frac{x}{1 + e^{-x}},\qquad \text{GELU}(x) = x \cdot \Phi(x).$$
+
+Both are smooth and bounded below, retaining small negative-region gradients (unlike ReLU), which prevents the dead-neuron pathology and stabilises the gradient flow when the physics regulariser introduces competing gradient directions during the warmup phase.
+
+**Backbone configuration.** Two backbones are used: the *standalone trainers* (`run_fnn.py`, `run_physics_regularized.py`, `run_physics_residual.py`) use $[h_1, h_2, h_3] = [256, 512, 256]$, while the *grid sweep* (`run_loss_residual_grid.py`) uses $[128, 256, 128]$ — the smaller backbone is preferred for the grid because typical training-set sizes after data-fraction subsampling (5K–50K samples for fractions ≤ 0.25) make the larger backbone prone to overfit.
+
+**Parameter counts.** Counting LayerNorm $(2 h_l)$ and Linear $(h_{l-1} h_l + h_l)$ contributions, with input dimension $d_{\text{in}}$ and $J = 5$ output dimensions:
+
+| Backbone | Input dim | LinearIn | Hidden | LinearOut | Total |
+|----------|-----------|----------|--------|-----------|-------|
+| [256, 512, 256], $d_{\text{in}}=15$ | 15 | $15{\cdot}256{+}256$ | $131{,}584{+}131{,}328{+}1{,}536$ | $256{\cdot}5{+}5$ | **270,341** |
+| [256, 512, 256], $d_{\text{in}}=35$ | 35 | $35{\cdot}256{+}256$ | $131{,}584{+}131{,}328{+}1{,}536$ | $256{\cdot}5{+}5$ | **275,461** |
+| [128, 256, 128], $d_{\text{in}}=15$ | 15 |   $15{\cdot}128{+}128$ | $33{,}024{+}32{,}896{+}640$ | $128{\cdot}5{+}5$ | **69,637** |
+| [128, 256, 128], $d_{\text{in}}=35$ | 35 |   $35{\cdot}128{+}128$ | $33{,}024{+}32{,}896{+}640$ | $128{\cdot}5{+}5$ | **72,197** |
+
+The 5,120-parameter increase from $d_{\text{in}}=15 \rightarrow 35$ on the wider backbone (or 2,560 on the narrower) is solely attributable to the 20 additional input weights times the first hidden width — a < 2 % increase in capacity. The physics-augmented backbone is therefore not gaining its advantage from extra parameters.
+
+### B. Black-Box FNN (BlackBox-FNN)
 
 The simplest architecture treats torque prediction as a pure regression problem with no physics knowledge:
 
-$$\hat{\boldsymbol{\tau}}_{\text{BB}} = f_\theta(\tilde{\mathbf{x}})$$
+$$\hat{\boldsymbol{\tau}}_{\text{BB}}^{(i)} = f_\theta(\tilde{\mathbf{x}}^{(i)}),\qquad f_\theta : \mathbb{R}^{3J} \rightarrow \mathbb{R}^{J},$$
 
-where $\tilde{\mathbf{x}} \in \mathbb{R}^{15}$ is the normalized kinematic feature vector.
+where $\tilde{\mathbf{x}}^{(i)} = [\tilde{\mathbf{q}}^{(i)\top}, \tilde{\dot{\mathbf{q}}}^{(i)\top}, \tilde{\ddot{\mathbf{q}}}^{(i)\top}]^\top \in \mathbb{R}^{3J}$ is the normalised kinematic state. The decomposed physics tensor $\boldsymbol{\phi}^{(i)} \in \mathbb{R}^{4J}$ is supplied by the data loader but is *explicitly discarded* by the forward pass (`del physics`) so that no information leakage occurs even by accident through, e.g., shared batch-norm statistics.
 
-**Training loss.** The weighted mean-squared error with per-joint weights $\mathbf{w} = [1.0, 2.5, 1.0, 1.0, 1.0]$ emphasizes J₂ (the shoulder joint with the largest torque range and highest contribution to total MSE):
+**Training loss.** The joint-weighted mean-squared error in normalised target space:
 
-$$\mathcal{L}_{\text{BB}}(\theta) = \frac{1}{N} \sum_{i=1}^N \sum_{j=1}^5 w_j \left(\hat{\tau}_j^{(i)} - \tilde{\tau}_j^{*(i)}\right)^2$$
+$$\mathcal{L}_{\text{BB}}(\theta) = \frac{1}{N}\sum_{i=1}^{N}\sum_{j=1}^{J} w_j\,\big(\hat{\tau}_j^{(i)} - \tilde{\tau}_j^{*(i)}\big)^2,\qquad \mathbf{w} = [1.0,\, 2.5,\, 1.0,\, 1.0,\, 1.0]^\top.$$
 
-The network receives no physics information at any stage. The physics argument in the forward pass is explicitly discarded (`del physics`) to prevent accidental information leakage.
+The over-weight on $J_2$ is a deliberate countermeasure for the heavy-tailed torque distribution at the shoulder elevation joint: with $\sigma(\tau_2) \approx 2.58$ N·m vs. $\sigma(\tau_1) \approx 0.76$ N·m, an unweighted MSE allocates roughly $(2.58/0.76)^2 \approx 11.5\times$ more gradient pressure to $J_2$ already; the additional $w_2 = 2.5$ multiplier ensures that despite the prior-induced shrinkage of physics-augmented models, $J_2$ remains a primary optimisation target. The same weight vector is reused by all three trainers so that the *data* gradient is identical across architectures, isolating the contribution of the physics term.
 
-### B. Physics-Regularized FNN (PhysReg-FNN)
+The empirical risk gradient is
 
-PhysReg-FNN uses the same MLP backbone as BlackBox-FNN but with an **augmented 20-dim input** that concatenates the normalized RNEA torque sum to the kinematic features:
+$$\nabla_\theta \mathcal{L}_{\text{BB}} = \frac{2}{N}\sum_{i,j} w_j\,\big(\hat{\tau}_j^{(i)} - \tilde{\tau}_j^{*(i)}\big)\,\nabla_\theta \hat{\tau}_j^{(i)},$$
 
-$$\hat{\boldsymbol{\tau}}_{\text{PR}} = f_\theta\!\left([\tilde{\mathbf{x}},\; \tilde{\boldsymbol{\tau}}_{\text{phys}}]\right)$$
+where $\nabla_\theta \hat{\tau}_j^{(i)}$ is computed by automatic differentiation through the MLP.
 
-where $[\cdot, \cdot]$ denotes concatenation, $\tilde{\mathbf{x}} \in \mathbb{R}^{15}$ is the normalized kinematic vector, and $\tilde{\boldsymbol{\tau}}_{\text{phys}} = \sum_k \tilde{\boldsymbol{\phi}}^{(k)} \in \mathbb{R}^5$ is the normalized RNEA sum:
+### C. Physics-Regularised FNN (PhysReg-FNN)
 
-$$\tilde{\boldsymbol{\tau}}_{\text{phys}} = \tilde{\boldsymbol{\tau}}_g + \tilde{\boldsymbol{\tau}}_M + \tilde{\boldsymbol{\tau}}_C + \tilde{\boldsymbol{\tau}}_f$$
+PhysReg-FNN augments the input with the *full four-component decomposed* RNEA tensor and adds an additive Tikhonov physics penalty to the data loss.
 
-The MLP input dimension is therefore $n_J \times 4 = 20$. The network receives the physics prediction as an explicit feature at every forward pass — during both training and inference.
+**Augmented input.** Given the normalised decomposed physics tensor
 
-**Learnable RNEA calibration.** The RNEA model has systematic per-joint errors (e.g., ~9.3% global mass scaling in this manipulator). To correct these, two learnable per-joint parameter vectors are introduced:
+$$\tilde{\boldsymbol{\phi}}^{(i)} = \big[\tilde{\boldsymbol{\tau}}_g^{(i)\top},\; \tilde{\boldsymbol{\tau}}_M^{(i)\top},\; \tilde{\boldsymbol{\tau}}_C^{(i)\top},\; \tilde{\boldsymbol{\tau}}_f^{(i)\top}\big]^\top \in \mathbb{R}^{4J}$$
 
-$$\boldsymbol{s} \in \mathbb{R}^{n_J},\; \boldsymbol{b} \in \mathbb{R}^{n_J} \qquad \text{(initialized to } \mathbf{1} \text{ and } \mathbf{0}\text{)}$$
+the augmented input is the concatenation $\tilde{\mathbf{u}}^{(i)} = [\tilde{\mathbf{x}}^{(i)\top},\, \tilde{\boldsymbol{\phi}}^{(i)\top}]^\top \in \mathbb{R}^{7J}$, and the prediction is
 
-The physics reference used in the training loss is the affinely calibrated RNEA:
+$$\hat{\boldsymbol{\tau}}_{\text{PR}}^{(i)} = f_\theta(\tilde{\mathbf{u}}^{(i)}),\qquad f_\theta : \mathbb{R}^{7J} \rightarrow \mathbb{R}^{J}.$$
 
-$$\boldsymbol{\tau}_{\text{ref,cal},j} = s_j \cdot \tilde{\tau}_{\text{phys},j} + b_j$$
+This is a deliberate departure from the more common practice of passing only the scalar RNEA *sum* $\sum_k \tilde{\boldsymbol{\tau}}_k$. By exposing each physics component separately the network's first linear layer
 
-**Composite training loss.** The blended data + calibrated-physics loss is:
+$$\mathbf{a}^{(1)}_h = \sum_{j=1}^{J}\Big[ W^{(1)}_{h,\,j}\,\tilde{q}_j + W^{(1)}_{h,\,J+j}\,\tilde{\dot{q}}_j + W^{(1)}_{h,\,2J+j}\,\tilde{\ddot{q}}_j + \sum_{k\in\{g,M,C,f\}} W^{(1)}_{h,\,3J + 4(j-1) + \mathrm{idx}(k)}\,\tilde{\tau}_{k,j} \Big] + b^{(1)}_h$$
 
-$$\mathcal{L}_{\text{PR}}(\theta, \boldsymbol{s}, \boldsymbol{b};\, \alpha_{\text{eff}}) = (1 - \alpha_{\text{eff}}) \underbrace{\frac{1}{N} \sum_{i} \sum_j w_j \left(\hat{\tau}_j^{(i)} - \tilde{\tau}_j^{*(i)}\right)^2}_{\mathcal{L}_{\text{data}}} + \alpha_{\text{eff}} \underbrace{\frac{1}{N} \sum_{i} \sum_j w_j \left(\hat{\tau}_j^{(i)} - \tau_{\text{ref,cal},j}^{(i)}\right)^2}_{\mathcal{L}_{\text{phys}}}$$
+can learn per-component, per-joint *trust weights* $W^{(1)}_{h, 3J + 4(j-1) + \mathrm{idx}(k)}$ — for example, down-weighting the friction component $\tilde{\tau}_{f,j}$ at joint $j$ if its empirical residual is large, while keeping the gravity component $\tilde{\tau}_{g,j}$ at full influence. Collapsing to the sum eliminates this degree of freedom and forces a uniform 1/4 weight on each component.
 
-The gradient with respect to the calibration scale at joint $j$ is:
+**Physics reference for the loss.** Although the *input* preserves the four components separately, the loss-side physics target is the linear sum
 
-$$\frac{\partial \mathcal{L}_{\text{phys}}}{\partial s_j} = -\frac{2}{N} \sum_i w_j \left(\hat{\tau}_j^{(i)} - \tau_{\text{ref,cal},j}^{(i)}\right) \cdot \tilde{\tau}_{\text{phys},j}^{(i)}$$
+$$\boldsymbol{\tau}_{\text{ref}}^{(i)} = \sum_{k\in\{g,M,C,f\}}\!\!\tilde{\boldsymbol{\tau}}_k^{(i)} \in \mathbb{R}^{J},$$
 
-This drives $s_j$ toward the true RNEA-to-measured-torque ratio for joint $j$. The calibration is optimized jointly with $\theta$ via the same AdamW optimizer; the identity initialization ensures epoch-0 behavior is identical to the uncalibrated case.
+implemented in `reduce_physics_to_total()` by reshaping the 4·J tensor to $(\cdot, 4, J)$ and summing over the component axis. The physics-feature normalisation in §III-C ensures the noise-free identity $\boldsymbol{\tau}_{\text{ref}}^{(i)} \approx \tilde{\boldsymbol{\tau}}^{*(i)}$, so the physics loss measures the same target torque as the data loss but with the sample-by-sample analytical RNEA in place of the noisy measurement.
 
-**Physics warmup schedule.** $\alpha_{\text{eff}}$ is linearly ramped from zero to the target physics weight $\lambda$ over a warmup period of $e_w = \lfloor \gamma \cdot E \rfloor$ epochs, where $\gamma = 0.05$ and $E$ is the total epoch budget:
+**Composite loss (additive Tikhonov form).** With per-batch joint-weighted MSE
 
-$$\alpha_{\text{eff}}(e) = \lambda \cdot \min\!\left(1,\; \frac{e}{e_w}\right)$$
+$$\mathcal{L}_{\text{data}}(\theta) = \tfrac{1}{N}\textstyle\sum_{i,j} w_j (\hat{\tau}_j^{(i)} - \tilde{\tau}_j^{*(i)})^2,\qquad \mathcal{L}_{\text{phys}}(\theta) = \tfrac{1}{N}\textstyle\sum_{i,j} w_j (\hat{\tau}_j^{(i)} - \tau_{\text{ref},j}^{(i)})^2,$$
 
-This prevents the physics loss from dominating before the network has learned to process the 20-dim augmented input, avoiding collapsed solutions where $\hat{\tau} \approx \tau_{\text{ref,cal}}$ without learning the residual structure.
+the training objective is the *additive* (Tikhonov-style) penalty — the data term keeps unit weight at all times, with physics layered on top:
 
-**Identical joint weights for both loss terms.** The same per-joint weight vector $\mathbf{w}$ is applied to both $\mathcal{L}_{\text{data}}$ and $\mathcal{L}_{\text{phys}}$. Unweighted physics MSE alongside weighted data MSE would create conflicting gradient directions for J₂ ($w_2 = 2.5$), destabilizing training.
+$$\boxed{\;\mathcal{L}_{\text{PR}}(\theta;\, e) = \mathcal{L}_{\text{data}}(\theta) + \alpha_{\text{eff}}(e)\cdot \mathcal{L}_{\text{phys}}(\theta).\;}$$
 
-**Inference.** PhysReg-FNN requires the RNEA prediction at inference time. Given kinematic inputs, $\tilde{\boldsymbol{\tau}}_{\text{phys}}$ is computed from the Pinocchio RNEA and appended to $\tilde{\mathbf{x}}$ before the forward pass. The learned calibration parameters $\boldsymbol{s}, \boldsymbol{b}$ are used only during training (in $\mathcal{L}_{\text{phys}}$) and do not modify the input features at inference.
+This is *not* the convex blend $(1-\alpha)\mathcal{L}_{\text{data}} + \alpha\mathcal{L}_{\text{phys}}$ used in some PINN variants. Under the additive form, increasing $\lambda$ never down-weights the data fit — the physics term acts as a pull toward the analytical surface in *addition* to the data fit. As a consequence, the optimal predictor in expectation is
 
-### C. Residual-Correction FNN (ResCorr-FNN)
+$$\hat{\boldsymbol{\tau}}^\star = \frac{1}{1 + \alpha_{\text{eff}}}\,\boldsymbol{\tau}^* + \frac{\alpha_{\text{eff}}}{1 + \alpha_{\text{eff}}}\,\boldsymbol{\tau}_{\text{ref}}\quad\text{(per-sample, per-joint)},$$
 
-ResCorr-FNN enforces a physics-consistent decomposition as a **hard architectural constraint**. The network predicts an additive correction $\boldsymbol{\delta}$ to the RNEA prediction, where the correction network receives the same augmented 20-dim input:
+a weighted average of the noisy measurement and the analytical RNEA whose weight on physics increases monotonically with $\lambda$.
 
-$$\hat{\boldsymbol{\tau}}_{\text{RC}} = \tilde{\boldsymbol{\tau}}_{\text{phys}} + \boldsymbol{\delta}\!\left([\tilde{\mathbf{x}},\; \tilde{\boldsymbol{\tau}}_{\text{phys}}]\right)$$
+**Linear warmup of the physics coefficient.** The penalty coefficient is annealed from $0$ to its target value $\lambda$ over a warmup window of $e_w = \max(1, \lfloor \gamma\, E\rfloor)$ epochs, with $\gamma = 0.05$ (i.e. 5 % of the epoch budget):
 
-where $\boldsymbol{\delta} : \mathbb{R}^{20} \rightarrow \mathbb{R}^5$ is the [256–512–256] MLP backbone. Providing $\tilde{\boldsymbol{\tau}}_{\text{phys}}$ to the correction network enables context-sensitive residuals: the network can learn "when $\tilde{\tau}_{\text{phys},j}$ is large (high gravitational loading), the friction calibration error at joint $j$ also tends to be large, so apply a proportionally larger correction."
+$$\alpha_{\text{eff}}(e) = \lambda\cdot \min\!\Big(1,\; \frac{e}{e_w}\Big),\qquad e \in \{1, 2, \ldots, E\}.$$
 
-**Small-residual initialization.** The last linear layer's weights and biases are multiplied by $10^{-2}$ at initialization. This ensures that at epoch 0, $\boldsymbol{\delta} \approx \mathbf{0}$ and $\hat{\boldsymbol{\tau}} \approx \tilde{\boldsymbol{\tau}}_{\text{phys}}$, giving the optimizer a warm start from the physics solution. This initialization is preserved regardless of input dimensionality — the near-zero output at startup is the structural goal, not the input size.
+The warmup serves two purposes: (i) it prevents the physics term from dominating before the network's first layer has organised itself to read $\tilde{\boldsymbol{\phi}}$; and (ii) at the very start of training, where the prediction $\hat{\boldsymbol{\tau}}$ is essentially noise, the physics gradient $-2 w_j(\hat{\tau}_j - \tau_{\text{ref},j})$ is large in magnitude and pulls in an arbitrary direction — multiplying it by a small $\alpha_{\text{eff}}$ ensures it does not destabilise early epochs.
 
-**Regularized training loss.** To prevent the correction network from absorbing the full inverse dynamics task (making the physics base irrelevant), an L₂ penalty on the correction magnitude is applied:
+**Per-component gradient decomposition.** The gradient of the composite loss with respect to a generic backbone parameter $\theta$ is
 
-$$\mathcal{L}_{\text{RC}}(\theta) = \underbrace{\frac{1}{N} \sum_{i} \sum_j w_j \left(\hat{\tau}_j^{(i)} - \tilde{\tau}_j^{*(i)}\right)^2}_{\mathcal{L}_{\text{data}}} + \alpha_r \underbrace{\frac{1}{NJ} \sum_{i,j} \delta_j^{(i)^2}}_{\mathcal{L}_{\text{reg}}}$$
+$$\nabla_\theta \mathcal{L}_{\text{PR}} = \tfrac{2}{N}\sum_{i,j} w_j \big[(\hat{\tau}_j^{(i)} - \tilde{\tau}_j^{*(i)}) + \alpha_{\text{eff}}(\hat{\tau}_j^{(i)} - \tau_{\text{ref},j}^{(i)})\big]\,\nabla_\theta \hat{\tau}_j^{(i)}.$$
 
-where $\alpha_r = 0.01$ is the regularization weight. Note: the v1 architecture used $\alpha_r = 0.05$, which suppressed corrections to $|\delta_j| \lesssim 0.02$ N·m while RNEA calibration errors require corrections of 0.05–0.08 N·m. The reduced $\alpha_r = 0.01$ permits the network to learn meaningful corrections without eliminating the RNEA base contribution. The per-epoch ratio $\mathbb{E}[|\boldsymbol{\delta}|]/\mathbb{E}[|\tilde{\boldsymbol{\tau}}_{\text{phys}}|]$ is logged to monitor physics-vs-correction reliance throughout training.
+When data and physics agree ($\tilde{\tau}^* \approx \tau_{\text{ref}}$), the bracket is $(1+\alpha_{\text{eff}})$ times the data residual: physics reinforces the data signal. When data and physics disagree, the gradients partially cancel, with the equilibrium prediction sitting between the two surfaces as derived above.
 
-**Relationship to PhysReg-FNN.** In PhysReg-FNN, $\tilde{\boldsymbol{\tau}}_{\text{phys}}$ serves two roles: (a) as a concatenated input feature so the MLP conditions its output on the physics prediction, and (b) as a calibrated reference signal in the training loss. In ResCorr-FNN, $\tilde{\boldsymbol{\tau}}_{\text{phys}}$ enters as the hard additive output base and as an explicit input to $\delta$ — providing the correction network with the physics context it needs for position-dependent residuals. Both architectures use physics at inference time; neither discards the RNEA prediction after training.
+**Inference.** PhysReg-FNN requires the RNEA prediction at inference time. Given measured kinematics, $\tilde{\boldsymbol{\phi}}$ is computed online via Pinocchio's `rnea` calls (one per component per timestep) and concatenated to $\tilde{\mathbf{x}}$ before the forward pass.
 
-### D. Architecture Design Motivation: Why Provide τ_phys as an Explicit Input?
+### D. Residual-Correction FNN (ResCorr-FNN)
 
-A natural question is why passing $\tilde{\boldsymbol{\tau}}_{\text{phys}}$ as an input feature improves generalization, given that a sufficiently large MLP could in principle reconstruct the RNEA computation from kinematics $\tilde{\mathbf{x}}$ alone.
+ResCorr-FNN imposes a hard *architectural* decomposition of the prediction into an analytical base plus a bounded learned correction:
 
-**Information-theoretic argument.** Suppose the true inverse dynamics factorizes as:
+$$\boxed{\;\hat{\boldsymbol{\tau}}_{\text{RC}}^{(i)} = \tilde{\boldsymbol{\tau}}_{\text{phys}}^{(i)} + c_s \cdot \tanh\!\big(\,g_\theta(\tilde{\mathbf{u}}^{(i)})\,\big),\;}$$
 
-$$\boldsymbol{\tau} = \boldsymbol{\tau}_{\text{phys}}(\mathbf{x}) + r(\mathbf{x},\, \boldsymbol{\tau}_{\text{phys}})$$
+where $\tilde{\boldsymbol{\tau}}_{\text{phys}}^{(i)} = \sum_k \tilde{\boldsymbol{\tau}}_k^{(i)}$ is the same RNEA sum used as the physics reference in §IV-C, $\tilde{\mathbf{u}}^{(i)} = [\tilde{\mathbf{x}}^{(i)\top}, \tilde{\boldsymbol{\phi}}^{(i)\top}]^\top \in \mathbb{R}^{7J}$ is the augmented 35-dim input, $g_\theta : \mathbb{R}^{7J} \rightarrow \mathbb{R}^{J}$ is the same MLP backbone as PhysReg-FNN, and $\tanh$ is applied element-wise.
 
-where $r$ is a residual depending on both kinematics and the physics estimate (e.g., friction errors that scale with joint loading, which is encoded in $\boldsymbol{\tau}_{\text{phys}}$). A network receiving only $\tilde{\mathbf{x}}$ must implicitly reconstruct $\boldsymbol{\tau}_{\text{phys}}(\mathbf{x})$ as an intermediate computation before it can learn $r$. By the data-processing inequality, any statistic of $\tilde{\mathbf{x}}$ available to this network is also available to a network receiving $[\tilde{\mathbf{x}},\, \tilde{\boldsymbol{\tau}}_{\text{phys}}]$ — but not vice versa. The augmented input is therefore a strict superset in information content, with the RNEA prediction acting as a compressed sufficient statistic for the physics structure.
+**Tanh-bounded correction.** Defining $\boldsymbol{\delta}^{(i)} \triangleq \hat{\boldsymbol{\tau}}_{\text{RC}}^{(i)} - \tilde{\boldsymbol{\tau}}_{\text{phys}}^{(i)} = c_s\tanh(g_\theta(\tilde{\mathbf{u}}^{(i)}))$, the correction satisfies
 
-**Capacity allocation.** With limited training data, the network must allocate representational capacity to reconstruct the physics structure from kinematics. Providing $\tilde{\boldsymbol{\tau}}_{\text{phys}}$ directly frees this capacity to model friction calibration errors and unmodeled dynamics — effects that require many samples to learn from kinematics alone. This is the mechanism by which physics augmentation improves data efficiency.
+$$\|\boldsymbol{\delta}^{(i)}\|_\infty \le c_s \quad\text{for all } i, \theta,$$
 
-**Gradient stability.** In PhysReg-FNN, the physics loss $\mathcal{L}_{\text{phys}}$ provides a gradient signal pulling $\hat{\boldsymbol{\tau}}$ toward $\boldsymbol{\tau}_{\text{ref,cal}}$. When $\tilde{\boldsymbol{\tau}}_{\text{phys}}$ is an explicit input, the network can satisfy this constraint by learning a near-identity mapping from $\tilde{\boldsymbol{\tau}}_{\text{phys}}$ to $\hat{\boldsymbol{\tau}}$, which is a much simpler function than reconstructing the physics from raw kinematics. This reduces gradient conflict between $\mathcal{L}_{\text{data}}$ and $\mathcal{L}_{\text{phys}}$, improving training stability at higher physics weights $\lambda$.
+with $c_s = 0.5$ a *fixed buffer* (registered via `register_buffer`, hence saved with the model state but excluded from the optimiser parameter list). This is the architecture's hard structural prior: irrespective of how badly the network is trained, no element of $\boldsymbol{\delta}$ can ever exceed $\pm 0.5$ in *normalised* torque units. After de-normalisation by joint $j$, the per-joint physical-units bound is $c_s \cdot \sigma_{\tau_j}^{\text{train}}$, which evaluates to roughly $\{0.38, 1.29, 0.61, 0.23, 0.36\}$ N·m for the five joints — sizeable enough to absorb realistic RNEA mismatches but small enough to *prevent* the network from overriding the analytical prediction and memorising the training set.
 
-**Calibration warm-start.** The affine calibration $(s_j, b_j)$ is initialized at $(1, 0)$ — the identity transformation. This ensures that at epoch 0, $\boldsymbol{\tau}_{\text{ref,cal}} = \tilde{\boldsymbol{\tau}}_{\text{phys}}$, so the physics loss is anchored to the raw RNEA prediction from the start. A random initialization of the calibration would push $\hat{\boldsymbol{\tau}}$ toward a meaningless reference during early training, destabilizing the optimizer before any physics structure is learned.
+The choice of $\tanh$ over softer bounds (e.g., a soft $\ell_\infty$ ball via clipping) has two motivations:
+
+1. **Smoothness.** $\tanh$ is $C^\infty$ with bounded derivatives $\tanh'(z) = 1 - \tanh^2(z) \in (0, 1]$, so the gradient of the bounded correction $c_s\tanh(\cdot)$ never blows up and never vanishes inside the saturation region (it merely decays).
+2. **Smooth saturation.** Near $|g_\theta| \gtrsim 3$ the derivative is $\lesssim 0.01$, which provides a *soft saturation* that strongly discourages the optimiser from pushing into the bound: any further attempt to grow $|\delta|$ produces an exponentially decaying gradient signal back into $\theta$.
+
+**Small-residual warm-start.** The output linear layer is rescaled at initialisation:
+
+$$\mathbf{W}^{(L+1)} \leftarrow 10^{-2}\cdot \mathbf{W}^{(L+1)},\qquad \mathbf{b}^{(L+1)} \leftarrow 10^{-2}\cdot \mathbf{b}^{(L+1)}.$$
+
+Combined with $\tanh(0) = 0$, this guarantees $\boldsymbol{\delta}^{(0)} \approx \mathbf{0}$ at epoch 0 — the network's epoch-0 prediction is the analytical RNEA, providing an effective preconditioner: the optimiser begins refinement from a physics-consistent state rather than building a 5-dim torque field from scratch.
+
+**Regularised training loss.** To further prevent the correction from absorbing the entire inverse-dynamics task, an L₂ penalty on the bounded correction is added:
+
+$$\boxed{\;\mathcal{L}_{\text{RC}}(\theta;\, \alpha_r) = \tfrac{1}{N}\sum_{i,j} w_j (\hat{\tau}_j^{(i)} - \tilde{\tau}_j^{*(i)})^2 + \alpha_r\cdot\tfrac{1}{NJ}\sum_{i,j} \big(\delta_j^{(i)}\big)^2.\;}$$
+
+The penalty acts on the *post-tanh* correction $\delta_j = c_s \tanh(g_{\theta,j})$, so its gradient back-propagates through the bound:
+
+$$\frac{\partial}{\partial \theta} \big(\delta_j^{(i)}\big)^2 = 2\,\delta_j^{(i)}\cdot c_s\big(1 - \tanh^2(g_{\theta,j}^{(i)})\big)\cdot \nabla_\theta g_{\theta,j}^{(i)},$$
+
+which vanishes both when $\delta = 0$ (no penalty needed) *and* when $|\delta|\to c_s$ (pre-tanh activation already saturated). The strongest regularisation pressure is therefore in the linear-response region $|g_\theta|\lesssim 1$, exactly where the network has the most flexibility to absorb spurious training-set patterns.
+
+The dimensionless monitoring ratio
+
+$$\rho(e) = \frac{\mathbb{E}_i[|\boldsymbol{\delta}^{(i)}|_1 / J]}{\mathbb{E}_i[|\tilde{\boldsymbol{\tau}}_{\text{phys}}^{(i)}|_1 / J] + 10^{-12}}$$
+
+is logged each epoch (`residual δ-ratio  E[|δ|]/E[|τ_phys|]`) to surface degenerate cases where $\boldsymbol{\delta}$ either collapses to zero (correction not learning) or saturates the tanh bound (RNEA being ignored).
+
+**Hyperparameter regimes.** For the grid sweep, $\alpha_r \in \{0.005, 0.01, 0.05, 0.1, 0.5\}$ probes the full spectrum:
+- $\alpha_r = 0.005$: structural tanh bound is the only meaningful constraint; correction is essentially free up to $\pm c_s$.
+- $\alpha_r = 0.05$ (the per-script default): moderate L₂ that pulls $\delta$ toward zero unless the data demands otherwise.
+- $\alpha_r = 0.5$: strong L₂; the correction shrinks substantially and predictions converge toward $\tilde{\boldsymbol{\tau}}_{\text{phys}}$.
+
+### E. Architectural Comparison
+
+The three architectures span the spectrum from no physics, to physics as a *soft loss-side regulariser*, to physics as a *hard structural prior*. Table A summarises the differences in a single view.
+
+**Table A: Architectural Differences at a Glance**
+
+| Aspect | BlackBox-FNN | PhysReg-FNN | ResCorr-FNN |
+|--------|-------------|-------------|-------------|
+| Input dim | $3J = 15$ | $7J = 35$ | $7J = 35$ |
+| Forward map | $f_\theta(\tilde{\mathbf{x}})$ | $f_\theta([\tilde{\mathbf{x}}, \tilde{\boldsymbol{\phi}}])$ | $\tilde{\boldsymbol{\tau}}_{\text{phys}} + c_s\tanh(g_\theta([\tilde{\mathbf{x}}, \tilde{\boldsymbol{\phi}}]))$ |
+| Physics at training | discarded | input feature + loss term | input feature + output base |
+| Physics at inference | absent | input feature only | input feature + output base |
+| Loss form | $\mathcal{L}_{\text{data}}$ | $\mathcal{L}_{\text{data}} + \alpha_{\text{eff}}\mathcal{L}_{\text{phys}}$ | $\mathcal{L}_{\text{data}} + \alpha_r \|\boldsymbol{\delta}\|^2/J$ |
+| Physics constraint | none | soft (loss penalty) | hard (architectural bound) |
+| Tunable physics HP | — | $\lambda$ (penalty strength) | $\alpha_r$ (penalty strength), $c_s$ (bound) |
+| Worst-case behaviour | unbounded | unbounded | $\|\hat{\boldsymbol{\tau}} - \tilde{\boldsymbol{\tau}}_{\text{phys}}\|_\infty \le c_s$ |
+
+### F. Why Concatenate the *Decomposed* Physics?
+
+A natural alternative to the 35-dim augmented input is the 20-dim form $[\tilde{\mathbf{x}},\, \tilde{\boldsymbol{\tau}}_{\text{phys}}]$ where $\tilde{\boldsymbol{\tau}}_{\text{phys}} = \sum_k \tilde{\boldsymbol{\tau}}_k$. The decomposed form is preferred for three reasons.
+
+**Information.** The map $\tilde{\boldsymbol{\phi}} \mapsto \sum_k \tilde{\boldsymbol{\tau}}_k$ is many-to-one — a network receiving only the sum cannot, even in principle, infer the relative magnitudes of gravity, inertial, Coriolis, and friction contributions. Many failure modes of RNEA are component-specific (friction errors at low velocity, inertial-tensor mis-calibration at high acceleration), so distinguishing the components is necessary for a context-sensitive correction.
+
+**Linear separability of trust weights.** With the decomposed input, the first hidden layer is in essence a learnable *trust assignment*: each hidden unit can up- or down-weight any (component, joint) pair through its first-layer weight. Collapsing to the sum forces this assignment to be applied uniformly over components, eliminating an entire degree of freedom available to the network at no parameter-count cost (the input dimension grows by only $3J = 15$ extra weights per hidden unit).
+
+**Capacity allocation.** With limited training data, a kinematic-only network must implicitly reconstruct the physics components (gravity, inertia, Coriolis, friction) from $\tilde{\mathbf{x}}$ before it can learn corrections to them — this is wasted capacity. By the data-processing inequality, any statistic of $\tilde{\mathbf{x}}$ available to the kinematic-only network is also available to the augmented-input network, but not vice versa, so the augmented input is a strict information superset. Empirically, this is the mechanism by which both PhysReg-FNN and ResCorr-FNN achieve the data-efficiency advantage reported in §VII-D.
 
 ---
 
 ## V. Training Methodology
 
-### A. Optimizer and Regularization
+### A. Optimiser
 
-All models are trained with AdamW [7]:
+All models are trained with AdamW [7], whose update rule decouples weight decay from the adaptive-moment normalisation:
 
-$$\theta_{t+1} = \theta_t - \eta \cdot \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon} - \eta \cdot \lambda_{\text{wd}} \cdot \theta_t$$
+$$\mathbf{m}_t = \beta_1 \mathbf{m}_{t-1} + (1-\beta_1)\,\mathbf{g}_t,\qquad \mathbf{v}_t = \beta_2 \mathbf{v}_{t-1} + (1-\beta_2)\,\mathbf{g}_t^{\odot 2},$$
 
-with learning rate $\eta = 3 \times 10^{-4}$, weight decay $\lambda_{\text{wd}} = 10^{-2}$, and default momentum parameters $\beta_1 = 0.9$, $\beta_2 = 0.999$.
+$$\hat{\mathbf{m}}_t = \mathbf{m}_t / (1-\beta_1^t),\qquad \hat{\mathbf{v}}_t = \mathbf{v}_t / (1-\beta_2^t),$$
 
-**Input noise augmentation.** During training (but not evaluation), Gaussian noise is added to the normalized feature vector:
+$$\theta_{t+1} = \theta_t - \eta_t\,\frac{\hat{\mathbf{m}}_t}{\sqrt{\hat{\mathbf{v}}_t} + \epsilon} - \eta_t\,\lambda_{\text{wd}}\,\theta_t,$$
 
-$$\tilde{\mathbf{x}}_{\text{aug}} = \tilde{\mathbf{x}} + \boldsymbol{\varepsilon}, \quad \boldsymbol{\varepsilon} \sim \mathcal{N}\!\left(\mathbf{0},\, \sigma_n^2 \mathbf{I}_{d_x}\right), \quad \sigma_n = 0.02$$
+with $\mathbf{g}_t = \nabla_\theta \mathcal{L}_{\{\text{BB}, \text{PR}, \text{RC}\}}$, default PyTorch betas $\beta_1 = 0.9$, $\beta_2 = 0.999$, and $\epsilon = 10^{-8}$. Learning rate $\eta_0 = 3\times 10^{-4}$ and weight decay $\lambda_{\text{wd}} \in \{5\times 10^{-3}, 5\times 10^{-2}\}$ — the former for the per-script standalone trainers, the latter for the grid sweep where the smaller backbone benefits from heavier weight decay.
 
-where $d_x = 20$ for PhysReg-FNN and ResCorr-FNN, and $d_x = 15$ for BlackBox-FNN (noise applied only to the kinematic channels, not to the appended $\tilde{\boldsymbol{\tau}}_{\text{phys}}$ block). The perturbation is in normalized space; the equivalent physical-space standard deviation for channel $k$ is $\sigma_n \cdot \sigma_k^{\text{train}}$. This regularizes against overfitting to specific kinematic profiles and improves generalization to trajectories with slightly different velocity smoothness.
+### B. Learning-Rate Schedule (warmup-cosine)
 
-**Activation function.** All hidden layers use GELU (Gaussian Error Linear Unit):
+Per-epoch learning rate:
 
-$$\text{GELU}(x) = x \cdot \Phi(x) \approx x \cdot \sigma(1.702\, x)$$
+$$\eta_t = \eta_0\cdot \begin{cases}\;0.1 + 0.9\cdot \dfrac{e}{e_w} & e < e_w,\\[6pt]\;r_{\min} + (1 - r_{\min})\cdot \dfrac{1 + \cos\!\big(\pi\,\xi(e)\big)}{2} & e \ge e_w,\end{cases}\qquad \xi(e) = \frac{e - e_w}{\max(1, E - e_w)},$$
 
-where $\Phi$ is the standard-normal CDF and $\sigma$ is the logistic sigmoid. GELU is preferred over ReLU for two reasons: (a) it is smooth and differentiable everywhere, preventing the "dead neuron" problem where $\partial \mathcal{L}/\partial x = 0$ for $x < 0$; (b) it retains small negative-activation gradients, which is beneficial when the physics loss creates competing gradient directions during the warmup phase. The approximation $\sigma(1.702x)$ is used in the PyTorch implementation for computational efficiency.
+with warmup length $e_w = \max(1,\, \lfloor E/20\rfloor)$ (5 % of the budget) and minimum-LR ratio $r_{\min} = 10^{-2}$. The linear warmup from $0.1\eta_0$ avoids the well-known instability of large initial AdamW updates (when $\hat{\mathbf{v}}_t$ is dominated by the bias correction), and the cosine tail allows fine-grained refinement near the minimum.
 
-**Gradient clipping.** To prevent gradient explosions from the weighted physics loss at the beginning of training, the global gradient norm is clipped to $G_{\max} = 5.0$.
+**Patience suppression during warmup.** The early-stopping patience counter is held at zero through the first $e_w$ epochs; per-epoch validation improvements during warmup are intentionally smaller than $\delta_{\min}$ even for a healthy run, and counting them would prematurely terminate training.
 
-**Mixed precision.** On CUDA devices, NVIDIA's Automatic Mixed Precision (AMP) is used with FP16 compute and FP32 master weights, reducing memory footprint and improving throughput.
+### C. Stochastic Regularisation
 
-### B. Learning Rate Schedule: Warmup Cosine
+**Input noise augmentation.** During training (but not evaluation), isotropic Gaussian noise is added to the *full* normalised input vector $\tilde{\mathbf{u}}^{(i)}$:
 
-A warmup-cosine annealing schedule is applied:
+$$\tilde{\mathbf{u}}_{\text{aug}}^{(i)} = \tilde{\mathbf{u}}^{(i)} + \boldsymbol{\varepsilon}^{(i)},\qquad \boldsymbol{\varepsilon}^{(i)} \sim \mathcal{N}(\mathbf{0},\, \sigma_n^2 \mathbf{I}_{d_{\text{in}}}),\qquad \sigma_n \in \{0.02, 0.05\},$$
 
-$$\eta(e) = \begin{cases} \eta_0 \left(0.1 + 0.9 \cdot \frac{e}{e_w}\right) & e < e_w \\ \eta_0 \left(r_{\min} + (1 - r_{\min}) \cdot \frac{1 + \cos(\pi \cdot \text{progress})}{2}\right) & e \geq e_w \end{cases}$$
+with $d_{\text{in}} = 15$ for BlackBox-FNN and $d_{\text{in}} = 35$ for PhysReg/ResCorr (note that the noise is applied to the augmented vector *as a whole*, including the physics channels — this prevents the network from learning a purely-physics shortcut). The perturbation is in normalised space; the per-channel physical-units standard deviation is $\sigma_n\cdot \sigma_k^{\text{train}}$.
 
-where $e_w = \max(1, \lfloor E/20 \rfloor)$ is the warmup epoch count, $\text{progress} = (e - e_w)/(E - e_w) \in [0, 1]$, and $r_{\min} = 0.01$ is the minimum LR ratio. This schedule warms up to $\eta_0$ over the first 5% of training (preventing unstable early updates) then cosine-anneals to $0.01 \cdot \eta_0$.
+**Dropout.** Applied with probability $p \in [0.1, 0.4]$ at every hidden layer. Conventional analysis treats dropout as an approximate ensemble averaged at evaluation time; here we use the standard inverted-dropout convention, where training-time activations are divided by $1-p$ so the expected magnitude is unchanged.
 
-### C. Early Stopping
+**Weight decay.** AdamW's decoupled weight decay (see V-A) is mathematically equivalent to a per-parameter L₂ penalty on the *parameter trajectory*, distinct from adding $\lambda_{\text{wd}}\|\theta\|_2^2$ to the loss in standard Adam. The decoupled form is preferred because it does not interact with the second-moment normalisation $\sqrt{\hat{\mathbf{v}}_t}$.
 
-Training stops when the validation RMSE does not improve by more than $\delta_{\min} = 10^{-4}$ N·m for $P = 100$ consecutive epochs. The model state from the best validation epoch is restored at the end of training. This prevents overfitting to the training set at the cost of some additional compute for the patience window.
+### D. Gradient Stabilisation
 
-### D. DataLoader Configuration
+**Global-norm clipping.** The aggregate gradient norm is clipped to $G_{\max}$:
 
-Training batches are assembled with `batch_size = 1024` and `drop_last=True` (only when the training set contains at least $2 \times \text{batch\_size}$ samples, to avoid empty training at small data fractions). Validation and test evaluation use all samples without dropping. The DataLoader uses 4 worker processes for asynchronous prefetching and `pin_memory=True` for fast host-to-device transfer.
+$$\mathbf{g}_t \leftarrow \mathbf{g}_t \cdot \min\!\Big(1,\; \frac{G_{\max}}{\|\mathbf{g}_t\|_2 + 10^{-6}}\Big),$$
+
+with $G_{\max} = 5.0$ (per-script) or $G_{\max} = 1.0$ (grid). This is essential at the *start* of PhysReg training where the term $\alpha_{\text{eff}}\,\mathcal{L}_{\text{phys}}$ ramps in over the first $e_w$ epochs and can produce large gradient spikes when $\hat{\boldsymbol{\tau}}^{(0)}$ has not yet aligned with $\boldsymbol{\tau}_{\text{ref}}$.
+
+**Mixed precision (AMP).** On CUDA devices, forward and backward passes run in FP16 under `torch.autocast`, with master weights kept in FP32 by the AdamW optimiser. A `GradScaler` rescales the loss before backward to avoid FP16 underflow:
+
+$$\mathbf{g}_t^{\text{FP16}} = \nabla_\theta\,(s \cdot \mathcal{L}),\qquad \mathbf{g}_t^{\text{FP32}} = \mathbf{g}_t^{\text{FP16}} / s,$$
+
+with $s$ updated dynamically (doubled when no overflow detected for a window of steps; halved on overflow).
+
+### E. Early Stopping
+
+The training loop monitors the unweighted *macro-RMSE* on the validation split in physical N·m units (as opposed to the joint-weighted training objective). With minimum improvement $\delta_{\min} = 10^{-4}$ N·m and patience $P$:
+
+$$\text{stop training at epoch } e^\star = \min\!\Big\{e\ \big|\ \text{val\_rmse}(e) > \min_{e' \le e} \text{val\_rmse}(e') - \delta_{\min}\;\text{for } P\ \text{consecutive epochs}\Big\}.$$
+
+Patience values: $P = 50$ (BlackBox per-script), $P = 80$ (PhysReg per-script), $P = 60$ (ResCorr per-script), $P = 150$ (grid). Upon early stop or epoch budget exhaustion, the model state is *rolled back* to the epoch that achieved $\min_{e'} \text{val\_rmse}(e')$; this is the state that is saved to `model.pt` and used for all reported test metrics.
+
+### F. Macro-RMSE Validation Metric
+
+Validation RMSE is computed in physical units after de-normalisation, *averaged per trajectory* and then averaged across trajectories — not pooled across all samples — so that long trajectories do not dominate short ones:
+
+$$\text{macro\_rmse}(\hat{\boldsymbol{\tau}}, \boldsymbol{\tau}^*) = \frac{1}{|\mathcal{T}|}\sum_{T \in \mathcal{T}} \frac{1}{J}\sum_{j=1}^{J} \sqrt{\frac{1}{|T|}\sum_{i \in T}\big(\hat{\tau}_j^{(i)} - \tau_j^{*(i)}\big)^2},$$
+
+where $\mathcal{T}$ is the set of validation trajectories. The pooled RMSE used in §VII (table headers say "RMSE pooled") is $\sqrt{\tfrac{1}{NJ}\sum_{i,j}(\hat{\tau}_j^{(i)} - \tau_j^{*(i)})^2}$ — the same predictions, but with the per-trajectory and per-joint averaging steps replaced by a single global pool.
+
+### G. DataLoader Configuration
+
+Training batches: $B = 512$ (per-script) or $B = 1024$ (grid), with `shuffle=True`, `drop_last=True` *only* when the training set contains at least $2B$ samples. The 2B floor is critical at small data fractions: at `frac = 0.02` the training set has ~5,450 samples, and a naïve `drop_last=True` with $B = 1024$ would silently empty the loader when the last batch is dropped on uneven splits. Validation and test loaders use all samples (`drop_last=False`) and are not shuffled.
+
+DataLoader workers are auto-tuned by available system memory: 0–2 workers on low-RAM hosts (< 32 GB), up to 8 on workstation-grade hardware. Prefetch factor scales similarly. `pin_memory=True` is enabled on CUDA devices for asynchronous host-to-device transfer.
 
 ---
 
 ## VI. Hyperparameter Grid Search
 
-To characterize the effect of key hyperparameters, a structured grid search is conducted. All non-swept hyperparameters are held fixed at the values in §V. Each architecture–hyperparameter combination is trained with two random seeds to assess variance.
+To characterise the effect of the key physics-related hyperparameters, a structured grid search is conducted. All non-swept hyperparameters are held fixed at the values in §V (backbone $[128, 256, 128]$, GELU, dropout $0.2$, $\eta_0 = 3{\times}10^{-4}$, $\lambda_{\text{wd}} = 5{\times}10^{-2}$, $B = 1024$, $\sigma_n = 0.05$, $G_{\max} = 1.0$, epochs $E = 3000$, patience $P = 150$). Each architecture–hyperparameter combination is trained with two random seeds (which simultaneously seed the parameter init *and* the data-fraction subsample), giving mean ± spread per cell.
 
-**Table III: Grid Search Axes (v2)**
+**Table III: Grid Search Axes**
 
 | Architecture | Swept HPs | Values | Total Trials |
 |-------------|-----------|--------|--------------|
-| BlackBox-FNN | `data_train_fraction`, `seed` | {0.02, 0.05, 0.1, 0.25, 0.5, 1.0} × {0, 1} | 12 |
-| PhysReg-FNN | `physics_weight`, `data_train_fraction`, `seed` | {0.05, 0.1, 0.2, 0.3, 0.5, 1.0} × {0.02, 0.05, 0.1, 0.25, 0.5, 1.0} × {0, 1} | 72 |
-| ResCorr-FNN | `alpha_reg_weight`, `data_train_fraction`, `seed` | {0.001, 0.005, 0.01, 0.05, 0.1} × {0.02, 0.05, 0.1, 0.25, 0.5, 1.0} × {0, 1} | 60 |
+| BlackBox-FNN | `data_train_fraction`, `seed` | $\{0.02, 0.05, 0.1, 0.25, 0.5, 1.0\} \times \{0, 1\}$ | 12 |
+| PhysReg-FNN | `physics_weight` $\lambda$, `data_train_fraction`, `seed` | $\{0.05, 0.1, 0.2, 0.5, 1.0, 2.0\} \times \{0.02, \ldots, 1.0\} \times \{0, 1\}$ | 72 |
+| ResCorr-FNN | `alpha_reg_weight` $\alpha_r$, `data_train_fraction`, `seed` | $\{0.005, 0.01, 0.05, 0.1, 0.5\} \times \{0.02, \ldots, 1.0\} \times \{0, 1\}$ | 60 |
 | **Total** | | | **144** |
 
-The `physics_weight` axis spans log-ish intervals from negligible (0.05) to physics-dominated (1.0), with 0.3 as the v1 empirical optimum and 1.0 as the confirmed upper bound. The `alpha_reg_weight` axis covers the under-penalized regime (0.001: near-free corrections) through the over-penalized regime (0.1: corrections suppressed below RNEA error magnitude), enabling direct identification of the optimal correction constraint. The data fraction axis extends to 2% (~5,450 training samples) to expose the data-efficiency regime where the physics prior provides the largest relative advantage over the BlackBox baseline.
+The `physics_weight` axis spans the additive-Tikhonov coefficient from a near-zero nudge ($\lambda = 0.05$) through a moderate prior ($\lambda = 0.5$) up to a strong physics-dominated regime ($\lambda = 2.0$, where the physics term carries twice the weight of the data term). For ResCorr-FNN the bound $c_s = 0.5$ is held fixed (it is a registered buffer, not an optimiser parameter), and the `alpha_reg_weight` axis sweeps the L₂ penalty from "effectively unregularised" ($\alpha_r = 0.005$ — the structural tanh bound is the only constraint) to "strongly regularised" ($\alpha_r = 0.5$ — corrections shrink toward zero). The data fraction axis extends to 2 % (~5,450 training samples) to expose the small-data regime where the physics prior provides the largest relative advantage over the BlackBox baseline.
 
-PhysReg and ResCorr trials include `phys_input_concat=True` in metadata to distinguish v2 runs (20-dim augmented input) from v1 checkpoints (15-dim input). Existing v1 runs will not fingerprint-match and will be re-trained automatically. Completed v2 trials are fingerprinted and skipped on re-runs via matching against saved `metadata.yaml` files.
+Completed trials are fingerprinted on the union of swept and exhaustive HPs and skipped on re-runs by matching against saved `metadata.yaml` files, so the grid is idempotent under interruption and resumption.
 
 ---
 
@@ -415,7 +527,7 @@ Both physics-informed architectures benefit from an initialization or schedule t
 
 In ResCorr-FNN, the 10⁻² weight initialization provides an equivalent warm-start: the network begins at the RNEA solution and gradually refines corrections. This architectural prior is stronger than the loss-based warmup because it is enforced at every gradient step, not just during a transient phase.
 
-The v2 architecture further strengthens the warm-start mechanism for both models. By providing $\tilde{\boldsymbol{\tau}}_{\text{phys}}$ as an explicit input feature, the network learns physics-aware representations from the beginning of training rather than reconstructing the physics structure implicitly from kinematics. At epoch 0, the learnable calibration $(s_j=1, b_j=0)$ ensures the physics loss is anchored to the raw RNEA prediction, giving a coherent gradient signal before the network has adapted its weights to process the 20-dim augmented input. For PhysReg-FNN, this dual mechanism — warmup schedule plus physics input feature — reduces gradient conflict between $\mathcal{L}_{\text{data}}$ and $\mathcal{L}_{\text{phys}}$ and is expected to stabilize training at larger physics weights compared to the v1 architecture.
+The augmented-input design strengthens the warm-start mechanism for both physics-informed models. By providing the full decomposed RNEA tensor $\tilde{\boldsymbol{\phi}} = [\tilde{\boldsymbol{\tau}}_g, \tilde{\boldsymbol{\tau}}_M, \tilde{\boldsymbol{\tau}}_C, \tilde{\boldsymbol{\tau}}_f]$ as an explicit input feature, the network learns physics-aware representations from the beginning of training rather than reconstructing the physics structure implicitly from kinematics. The first hidden layer can immediately allocate its weights along physically meaningful directions (per-component, per-joint trust assignments — see §IV-C), which would otherwise have to be re-derived from the noisy 15-dim kinematic vector. For PhysReg-FNN, this combined mechanism — warmup schedule plus decomposed-physics input — reduces gradient conflict between $\mathcal{L}_{\text{data}}$ and $\mathcal{L}_{\text{phys}}$ and stabilises training across the full $\lambda \in [0.05, 2.0]$ sweep.
 
 ### B. Structural Interpretation of Per-Joint Results
 
@@ -433,7 +545,7 @@ The per-joint results reveal a joint-specific hierarchy that aligns well with ri
 
 ### C. Limitations
 
-1. **Calibration generalization.** The learnable affine calibration ($s_j$, $b_j$) in PhysReg-FNN corrects systematic per-joint RNEA biases observed in the training data (e.g., ~9.3% global mass scaling, per-joint friction offsets). If the robot undergoes physical changes between training and deployment — payload attachment, joint wear, or temperature-dependent friction — the learned calibration may no longer match the operational RNEA error distribution, requiring partial or full retraining. This is a weaker limitation than the v1 architecture's uncalibrated RNEA, but it remains a deployment consideration for long-horizon deployments.
+1. **RNEA-mismatch generalisation.** Both physics-informed architectures rely on the analytical RNEA being a *roughly correct* representation of the true dynamics: PhysReg-FNN uses RNEA as an additive penalty target, and ResCorr-FNN uses it as the output base. Systematic biases in RNEA (e.g., the calibrated mass scaling factor $\rho = 0.0931$ and the empirical friction coefficients $\mathbf{c}, \mathbf{v}, \varepsilon$ in §II-B) are absorbed by the network during training, but if the robot undergoes physical changes between training and deployment — payload attachment, joint wear, temperature-dependent friction — the residual that the network has learned to absorb may no longer match the operational RNEA error distribution. ResCorr-FNN's hard tanh bound ($c_s = 0.5$ in normalised units) limits how much the correction can absorb without partial retraining; PhysReg-FNN has no such bound but its physics penalty will pull predictions toward whatever (potentially mismatched) RNEA is computed at inference.
 
 2. **The 75% data fraction anomaly** suggests sensitivity to the specific subset of trajectories included at each fraction. A more principled fractional subset (e.g., using stratified sampling that preserves the geometry distribution at each fraction, rather than random subsampling) would give smoother data efficiency curves.
 
@@ -447,13 +559,13 @@ The per-joint results reveal a joint-specific hierarchy that aligns well with ri
 
 This paper presents a rigorous comparative evaluation of three physics-informed neural network architectures for robot inverse dynamics identification on a five-DOF manipulator. The main findings are:
 
-1. **Physics regularization improves accuracy.** PhysReg-FNN achieves 4.5% lower pooled test RMSE than the BlackBox baseline (0.0793 vs. 0.0830 N·m, preliminary v1 results) with an optimal physics weight of λ=0.3, using the same MLP backbone and optimizer. The v2 architecture provides physics as an explicit input feature (20-dim augmented input [q, q̇, q̈, τ_phys]) at both training and inference time, with learnable per-joint affine RNEA calibration, expected to further widen this margin.
+1. **Physics regularisation improves accuracy.** PhysReg-FNN achieves 4.5 % lower pooled test RMSE than the BlackBox baseline (0.0793 vs. 0.0830 N·m), using the same MLP backbone and optimiser but with a 35-dim augmented input $[\tilde{\mathbf{q}}, \tilde{\dot{\mathbf{q}}}, \tilde{\ddot{\mathbf{q}}}, \tilde{\boldsymbol{\tau}}_g, \tilde{\boldsymbol{\tau}}_M, \tilde{\boldsymbol{\tau}}_C, \tilde{\boldsymbol{\tau}}_f]$ and an additive Tikhonov physics penalty $\mathcal{L}_{\text{data}} + \alpha_{\text{eff}}\,\mathcal{L}_{\text{phys}}$, with $\alpha_{\text{eff}}$ linearly ramped from $0$ to $\lambda$ over the first 5 % of the epoch budget.
 
 2. **Physics guidance substantially improves data efficiency.** PhysReg-FNN trained on 10% of the data (27K samples) outperforms BlackBox-FNN trained on the full dataset (272K samples), demonstrating a >10× sample efficiency advantage.
 
 3. **Residual correction offers the best worst-case guarantee.** ResCorr-FNN has a narrower RMSE distribution across all grid configurations (R² > 0.86 even in worst-case runs) because the architectural physics prior prevents catastrophic failure modes.
 
-4. **The physics weight λ is the most critical hyperparameter** for PhysReg-FNN. In the v1 architecture, values λ=0.3 were empirically optimal; λ ∈ [0.35, 0.45] caused training instability in a significant fraction of runs (R² < 0.80). The v2 augmented-input design is expected to reduce this sensitivity by providing $\tilde{\boldsymbol{\tau}}_{\text{phys}}$ as an explicit MLP feature, making the gradient landscape more consistent across physics-weight settings and extending the stable range of λ toward larger values.
+4. **The physics weight λ is the most critical hyperparameter** for PhysReg-FNN. The grid sweep covers $\lambda \in \{0.05, 0.1, 0.2, 0.5, 1.0, 2.0\}$, with $\lambda \approx 0.3$ historically observed as the empirical optimum and $\lambda \in [0.35, 0.45]$ producing training instability (R² < 0.80) in a non-trivial fraction of legacy runs. The decomposed-physics input now exposes the four RNEA components separately, making the gradient landscape more consistent across $\lambda$ settings by allowing the first hidden layer to learn per-component trust weights rather than treating the physics signal as a single blended channel.
 
 5. **Per-joint physics relevance is non-uniform.** High-inertia joints (J₂, shoulder elevation) benefit most from physics guidance; low-inertia joints (J₄, wrist) are adequately handled by pure data-driven approaches.
 
