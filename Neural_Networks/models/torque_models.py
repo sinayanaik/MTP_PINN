@@ -90,28 +90,34 @@ class BlackBoxFNN(nn.Module):
 
 
 class PhysicsRegularizedFNN(nn.Module):
-    """MLP: [q, qd, qdd, τ_phys_sum] → τ̂, with learnable per-joint RNEA calibration in loss."""
+    """MLP: [q, qd, qdd, τ_g, τ_M, τ_C, τ_f] → τ̂.
+
+    Uses the full decomposed RNEA output (4·J features) so the network can
+    learn per-component trust weights through its first layer, rather than
+    collapsing the physics to a single sum and losing structural information.
+    """
 
     def __init__(
         self,
         n_joints: int = ACTIVE_JOINTS,
         hidden_layers: list[int] | None = None,
-        dropout: float = 0.1,
+        dropout: float = 0.2,
         activation: str = "silu",
     ):
         super().__init__()
         self.n_joints = n_joints
         if hidden_layers is None:
-            hidden_layers = [256, 512, 256]
+            hidden_layers = [128, 256, 128]
         self.hparams = {
             "n_joints": n_joints,
             "hidden_layers": list(hidden_layers),
             "dropout": dropout,
             "activation": activation,
+            "in_dim_physics": "decomposed_7J",
         }
-        # Input is kinematics (3·J) + normalised RNEA sum (J) = 4·J
+        # Input is kinematics (3·J) + full decomposed RNEA (4·J) = 7·J
         self.net = build_mlp(
-            in_dim=n_joints * 4,
+            in_dim=n_joints * 7,
             hidden_layers=hidden_layers,
             out_dim=n_joints,
             activation=activation,
@@ -122,42 +128,46 @@ class PhysicsRegularizedFNN(nn.Module):
                 nn.init.xavier_normal_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-        # Learnable affine calibration applied to τ_ref inside the physics loss.
-        # Initialised to identity so epoch-0 behaviour is unchanged.
-        self.cal_scale = nn.Parameter(torch.ones(n_joints))
-        self.cal_bias  = nn.Parameter(torch.zeros(n_joints))
 
     def forward(self, features: torch.Tensor, physics: torch.Tensor) -> torch.Tensor:
-        tau_phys = reduce_physics_to_total(physics, self.n_joints)
-        return self.net(torch.cat([features, tau_phys], dim=-1))
+        # features: (..., 3J)   physics: (..., 4J) decomposed   → cat: (..., 7J)
+        return self.net(torch.cat([features, physics], dim=-1))
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
 class ResidualCorrectionFNN(nn.Module):
-    """τ̂ = τ_phys + Δ([q, qd, qdd, τ_phys_sum]). Correction net sees the physics estimate."""
+    """τ̂ = τ_phys + correction_scale * tanh(net([q, qd, qdd, τ_g, τ_M, τ_C, τ_f])).
+
+    The tanh-bounded correction is the key structural constraint: it cannot
+    exceed ±correction_scale in normalised units, preventing the network from
+    overriding the physics prediction and memorising training data.
+    """
 
     def __init__(
         self,
         n_joints: int = ACTIVE_JOINTS,
         hidden_layers: list[int] | None = None,
-        dropout: float = 0.1,
+        dropout: float = 0.2,
         activation: str = "silu",
+        correction_scale: float = 0.5,
     ):
         super().__init__()
         self.n_joints = n_joints
         if hidden_layers is None:
-            hidden_layers = [256, 512, 256]
+            hidden_layers = [128, 256, 128]
         self.hparams = {
             "n_joints": n_joints,
             "hidden_layers": list(hidden_layers),
             "dropout": dropout,
             "activation": activation,
+            "correction_scale": correction_scale,
+            "in_dim_physics": "decomposed_7J",
         }
-        # Input is kinematics (3·J) + normalised RNEA sum (J) = 4·J
+        # Input is kinematics (3·J) + full decomposed RNEA (4·J) = 7·J
         self.net = build_mlp(
-            in_dim=n_joints * 4,
+            in_dim=n_joints * 7,
             hidden_layers=hidden_layers,
             out_dim=n_joints,
             activation=activation,
@@ -171,18 +181,22 @@ class ResidualCorrectionFNN(nn.Module):
                     nn.init.zeros_(m.bias)
                 last_linear = m
         # Warm-start: output layer initialised near-zero so Δ ≈ 0 at epoch 0.
+        # tanh(~0) ≈ 0, so the warm-start is preserved through the tanh bound.
         if last_linear is not None:
             with torch.no_grad():
                 last_linear.weight.mul_(1e-2)
                 if last_linear.bias is not None:
                     last_linear.bias.mul_(1e-2)
+        # Fixed bound on correction magnitude — not learnable (hard structural prior).
+        self.register_buffer("correction_scale", torch.tensor(correction_scale, dtype=torch.float32))
 
     def forward(self, features: torch.Tensor, physics: torch.Tensor | None = None) -> torch.Tensor:
         if physics is None:
             raise ValueError("ResidualCorrectionFNN requires physics (decomposed τ) from the loader.")
-        tau_phys = reduce_physics_to_total(physics, self.n_joints)
-        feat_aug = torch.cat([features, tau_phys], dim=-1)
-        delta = self.net(feat_aug)
+        tau_phys = reduce_physics_to_total(physics, self.n_joints)   # (..., J)
+        feat_aug = torch.cat([features, physics], dim=-1)            # (..., 7J)
+        raw_delta = self.net(feat_aug)                               # (..., J)
+        delta = self.correction_scale * torch.tanh(raw_delta)        # bounded in (-cs, +cs)
         return tau_phys + delta
 
     def count_parameters(self) -> int:

@@ -64,16 +64,16 @@ DEFAULT_EXHAUSTIVE_PLAIN: dict[str, Any] = {
     "epochs": 500,
     "learning_rate": 3e-4,
     "lr_scheduler": "warmup_cosine",
-    "weight_decay": 5e-3,
-    "dropout": 0.1,
+    "weight_decay": 5e-2,
+    "dropout": 0.2,
     "activation": "silu",
-    "hidden_layers": [256, 512, 256],
+    "hidden_layers": [128, 256, 128],
     "early_stopping": True,
     "early_stop_metric": "val_rmse",
     "patience": 60,
     "min_delta": 1e-4,
-    "grad_clip_norm": 5.0,
-    "feature_noise_std": 0.02,
+    "grad_clip_norm": 1.0,
+    "feature_noise_std": 0.05,
     "data_train_fraction": 1.0,
     "data_train_seed": 0,
     "stride": 1,
@@ -91,7 +91,8 @@ DEFAULT_EXHAUSTIVE_PHYSICS_REG = {
 
 DEFAULT_EXHAUSTIVE_RESIDUAL = {
     **DEFAULT_EXHAUSTIVE_PLAIN,
-    "alpha_reg_weight": 0.01,
+    "alpha_reg_weight": 0.05,
+    "correction_scale": 0.5,
 }
 
 RUN_ID_KEYS_PLAIN: list[tuple[str, str]] = [
@@ -123,8 +124,8 @@ def _loss_mse(tau_hat: torch.Tensor, target: torch.Tensor, joint_weights: torch.
 def _make_model_plain(device: torch.device, hp: dict[str, Any]) -> nn.Module:
     return BlackBoxFNN(
         n_joints=ACTIVE_JOINTS,
-        hidden_layers=list(hp.get("hidden_layers", [256, 512, 256])),
-        dropout=float(hp.get("dropout", 0.1)),
+        hidden_layers=list(hp.get("hidden_layers", [128, 256, 128])),
+        dropout=float(hp.get("dropout", 0.2)),
         activation=str(hp.get("activation", "silu")),
     ).to(device)
 
@@ -217,8 +218,8 @@ def _eval_epoch_plain(model: nn.Module, loader, device: torch.device) -> tuple[f
 def _make_model_physics_reg(device: torch.device, hp: dict[str, Any]) -> nn.Module:
     return PhysicsRegularizedFNN(
         n_joints=ACTIVE_JOINTS,
-        hidden_layers=list(hp.get("hidden_layers", [256, 512, 256])),
-        dropout=float(hp.get("dropout", 0.1)),
+        hidden_layers=list(hp.get("hidden_layers", [128, 256, 128])),
+        dropout=float(hp.get("dropout", 0.2)),
         activation=str(hp.get("activation", "silu")),
     ).to(device)
 
@@ -248,15 +249,10 @@ def _train_epoch_physics_reg(
     epochs_max = max(1, int(hp.get("epochs", 500)))
     warmup_ep = max(1, int(float(hp.get("physics_warmup_fraction", 0.05)) * epochs_max))
     pw = float(hp.get("physics_weight", 0.1))
-    # STRICT INVARIANT: PhysReg blends data and physics with weights summing to
-    # exactly 1 (linear combination), and physics_weight is bounded above at 0.8
-    # so the data signal is always at least 20% of the objective.  Both
-    # invariants are validated up-front to fail loud if the grid is misconfigured.
-    if not (0.0 <= pw <= 0.8):
-        raise ValueError(
-            f"physics_weight must lie in [0.0, 0.8] (got {pw}). The blended "
-            f"loss is (1-α)·L_data + α·L_phys; values >0.8 starve the data term."
-        )
+    if pw < 0.0:
+        raise ValueError(f"physics_weight must be >= 0.0 (got {pw}).")
+    # Additive penalty coefficient — ramps from 0 → pw over warmup.
+    # Loss = L_data + alpha_eff * L_phys (Tikhonov form: data always fully weighted).
     alpha_eff = pw * min(1.0, float(epoch) / float(warmup_ep))
     optimizer.zero_grad(set_to_none=True)
     for _batch_idx, (features, target, physics) in enumerate(loader):
@@ -268,11 +264,11 @@ def _train_epoch_physics_reg(
         with torch.autocast(device_type=device.type, enabled=use_amp):
             tau_hat = model(features, physics)
             tau_ref = reduce_physics_to_total(physics, model.n_joints)
-            # Learnable per-joint affine calibration corrects systematic RNEA bias.
-            tau_ref_cal = model.cal_scale * tau_ref + model.cal_bias
             l_data = _loss_mse(tau_hat, target, _jw)
-            l_phys = _loss_mse(tau_hat, tau_ref_cal, _jw)
-            loss = (1.0 - alpha_eff) * l_data + alpha_eff * l_phys
+            l_phys = _loss_mse(tau_hat, tau_ref, _jw)
+            # Additive Tikhonov penalty: data loss is always fully weighted;
+            # physics acts as a regulariser pulling predictions toward RNEA.
+            loss = l_data + alpha_eff * l_phys
         if scaler is not None:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -295,7 +291,7 @@ def _train_epoch_physics_reg(
             sse_per_joint = _accumulate_sse(sse_per_joint, (d * d).sum(dim=0).cpu().numpy())
             n_samples += int(d.shape[0])
             total_loss_data_unw += float(F.mse_loss(tau_hat.detach(), target).item())
-        del tau_hat, loss, d, l_data, l_phys, tau_ref, tau_ref_cal
+        del tau_hat, loss, d, l_data, l_phys, tau_ref
     return TrainEpochMetrics(
         loss_total=total_loss / n_batches,
         loss_data_unw=total_loss_data_unw / n_batches,
@@ -307,6 +303,7 @@ def _train_epoch_physics_reg(
             "l_phys_jw": total_l_phys_jw / n_batches,
             "alpha_eff": float(alpha_eff),
             "physics_weight": float(pw),
+            "loss_form": "additive",
         },
     )
 
@@ -340,9 +337,10 @@ def _eval_epoch_physics_reg(
 def _make_model_residual(device: torch.device, hp: dict[str, Any]) -> nn.Module:
     return ResidualCorrectionFNN(
         n_joints=ACTIVE_JOINTS,
-        hidden_layers=list(hp.get("hidden_layers", [256, 512, 256])),
-        dropout=float(hp.get("dropout", 0.1)),
+        hidden_layers=list(hp.get("hidden_layers", [128, 256, 128])),
+        dropout=float(hp.get("dropout", 0.2)),
         activation=str(hp.get("activation", "silu")),
+        correction_scale=float(hp.get("correction_scale", 0.5)),
     ).to(device)
 
 
@@ -379,9 +377,10 @@ def _train_epoch_residual(
             features = features + torch.randn_like(features) * float(hp["feature_noise_std"])
         with torch.autocast(device_type=device.type, enabled=use_amp):
             tau_phys = reduce_physics_to_total(physics, model.n_joints)
-            feat_aug = torch.cat([features, tau_phys], dim=-1)
-            delta = model.net(feat_aug)
-            tau_hat = tau_phys + delta
+            # model.forward handles feat_aug construction and tanh bounding.
+            # Extract bounded delta from the output for L2 regularisation.
+            tau_hat = model(features, physics)
+            delta = tau_hat - tau_phys
             loss = _loss_mse(tau_hat, target, _jw) + ar * (delta**2).mean()
         with torch.no_grad():
             delta_abs_sum += float(delta.detach().abs().sum().item())
@@ -407,7 +406,7 @@ def _train_epoch_residual(
             sse_per_joint = _accumulate_sse(sse_per_joint, (d * d).sum(dim=0).cpu().numpy())
             n_samples += int(d.shape[0])
             total_loss_data_unw += float(F.mse_loss(tau_hat.detach(), target).item())
-        del tau_hat, loss, d, delta, tau_phys
+        del tau_hat, loss, d, delta, tau_phys  # no feat_aug (now inside model.forward)
     delta_ratio: float | None = None
     if delta_denom > 0 and tau_phys_abs_sum > 0.0:
         delta_ratio = (delta_abs_sum / delta_denom) / ((tau_phys_abs_sum / delta_denom) + 1e-12)

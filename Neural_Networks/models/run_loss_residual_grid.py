@@ -120,24 +120,23 @@ MEM_POLL_INTERVAL: float = 5.0
 
 FIXED_HP: dict[str, Any] = {
     # Architecture (constant — we're comparing *variants*, not sizes).
-    "hidden_layers":           [256, 512, 256],
-    "dropout":                 0.1,
+    # Smaller model (128-256-128 ≈ 95K params vs 267K) reduces overfitting
+    # with typical training set sizes of 8K–50K samples.
+    "hidden_layers":           [128, 256, 128],
+    "dropout":                 0.2,
     "activation":              "gelu",
 
     # Optimisation.
     "learning_rate":           3e-4,
-    "weight_decay":            1e-2,
+    "weight_decay":            5e-2,
     "batch_size":              BATCH_SIZE,
     "lr_scheduler":            "warmup_cosine",
-    "grad_clip_norm":          5.0,
-    "feature_noise_std":       0.02,
+    "grad_clip_norm":          1.0,
+    "feature_noise_std":       0.05,
 
     # Training length / early stopping.
-    # Higher ceiling + patience so we can definitively say when each model plateaus.
-    # With the frozen-cal PhysReg and widened Residual sweep, a thorough early-stop
-    # is the guardrail — we want convergence, not time-boxing.
     "epochs":                  3000,
-    "patience":                200,
+    "patience":                150,
     "min_delta":               1e-4,
     "early_stopping":          True,
     "early_stop_metric":       "val_rmse",
@@ -155,6 +154,10 @@ FIXED_HP: dict[str, Any] = {
 
     # PhysReg-only HPs (ignored by other strategies).
     "physics_warmup_fraction": 0.05,
+
+    # ResidualCorrectionFNN: fixed tanh bound on correction magnitude.
+    # Limits corrections to ±correction_scale in normalised torque units.
+    "correction_scale":        0.5,
 }
 
 # ============================================================================
@@ -178,21 +181,24 @@ GRID_FNN: dict[str, list] = {
 }
 
 # Physics-regularized: physics_weight × data × seed.  6 × 6 × 2 = 72 combos.
-# pw=0.05 → negligible physics (near-BlackBox sanity check).
-# pw=0.3  → empirically optimal from v1.
-# pw=1.0  → physics-dominated (expected degradation; upper bound on λ).
+# Loss = L_data + pw * L_phys  (additive Tikhonov — pw is the penalty coefficient).
+# pw=0.05 → weak physics nudge (near-BlackBox sanity check).
+# pw=0.5  → moderate; expect RMSE improvement vs BlackBox for all data fractions.
+# pw=2.0  → strong prior; network predictions tightly constrained to physics.
 GRID_PHYSREG: dict[str, list] = {
-    "physics_weight":      [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.65, 0.7, 0.8],
+    "physics_weight":      [0.05, 0.1, 0.2, 0.5, 1.0, 2.0],
     "data_train_fraction": _DATA_FRACS,
     "seed":                _SEEDS,
 }
 
 # Physics-residual: alpha_reg × data × seed.  5 × 6 × 2 = 60 combos.
-# alpha=0.001 → near-free Δ (maximum correction amplitude).
-# alpha=0.01  → expected optimal (RNEA error ~0.10 N·m).
-# alpha=0.1   → strongly over-penalized; reproduces v1-level degradation.
+# tanh bounding (correction_scale=0.5) provides hard structural constraint;
+# alpha_reg is the additional L2 penalty on the bounded correction magnitude.
+# alpha=0.005 → minimal additional penalty (structural bound dominates).
+# alpha=0.1   → moderate L2 tightening.
+# alpha=0.5   → strong L2; expect near-physics predictions.
 GRID_RESIDUAL: dict[str, list] = {
-    "alpha_reg_weight":    [0.001, 0.005, 0.01, 0.05, 0.1],
+    "alpha_reg_weight":    [0.005, 0.01, 0.05, 0.1, 0.5],
     "data_train_fraction": _DATA_FRACS,
     "seed":                _SEEDS,
 }
@@ -246,7 +252,7 @@ def _build_trials() -> list[dict[str, Any]]:
             # checkpoints are incompatible.  This key is NOT in _SKIP_KEYS so
             # existing metadata without it won't fingerprint-match → re-trained.
             if arch in ("physreg", "residual"):
-                hp["phys_input_concat"] = True
+                hp["phys_input_concat"] = "7J"  # 7J input; old "True" runs (4J) must re-run
             trials.append({
                 "arch":        arch,
                 "model_type":  model_type,
@@ -346,14 +352,15 @@ def _print_combo_table(trials: list[dict[str, Any]]) -> None:
 # ── RESOURCE QUERIES (live, dynamic) ─────────────────────────────────────────
 # ============================================================================
 
-# Dims mirror loader.py: 15 input features, 5 output joints.
-_N_IN  = 15
-_N_OUT = 5
+# Input dims: FNN uses kinematics only (3J=15), physics models use 7J=35.
+_N_IN      = 15   # BlackBoxFNN: [q, qd, qdd]
+_N_IN_PHYS = 35   # PhysicsRegularizedFNN / ResidualCorrectionFNN: [q, qd, qdd, τ_g, τ_M, τ_C, τ_f]
+_N_OUT     = 5
 
 
-def _count_params(hidden_layers: list[int], extra: int = 0) -> int:
+def _count_params(hidden_layers: list[int], n_in: int = _N_IN, extra: int = 0) -> int:
     """Match :func:`torque_models.build_mlp` exactly (Linear + LayerNorm)."""
-    dims = [_N_IN] + list(hidden_layers) + [_N_OUT]
+    dims = [n_in] + list(hidden_layers) + [_N_OUT]
     total = 0
     for i, (a, b) in enumerate(zip(dims, dims[1:])):
         total += a * b + b          # Linear(a→b): weight + bias
@@ -372,17 +379,17 @@ _FRAMEWORK_VRAM_OVERHEAD_GB: float = 0.15
 
 def _estimate_trial_mem(hp: dict, arch: str, cuda_ctx_gb: float) -> tuple[float, float]:
     """Conservative (vram_gb, ram_gb) estimate for one trial's own HP."""
-    hl = hp.get("hidden_layers", [256, 512, 256])
+    hl = hp.get("hidden_layers", [128, 256, 128])
     bs = int(hp.get("batch_size", 1024))
-    extra = 2 * _N_OUT if arch == "physreg" else 0
-    P = _count_params(hl, extra=extra)
+    n_in = _N_IN_PHYS if arch in ("physreg", "residual") else _N_IN
+    P = _count_params(hl, n_in=n_in, extra=0)
 
     B = 4                                                    # float32 bytes
     model_b = P * B
     grad_b  = P * B
     adam_b  = P * 2 * B                                      # exp_avg + exp_avg_sq
     act_b   = sum(hl) * bs * B * 2                           # fwd + bwd activations
-    io_b    = bs * (_N_IN + _N_OUT) * B
+    io_b    = bs * (n_in + _N_OUT) * B
 
     raw = (model_b + grad_b + adam_b + act_b + io_b) * 1.5   # allocator headroom
     vram_gb = raw / 1e9 + cuda_ctx_gb + _FRAMEWORK_VRAM_OVERHEAD_GB
@@ -405,43 +412,62 @@ def _query_cuda_available() -> bool:
         return False
 
 
-def _query_free_vram_gb() -> float:
-    """Free VRAM on GPU 0, in GB.  Prefers ``nvidia-smi`` to avoid creating a
-    CUDA context in the main process; falls back to :func:`torch.cuda.mem_get_info`."""
+def _query_n_gpus() -> int:
+    """Count CUDA-visible GPUs reported by nvidia-smi."""
     try:
         import subprocess
         out = subprocess.check_output(
-            ["nvidia-smi",
-             "--query-gpu=memory.free",
-             "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
             timeout=5,
-        ).decode().strip().split("\n")[0]
-        return float(out.strip()) / 1024.0      # MiB → GB
+        ).decode().strip()
+        return max(1, len([ln for ln in out.splitlines() if ln.strip()]))
+    except Exception:
+        return 1
+
+
+def _query_free_vram_gb_per_gpu() -> list[float]:
+    """Free VRAM per GPU in GB, indexed by GPU ordinal."""
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            timeout=5,
+        ).decode().strip()
+        return [float(ln.strip()) / 1024.0 for ln in out.splitlines() if ln.strip()]
     except Exception:
         try:
             import torch
             if torch.cuda.is_available():
-                return torch.cuda.mem_get_info(0)[0] / 1e9
+                return [torch.cuda.mem_get_info(i)[0] / 1e9
+                        for i in range(torch.cuda.device_count())]
         except Exception:
             pass
-        return 0.0
+        return [0.0]
+
+
+def _query_free_vram_gb() -> float:
+    """Total free VRAM across all GPUs in GB."""
+    return sum(_query_free_vram_gb_per_gpu())
 
 
 def _query_total_vram_gb() -> float:
+    """Total VRAM across all GPUs in GB."""
     try:
         import subprocess
         out = subprocess.check_output(
-            ["nvidia-smi",
-             "--query-gpu=memory.total",
-             "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
             timeout=5,
-        ).decode().strip().split("\n")[0]
-        return float(out.strip()) / 1024.0
+        ).decode().strip()
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        return sum(float(ln) / 1024.0 for ln in lines)
     except Exception:
         try:
             import torch
             if torch.cuda.is_available():
-                return torch.cuda.get_device_properties(0).total_memory / 1e9
+                return sum(
+                    torch.cuda.get_device_properties(i).total_memory / 1e9
+                    for i in range(torch.cuda.device_count())
+                )
         except Exception:
             pass
         return 0.0
@@ -620,7 +646,7 @@ def _run_sequential(
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
         torch.cuda.set_device(0)
-        os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+        os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0,1")  # expose both GPUs; pipeline uses cuda:0
         if env == "hpc":
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32        = True
@@ -748,9 +774,15 @@ def _run_sequential(
 
 _POOL_PROGRESS_QUEUE: "mp.Queue | None" = None
 _POOL_THREADS_PER_WORKER: int = 2
+_POOL_GPU_ID: int = 0
 
 
-def _pool_init(progress_queue: "mp.Queue", threads_per_worker: int, is_hpc: bool = False) -> None:
+def _pool_init(
+    progress_queue: "mp.Queue",
+    threads_per_worker: int,
+    gpu_ticket_q: "mp.Queue",
+    is_hpc: bool = False,
+) -> None:
     """Pool initializer: runs ONCE per worker lifetime (on spawn and after each
     ``maxtasksperchild`` recycle).
 
@@ -759,9 +791,12 @@ def _pool_init(progress_queue: "mp.Queue", threads_per_worker: int, is_hpc: bool
     the first one in each worker.  Doing it here — exactly once — keeps the
     worker usable for its full ``maxtasksperchild`` budget.
     """
-    global _POOL_PROGRESS_QUEUE, _POOL_THREADS_PER_WORKER
+    global _POOL_PROGRESS_QUEUE, _POOL_THREADS_PER_WORKER, _POOL_GPU_ID
     _POOL_PROGRESS_QUEUE = progress_queue
     _POOL_THREADS_PER_WORKER = int(threads_per_worker)
+    # Each worker pops its unique GPU assignment from the ticket queue.
+    # Workers are distributed round-robin: slot 0→GPU 0, slot 1→GPU 1, etc.
+    _POOL_GPU_ID = int(gpu_ticket_q.get())
 
     # Silence worker-process logging noise.
     warnings.filterwarnings("ignore", category=UserWarning, module="torch")
@@ -775,7 +810,7 @@ def _pool_init(progress_queue: "mp.Queue", threads_per_worker: int, is_hpc: bool
     # Env vars must be set before torch import. Main process does not touch
     # CUDA so the worker inherits a clean slate.
     os.environ["NN_NUM_WORKERS"] = "0"      # daemonic workers can't spawn children
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(_POOL_GPU_ID)
 
     import torch
     torch.set_num_threads(int(threads_per_worker))
@@ -1444,11 +1479,17 @@ def _run_parallel_dynamic(
 
     # ── Pool + dashboard lifecycle ──────────────────────────────────────────
     maxtasks = _maxtasks_for_env(env)   # hpc=64, workstation=16, laptop=4
+    # Build a GPU ticket queue: each worker pops its GPU ID on init.
+    # Workers are distributed round-robin across available GPUs.
+    n_gpus = _query_n_gpus()
+    gpu_ticket_q: mp.Queue = ctx.Queue()
+    for i in range(pool_size):
+        gpu_ticket_q.put(i % n_gpus)
     pool = ctx.Pool(
         processes=pool_size,
         maxtasksperchild=maxtasks,
         initializer=_pool_init,
-        initargs=(progress_q, threads_per_worker, is_hpc),
+        initargs=(progress_q, threads_per_worker, gpu_ticket_q, is_hpc),
     )
 
     live_cm = None
