@@ -18,11 +18,32 @@ def setup_plot_style(palette: str = "tab10") -> None:
         "savefig.dpi": 300,
         "savefig.bbox": "tight",
         "figure.constrained_layout.use": False,
-        "axes.titlesize": 13,
-        "axes.labelsize": 12,
-        "xtick.labelsize": 11,
-        "ytick.labelsize": 11,
-        "legend.fontsize": 10,
+        # Title / label sizes and weights
+        "axes.titlesize": 14,
+        "axes.titleweight": "bold",
+        "axes.labelsize": 13,
+        "axes.labelweight": "bold",
+        # Axis frame
+        "axes.linewidth": 1.5,
+        # Tick sizes and widths
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "xtick.major.width": 1.2,
+        "ytick.major.width": 1.2,
+        "xtick.major.size": 5,
+        "ytick.major.size": 5,
+        "xtick.minor.size": 3,
+        "ytick.minor.size": 3,
+        # Lines and markers
+        "lines.linewidth": 2.0,
+        "lines.markersize": 7,
+        # Legend
+        "legend.fontsize": 11,
+        "legend.framealpha": 0.95,
+        "legend.edgecolor": "lightgray",
+        # Grid
+        "grid.alpha": 0.35,
+        "grid.linewidth": 0.8,
     })
 
 
@@ -37,5 +58,5 @@ def type_color_map(model_types: Iterable[str]) -> dict[str, tuple]:
 
 
 def panel_label(ax: "plt.Axes", letter: str, fontsize: float = 13.0) -> None:
-    ax.text(0.02, 0.97, f"({letter})", transform=ax.transAxes,
-            fontsize=fontsize, fontweight="bold", va="top", ha="left")
+    ax.text(0.02, 0.03, f"({letter})", transform=ax.transAxes,
+            fontsize=fontsize, fontweight="bold", va="bottom", ha="left")

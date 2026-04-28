@@ -42,21 +42,34 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
 
         c = type_colors.get(mtype, "steelblue")
 
+        handles_ax = []
         if tl:
-            ax.plot(ep[:len(tl)], tl, color=c, lw=2.0, label="Train Loss")
+            ln, = ax.plot(ep[:len(tl)], tl, color=c, lw=2.5, label="Train Loss")
+            handles_ax.append(ln)
             all_losses.extend(tl)
         if vl:
-            ax.plot(ep[:len(vl)], vl, color=c, lw=2.0, ls="--", alpha=0.8, label="Val Loss")
+            ln, = ax.plot(ep[:len(vl)], vl, color=c, lw=2.5, ls="--", alpha=0.8, label="Val Loss")
+            handles_ax.append(ln)
             all_losses.extend(vl)
         if best_ep > 0:
-            ax.axvline(best_ep, color="#CC0000", lw=1.2, ls=":", alpha=0.85,
-                       label=f"Best checkpoint (ep {best_ep})")
+            vl_ref = ax.axvline(best_ep, color="tab:red", lw=1.5, ls=":",
+                                alpha=0.85, label=f"Best ep {best_ep}")
+            handles_ax.append(vl_ref)
+
+        # Per-subplot legend at top-right
+        if handles_ax:
+            ax.legend(handles=handles_ax,
+                      loc="upper right", fontsize=10, framealpha=0.92,
+                      edgecolor="lightgray")
 
         letter = panel_letters[idx] if idx < len(panel_letters) else str(idx)
-        ax.set_title(f"({letter}) {arch_short_label(mtype)}", fontsize=13, fontweight="bold")
-        ax.set_xlabel("Epoch", fontsize=12)
-        ax.set_ylabel("MSE Loss", fontsize=12)
-        ax.grid(True, alpha=0.25)
+        ax.set_title(f"({letter}) {arch_short_label(mtype)}", fontsize=14, fontweight="bold")
+        ax.set_xlabel("Epoch", fontsize=13, fontweight="bold")
+        ax.set_ylabel("MSE Loss", fontsize=13, fontweight="bold")
+        ax.grid(True, alpha=0.3)
+        # Panel letter label at bottom-left
+        ax.text(0.02, 0.03, f"({letter})", transform=ax.transAxes,
+                fontsize=13, fontweight="bold", va="bottom", ha="left")
 
     finite_losses = [v for v in all_losses if np.isfinite(v)]
     if finite_losses:
@@ -65,19 +78,10 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
         for idx in range(n):
             axes_flat[idx].set_ylim(lo, hi)
 
-    handles, labels = axes_flat[0].get_legend_handles_labels()
-    seen: dict[str, Any] = {}
-    for h, l in zip(handles, labels):
-        if l not in seen:
-            seen[l] = h
-    if seen:
-        fig.legend(list(seen.values()), list(seen.keys()),
-                   loc="lower center", bbox_to_anchor=(0.5, 0.01),
-                   ncol=len(seen), fontsize=11, framealpha=0.95,
-                   edgecolor="#aaaaaa", borderpad=0.8)
-
     for idx in range(n, len(axes_flat)):
         axes_flat[idx].axis("off")
 
-    fig.tight_layout(rect=[0, 0.12, 1, 1])
-    save_fig(fig, output_dir / "fig1_training_dynamics.png")
+    fig.tight_layout()
+    save_fig(fig, output_dir / "fig1_training_dynamics.pdf")
+
+

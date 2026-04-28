@@ -26,8 +26,8 @@ def plot(
         return
 
     n_archs = len(arch_order)
-    fig_h = max(5.0, top_k * 0.52 + 2.0) * n_archs
-    fig, axes = plt.subplots(n_archs, 1, figsize=(22, fig_h))
+    fig_h = max(4.0, top_k * 0.42 + 1.8) * n_archs
+    fig, axes = plt.subplots(n_archs, 1, figsize=(20, fig_h))
     if n_archs == 1:
         axes = [axes]
 
@@ -79,25 +79,26 @@ def plot(
                        loc="center", cellLoc="center")
         tbl.auto_set_font_size(False)
         tbl.set_fontsize(10)
-        tbl.scale(1.0, 1.60)
+        tbl.scale(1.0, 1.45)
 
         for col_idx in range(len(col_headers)):
             cell = tbl[(0, col_idx)]
-            cell.set_facecolor("#2c4770")
-            cell.set_text_props(color="white", fontweight="bold")
+            cell.set_facecolor("steelblue")
+            cell.set_text_props(color="white", fontweight="bold", fontsize=10)
 
         for row_idx in range(1, len(recs) + 1):
-            bg = "#f4f7fb" if row_idx % 2 == 0 else "white"
+            bg = "aliceblue" if row_idx % 2 == 0 else "white"
             for col_idx in range(len(col_headers)):
                 tbl[(row_idx, col_idx)].set_facecolor(bg)
+                tbl[(row_idx, col_idx)].set_text_props(fontsize=10)
 
         if recs:
-            tbl[(1, 1)].set_text_props(fontweight="bold")
+            tbl[(1, 1)].set_text_props(fontweight="bold", fontsize=10)
 
         ax.set_title(
-            f"{arch_short_label(mtype)}  -  Top {min(top_k, len(recs))} of"
+            f"{arch_short_label(mtype)}  —  Top {min(top_k, len(recs))} of"
             f" {len(groups[mtype])} runs  (ranked by Test RMSE)",
-            fontsize=12, fontweight="bold", pad=10)
+            fontsize=13, fontweight="bold", pad=8)
 
-    fig.tight_layout(pad=1.0)
-    save_fig(fig, output_dir / "fig10_topk_leaderboard.png")
+    fig.tight_layout(pad=0.6)
+    save_fig(fig, output_dir / "fig5_topk_leaderboard.pdf")

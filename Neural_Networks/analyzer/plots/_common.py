@@ -16,10 +16,8 @@ logger = logging.getLogger(__name__)
 def save_fig(fig: "plt.Figure", path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     pdf_path = path.with_suffix(".pdf")
-    png_path = path.with_suffix(".png")
     fig.savefig(str(pdf_path), dpi=300, bbox_inches="tight")
-    fig.savefig(str(png_path), dpi=300, bbox_inches="tight")
-    logger.info("Saved: %s  +  %s", pdf_path, png_path)
+    logger.info("Saved: %s", pdf_path)
     plt.draw()
 
 

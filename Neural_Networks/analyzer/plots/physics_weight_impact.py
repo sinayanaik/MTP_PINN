@@ -48,9 +48,9 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
         logger.info("No physics_weight data found - skipping Fig 15.")
         return
 
-    _frac_cmap = plt.get_cmap("viridis")
+    _frac_cmap = plt.get_cmap("tab10")
     frac_colors = {
-        f: _frac_cmap(0.15 + 0.70 * i / max(len(all_frac) - 1, 1))
+        f: _frac_cmap(i % 10)
         for i, f in enumerate(all_frac)
     }
 
@@ -76,7 +76,7 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
             if len(xs) < 2:
                 continue
 
-            ax.plot(xs, means, color=c, lw=2.0, marker="D", markersize=7, zorder=4,
+            ax.plot(xs, means, color=c, lw=2.5, marker="D", markersize=7, zorder=4,
                     label=f"{int(round(frac * 100))}% data")
             ax.fill_between(xs,
                             [m - s for m, s in zip(means, stds)],
@@ -99,15 +99,15 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
             ax.plot(pooled_xs, pooled_means, color="black", lw=2.5, ls="--",
                     marker="s", markersize=8, zorder=5, label="All fractions (pooled)")
 
-        ax.set_xlabel("Physics Weight  (λ)", fontsize=12)
-        ax.set_ylabel(ylabel, fontsize=12)
-        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.set_xlabel("Physics Weight  (λ)", fontsize=13, fontweight="bold")
+        ax.set_ylabel(ylabel, fontsize=13, fontweight="bold")
+        ax.set_title(title, fontsize=14, fontweight="bold")
         ax.set_xticks(all_pw)
-        ax.set_xticklabels([str(p) for p in all_pw], fontsize=11)
+        ax.set_xticklabels([str(p) for p in all_pw], fontsize=12)
         ax.grid(True, axis="y", alpha=0.35)
 
     frac_handles = [
-        Line2D([0], [0], color=frac_colors[f], lw=2, marker="D", markersize=7,
+        Line2D([0], [0], color=frac_colors[f], lw=2.5, marker="D", markersize=7,
                label=f"{int(round(f * 100))}% data")
         for f in all_frac
     ]
@@ -116,6 +116,6 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
     fig.tight_layout(rect=[0, 0.10, 1, 1])
     fig.legend(handles=frac_handles + [pooled_handle],
                loc="lower center", bbox_to_anchor=(0.5, 0.02),
-               ncol=len(frac_handles) + 1, fontsize=10)
+               ncol=len(frac_handles) + 1, fontsize=11)
 
-    save_fig(fig, output_dir / "fig15_physics_weight_impact.png")
+    save_fig(fig, output_dir / "fig7_physics_weight_impact.pdf")
