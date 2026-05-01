@@ -311,7 +311,6 @@ def run_training(
         _corr_mags = _extras.get("correction_magnitudes")
         history["correction_magnitudes"].append(_corr_mags)
         val_loss, _val_pred, _val_tgt = job.strategy.eval_epoch(model, loaders["val"], device)
-        _val_rmse_unw = macro_rmse_numpy(_val_pred, _val_tgt, _val_trajectories)
         _val_pred_phys = _val_pred * _tau_std_val + _tau_mean_val
         _val_tgt_phys = _val_tgt * _tau_std_val + _tau_mean_val
         _val_rmse_phys = macro_rmse_numpy(_val_pred_phys, _val_tgt_phys, _val_trajectories)
@@ -322,24 +321,24 @@ def run_training(
         history["train_loss_obj"].append(train_loss_obj)
 
         # Duck-typed hook: if the model supports it, let it record the latest
-        # unnormalised val_rmse.  Used by EDR's adaptive phase-2 plateau detector.
+        # physical-units val_rmse. Used by EDR's adaptive phase-2 plateau detector.
         _model_target = model._orig_mod if hasattr(model, "_orig_mod") else model
         if hasattr(_model_target, "record_val_rmse"):
-            _model_target.record_val_rmse(_val_rmse_unw)
+            _model_target.record_val_rmse(_val_rmse_phys)
         if scheduler is not None:
             if isinstance(scheduler, ReduceLROnPlateau):
-                scheduler.step(val_loss if _early_metric == "val_loss" else _val_rmse_unw)
+                scheduler.step(val_loss if _early_metric == "val_loss" else _val_rmse_phys)
             elif onecycle_sched is None:
                 scheduler.step()
         if _early_metric == "val_loss":
             improved = val_loss < (best_val_loss_track - 1e-7)
         else:
-            improved = _val_rmse_unw < (best_val_rmse - _min_delta)
+            improved = _val_rmse_phys < (best_val_rmse - _min_delta)
         if improved:
             if _early_metric == "val_loss":
                 best_val_loss_track = val_loss
             best_val_loss = val_loss
-            best_val_rmse = _val_rmse_unw
+            best_val_rmse = _val_rmse_phys
             best_val_rmse_phys = _val_rmse_phys
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             best_epoch_num = int(epoch)

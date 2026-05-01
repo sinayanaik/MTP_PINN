@@ -3,8 +3,8 @@
 
 Models compared:
     * ``BlackBoxFNN``            — purely data-driven MLP baseline.
-    * ``PhysicsRegularizedFNN``  — MLP + learnable calibration on summed
-                                    analytical torque; blended data / physics loss.
+    * ``PhysicsRegularizedFNN``  — MLP on kinematics + decomposed RNEA terms,
+                                    with an additive physics-consistency loss.
     * ``ResidualCorrectionFNN``  — predicts Δ on top of τ_phys; magnitude-penalty.
 
 Research goal: does physics inductive bias beat the BlackBox baseline, and does
