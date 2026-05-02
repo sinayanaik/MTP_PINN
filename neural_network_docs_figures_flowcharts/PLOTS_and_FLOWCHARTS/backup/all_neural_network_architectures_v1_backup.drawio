@@ -1,0 +1,277 @@
+<mxfile host="Electron">
+  <diagram name="Architecture-Comparison" id="0">
+    <mxGraphModel dx="2039" dy="2638" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2200" pageHeight="1550" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=17;fontFamily=Helvetica;" value="&lt;b&gt;Physics-Informed Neural Networks for Robot Inverse Dynamics — Three-Architecture Comparison&lt;/b&gt;" vertex="1">
+          <mxGeometry height="36" width="2080" x="60" y="-50" as="geometry" />
+        </mxCell>
+        <mxCell id="sw_bb" parent="1" style="swimlane;startSize=46;fillColor=#f5f5f5;strokeColor=#555555;fontColor=#333333;fontSize=15;fontFamily=Helvetica;rounded=1;arcSize=3;" value="&lt;b&gt;(A) BlackBox-FNN&lt;/b&gt;" vertex="1">
+          <mxGeometry height="1310" width="660" x="20" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_sub" parent="sw_bb" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=12;fontFamily=Helvetica;fontStyle=2;" value="Pure data-driven regression — no physics" vertex="1">
+          <mxGeometry height="22" width="640" x="10" y="-35" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_inp" parent="sw_bb" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontFamily=Helvetica;verticalAlign=middle;" value="&lt;b&gt;Input&lt;/b&gt;: &amp;nbsp; x̃&lt;sub&gt;k&lt;/sub&gt; ∈ ℝ&lt;sup&gt;15&lt;/sup&gt;&lt;br&gt;[q, q̇, q̈] &amp;nbsp;(5 joints × position / velocity / acceleration)&lt;br&gt;Normalised to zero-mean, unit-variance (train stats)&lt;br&gt;Physics tensor &lt;i&gt;explicitly discarded&lt;/i&gt; (del physics)" vertex="1">
+          <mxGeometry height="90" width="620" x="20" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_mlp" parent="sw_bb" style="swimlane;startSize=34;fillColor=#f3eaff;strokeColor=#9673a6;fontSize=12;fontFamily=Helvetica;rounded=1;arcSize=4;" value="&lt;b&gt;MLP Backbone&lt;/b&gt; &amp;nbsp;[128, 256, 128] — shared architecture" vertex="1">
+          <mxGeometry height="296" width="620" x="20" y="140" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_l0" parent="bb_mlp" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#888888;fontSize=12;fontFamily=Helvetica;" value="Input dim: 15" vertex="1">
+          <mxGeometry height="30" width="250" x="185" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_l1" parent="bb_mlp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontFamily=Helvetica;" value="Linear(15→128) &amp;nbsp;+&amp;nbsp; LayerNorm &amp;nbsp;+&amp;nbsp; GELU &amp;nbsp;+&amp;nbsp; Dropout(p=0.2)" vertex="1">
+          <mxGeometry height="36" width="560" x="30" y="84" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_l2" parent="bb_mlp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c9b8e8;strokeColor=#7b5ea7;fontSize=12;fontFamily=Helvetica;" value="Linear(128→256) &amp;nbsp;+&amp;nbsp; LayerNorm &amp;nbsp;+&amp;nbsp; GELU &amp;nbsp;+&amp;nbsp; Dropout(p=0.2)" vertex="1">
+          <mxGeometry height="36" width="560" x="30" y="134" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_l3" parent="bb_mlp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontFamily=Helvetica;" value="Linear(256→128) &amp;nbsp;+&amp;nbsp; LayerNorm &amp;nbsp;+&amp;nbsp; GELU &amp;nbsp;+&amp;nbsp; Dropout(p=0.2)" vertex="1">
+          <mxGeometry height="36" width="560" x="30" y="184" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_lout" parent="bb_mlp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontFamily=Helvetica;" value="Linear(128→5) &amp;nbsp; [output head — no activation, no normalisation]" vertex="1">
+          <mxGeometry height="36" width="560" x="30" y="240" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_e1" edge="1" parent="bb_mlp" source="bb_l0" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#9673a6;strokeWidth=1.5;" target="bb_l1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_e2" edge="1" parent="bb_mlp" source="bb_l1" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#9673a6;strokeWidth=1.5;" target="bb_l2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_e3" edge="1" parent="bb_mlp" source="bb_l2" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#9673a6;strokeWidth=1.5;" target="bb_l3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_e4" edge="1" parent="bb_mlp" source="bb_l3" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#d79b00;strokeWidth=1.5;" target="bb_lout">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_fwd" parent="sw_bb" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Forward map:&lt;/b&gt; &amp;nbsp; τ̂ = fθ( x̃&lt;sub&gt;k&lt;/sub&gt; ) ∈ ℝ&lt;sup&gt;5&lt;/sup&gt;&lt;br&gt;fθ : ℝ&lt;sup&gt;15&lt;/sup&gt; → ℝ&lt;sup&gt;5&lt;/sup&gt; &amp;nbsp;|&amp;nbsp; Xavier-normal init &amp;nbsp;|&amp;nbsp; 69,637 params" vertex="1">
+          <mxGeometry height="66" width="620" x="20" y="456" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_loss" parent="sw_bb" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Training Loss&lt;/b&gt;&lt;br&gt;ℒ&lt;sub&gt;BB&lt;/sub&gt;(θ) = (1/N) ∑&lt;sub&gt;i,j&lt;/sub&gt; w&lt;sub&gt;j&lt;/sub&gt; ( τ̂&lt;sub&gt;j&lt;/sub&gt; − τ̃*&lt;sub&gt;j&lt;/sub&gt; )²&lt;br&gt;Joint weights: w = [1.0, &lt;b&gt;2.5&lt;/b&gt;, 1.0, 1.0, 1.0] &amp;nbsp;(J2 up-weighted for heavy-tailed dist.)&lt;br&gt;Gradient: data-only, no physics term" vertex="1">
+          <mxGeometry height="116" width="620" x="20" y="542" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_sweep" parent="sw_bb" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Hyperparameter sweep:&lt;/b&gt; 12 runs (6 data fracs × 2 seeds)&lt;br&gt;Data fracs f ∈ {1.0, 0.5, 0.25, 0.10, 0.05, 0.02}" vertex="1">
+          <mxGeometry height="66" width="620" x="20" y="678" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_res" parent="sw_bb" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontFamily=Helvetica;fontStyle=1;" value="&lt;b&gt;Best pooled test RMSE: &amp;nbsp;0.1057 N·m&lt;/b&gt; &amp;nbsp;(R² = 0.893)&lt;br&gt;Optimal at f = 1.0 &amp;nbsp;|&amp;nbsp; Needs full training data" vertex="1">
+          <mxGeometry height="66" width="620" x="20" y="764" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_inf" parent="sw_bb" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#888888;fontSize=11;fontFamily=Helvetica;fontStyle=2;" value="&lt;b&gt;Inference:&lt;/b&gt; requires kinematics only — no RNEA call&lt;br&gt;Unbounded output — no worst-case guarantee vs. physics" vertex="1">
+          <mxGeometry height="56" width="620" x="20" y="850" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_table" parent="sw_bb" style="text;html=1;strokeColor=#aaaaaa;fillColor=#fafafa;align=left;verticalAlign=top;spacingLeft=4;fontSize=11;fontFamily=Helvetica;" value="&lt;table style=&#39;border-collapse:collapse;width:100%;font-size:11px;font-family:Helvetica;&#39;&gt;&lt;tr style=&#39;background:#e8e8e8;&#39;&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;&lt;b&gt;Aspect&lt;/b&gt;&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;&lt;b&gt;BlackBox-FNN&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Input dim&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;3J = 15&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Physics at training&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;None (discarded)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Physics constraint&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;None&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Tunable physics HP&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;—&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Worst-case bound&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Unbounded&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" vertex="1">
+          <mxGeometry height="148" width="620" x="20" y="926" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_f1" edge="1" parent="sw_bb" source="bb_inp" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#6c8ebf;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="bb_mlp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_f2" edge="1" parent="sw_bb" source="bb_mlp" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#d79b00;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="bb_fwd">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bb_f3" edge="1" parent="sw_bb" source="bb_fwd" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#b85450;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="bb_loss">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="sw_pr" parent="1" style="swimlane;startSize=46;fillColor=#fffde7;strokeColor=#b8860b;fontColor=#5c4000;fontSize=15;fontFamily=Helvetica;rounded=1;arcSize=3;" value="&lt;b&gt;(B) Physics-Regularised FNN (PhysReg-FNN)&lt;/b&gt;" vertex="1">
+          <mxGeometry height="1310" width="705" x="700" y="62" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_sub" parent="sw_pr" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=12;fontFamily=Helvetica;fontStyle=2;" value="Physics as soft loss regulariser — additive Tikhonov penalty" vertex="1">
+          <mxGeometry height="22" width="685" x="10" y="-33" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_kin" parent="sw_pr" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Kinematic input&lt;/b&gt;&lt;br&gt;x̃&lt;sub&gt;k&lt;/sub&gt; ∈ ℝ&lt;sup&gt;15&lt;/sup&gt;" vertex="1">
+          <mxGeometry height="60" width="310" x="20" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_phys" parent="sw_pr" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Physics input&lt;/b&gt;&lt;br&gt;φ̃ = [τ&lt;sub&gt;g&lt;/sub&gt;, τ&lt;sub&gt;M&lt;/sub&gt;, τ&lt;sub&gt;C&lt;/sub&gt;, τ&lt;sub&gt;f&lt;/sub&gt;] ∈ ℝ&lt;sup&gt;20&lt;/sup&gt;" vertex="1">
+          <mxGeometry height="60" width="310" x="375" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_cat" parent="sw_pr" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8e8ff;strokeColor=#5555aa;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Concatenate:&lt;/b&gt; &amp;nbsp; ũ = [ x̃&lt;sub&gt;k&lt;/sub&gt; , φ̃ ] ∈ ℝ&lt;sup&gt;35&lt;/sup&gt;&lt;br&gt;Decomposed physics exposes per-component, per-joint trust weights in first hidden layer" vertex="1">
+          <mxGeometry height="66" width="665" x="20" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_mlp" parent="sw_pr" style="swimlane;startSize=34;fillColor=#f3eaff;strokeColor=#9673a6;fontSize=12;fontFamily=Helvetica;rounded=1;arcSize=4;" value="&lt;b&gt;MLP Backbone&lt;/b&gt; &amp;nbsp;[128, 256, 128] — shared architecture" vertex="1">
+          <mxGeometry height="296" width="665" x="20" y="196" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_l0" parent="pr_mlp" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#888888;fontSize=12;fontFamily=Helvetica;" value="Input dim: 35 &amp;nbsp; (+20 physics features vs BlackBox-FNN)" vertex="1">
+          <mxGeometry height="30" width="505" x="80" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_l1" parent="pr_mlp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontFamily=Helvetica;" value="Linear(35→128) &amp;nbsp;+&amp;nbsp; LayerNorm &amp;nbsp;+&amp;nbsp; GELU &amp;nbsp;+&amp;nbsp; Dropout(p=0.2)" vertex="1">
+          <mxGeometry height="36" width="605" x="30" y="84" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_l2" parent="pr_mlp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c9b8e8;strokeColor=#7b5ea7;fontSize=12;fontFamily=Helvetica;" value="Linear(128→256) &amp;nbsp;+&amp;nbsp; LayerNorm &amp;nbsp;+&amp;nbsp; GELU &amp;nbsp;+&amp;nbsp; Dropout(p=0.2)" vertex="1">
+          <mxGeometry height="36" width="605" x="30" y="134" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_l3" parent="pr_mlp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontFamily=Helvetica;" value="Linear(256→128) &amp;nbsp;+&amp;nbsp; LayerNorm &amp;nbsp;+&amp;nbsp; GELU &amp;nbsp;+&amp;nbsp; Dropout(p=0.2)" vertex="1">
+          <mxGeometry height="36" width="605" x="30" y="184" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_lout" parent="pr_mlp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontFamily=Helvetica;" value="Linear(128→5) &amp;nbsp;[output head — Xavier-normal init]" vertex="1">
+          <mxGeometry height="36" width="605" x="30" y="240" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_e1" edge="1" parent="pr_mlp" source="pr_l0" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#9673a6;strokeWidth=1.5;" target="pr_l1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_e2" edge="1" parent="pr_mlp" source="pr_l1" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#9673a6;strokeWidth=1.5;" target="pr_l2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_e3" edge="1" parent="pr_mlp" source="pr_l2" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#9673a6;strokeWidth=1.5;" target="pr_l3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_e4" edge="1" parent="pr_mlp" source="pr_l3" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#d79b00;strokeWidth=1.5;" target="pr_lout">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_fwd" parent="sw_pr" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Forward map:&lt;/b&gt; &amp;nbsp; τ̂ = fθ( ũ ) ∈ ℝ&lt;sup&gt;5&lt;/sup&gt;&lt;br&gt;fθ : ℝ&lt;sup&gt;35&lt;/sup&gt; → ℝ&lt;sup&gt;5&lt;/sup&gt; &amp;nbsp;|&amp;nbsp; Xavier-normal init &amp;nbsp;|&amp;nbsp; 72,197 params" vertex="1">
+          <mxGeometry height="62" width="665" x="20" y="512" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_ref" parent="sw_pr" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontFamily=Helvetica;fontStyle=2;" value="τ&lt;sub&gt;ref&lt;/sub&gt; = reduce_physics_to_total(φ̃) ∈ ℝ&lt;sup&gt;5&lt;/sup&gt; &amp;nbsp;&amp;nbsp; [Theorem 1: sum ≈ τ̃* in noise-free case]" vertex="1">
+          <mxGeometry height="36" width="665" x="20" y="586" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_loss" parent="sw_pr" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Training Loss (Additive Tikhonov — NOT a convex blend)&lt;/b&gt;&lt;br&gt;ℒ&lt;sub&gt;PR&lt;/sub&gt;(θ; e) = ℒ&lt;sub&gt;data&lt;/sub&gt; + α&lt;sub&gt;eff&lt;/sub&gt;(e) · ℒ&lt;sub&gt;phys&lt;/sub&gt;&lt;br&gt;α&lt;sub&gt;eff&lt;/sub&gt;(e) = λ · min(1, e/e&lt;sub&gt;w&lt;/sub&gt;) &amp;nbsp; [linear warm-up, γ = 0.05, e&lt;sub&gt;w&lt;/sub&gt; = 5% epochs]&lt;br&gt;ℒ&lt;sub&gt;phys&lt;/sub&gt; = MSE(τ̂, τ&lt;sub&gt;ref&lt;/sub&gt;) &amp;nbsp;— pulls prediction toward RNEA surface&lt;br&gt;Sweep: λ ∈ {0.05, 0.10, 0.20, 0.50, 1.0, 2.0}" vertex="1">
+          <mxGeometry height="140" width="665" x="20" y="634" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_sweep" parent="sw_pr" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Hyperparameter sweep:&lt;/b&gt; 72 runs (6 fracs × 6 λ × 2 seeds)&lt;br&gt;Data fracs f ∈ {1.0, 0.5, 0.25, 0.10, 0.05, 0.02}" vertex="1">
+          <mxGeometry height="62" width="665" x="20" y="794" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_res" parent="sw_pr" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontFamily=Helvetica;fontStyle=1;" value="&lt;b&gt;Best pooled test RMSE: &amp;nbsp;0.0980 N·m&lt;/b&gt; &amp;nbsp;(R² = 0.908)&lt;br&gt;Optimal at f = 0.05 (~3,300 samples) | λ = 0.5 &amp;nbsp;|&amp;nbsp; &gt;20× sample-efficiency advantage" vertex="1">
+          <mxGeometry height="66" width="665" x="20" y="876" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_inf" parent="sw_pr" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#888888;fontSize=11;fontFamily=Helvetica;fontStyle=2;" value="&lt;b&gt;Inference:&lt;/b&gt; requires RNEA call (4× pin.rnea per timestep)&lt;br&gt;Unbounded output — no hard worst-case guarantee" vertex="1">
+          <mxGeometry height="50" width="665" x="20" y="952" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_table" parent="sw_pr" style="text;html=1;strokeColor=#aaaaaa;fillColor=#fafafa;align=left;verticalAlign=top;spacingLeft=4;fontSize=11;fontFamily=Helvetica;" value="&lt;table style=&#39;border-collapse:collapse;width:100%;font-size:11px;font-family:Helvetica;&#39;&gt;&lt;tr style=&#39;background:#e8e8e8;&#39;&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;&lt;b&gt;Aspect&lt;/b&gt;&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;&lt;b&gt;PhysReg-FNN&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Input dim&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;7J = 35&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Physics at training&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Input feature + loss term&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Physics constraint&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Soft (loss penalty)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Tunable HP&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;λ (physics weight)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Worst-case bound&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Unbounded&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" vertex="1">
+          <mxGeometry height="148" width="665" x="20" y="1014" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_f1a" edge="1" parent="sw_pr" source="pr_kin" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#6c8ebf;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" target="pr_cat">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_f1b" edge="1" parent="sw_pr" source="pr_phys" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#82b366;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" target="pr_cat">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_f2" edge="1" parent="sw_pr" source="pr_cat" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#5555aa;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="pr_mlp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_f3" edge="1" parent="sw_pr" source="pr_mlp" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#d79b00;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="pr_fwd">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="pr_f4" edge="1" parent="sw_pr" source="pr_fwd" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#b85450;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="pr_loss">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="sw_rc" parent="1" style="swimlane;startSize=46;fillColor=#f0fff4;strokeColor=#2e7d32;fontColor=#1b5e20;fontSize=15;fontFamily=Helvetica;rounded=1;arcSize=3;" value="&lt;b&gt;(C) Residual-Correction FNN (ResCorr-FNN)&lt;/b&gt;" vertex="1">
+          <mxGeometry height="1310" width="705" x="1425" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_sub" parent="sw_rc" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=12;fontFamily=Helvetica;fontStyle=2;" value="Physics as hard architectural prior — tanh-bounded correction" vertex="1">
+          <mxGeometry height="22" width="685" x="10" y="-28" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_kin" parent="sw_rc" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Kinematic input&lt;/b&gt;&lt;br&gt;x̃&lt;sub&gt;k&lt;/sub&gt; ∈ ℝ&lt;sup&gt;15&lt;/sup&gt;" vertex="1">
+          <mxGeometry height="60" width="310" x="20" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_phys" parent="sw_rc" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Physics input&lt;/b&gt;&lt;br&gt;φ̃ = [τ&lt;sub&gt;g&lt;/sub&gt;, τ&lt;sub&gt;M&lt;/sub&gt;, τ&lt;sub&gt;C&lt;/sub&gt;, τ&lt;sub&gt;f&lt;/sub&gt;] ∈ ℝ&lt;sup&gt;20&lt;/sup&gt;" vertex="1">
+          <mxGeometry height="60" width="310" x="375" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_cat" parent="sw_rc" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8e8ff;strokeColor=#5555aa;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Concatenate:&lt;/b&gt; &amp;nbsp; ũ = [ x̃&lt;sub&gt;k&lt;/sub&gt; , φ̃ ] ∈ ℝ&lt;sup&gt;35&lt;/sup&gt;&lt;br&gt;Same augmented input as PhysReg-FNN" vertex="1">
+          <mxGeometry height="60" width="665" x="20" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_mlp" parent="sw_rc" style="swimlane;startSize=34;fillColor=#f3eaff;strokeColor=#9673a6;fontSize=12;fontFamily=Helvetica;rounded=1;arcSize=4;" value="&lt;b&gt;Correction Network gθ&lt;/b&gt; &amp;nbsp;[128, 256, 128] — shared backbone" vertex="1">
+          <mxGeometry height="272" width="665" x="20" y="190" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_l0" parent="rc_mlp" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#888888;fontSize=12;fontFamily=Helvetica;" value="Input dim: 35" vertex="1">
+          <mxGeometry height="30" width="255" x="205" y="38" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_l1" parent="rc_mlp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontFamily=Helvetica;" value="Linear(35→128) &amp;nbsp;+&amp;nbsp; LayerNorm &amp;nbsp;+&amp;nbsp; GELU &amp;nbsp;+&amp;nbsp; Dropout(p=0.2)" vertex="1">
+          <mxGeometry height="36" width="605" x="30" y="80" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_l2" parent="rc_mlp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c9b8e8;strokeColor=#7b5ea7;fontSize=12;fontFamily=Helvetica;" value="Linear(128→256) &amp;nbsp;+&amp;nbsp; LayerNorm &amp;nbsp;+&amp;nbsp; GELU &amp;nbsp;+&amp;nbsp; Dropout(p=0.2)" vertex="1">
+          <mxGeometry height="36" width="605" x="30" y="126" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_l3" parent="rc_mlp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontFamily=Helvetica;" value="Linear(256→128) &amp;nbsp;+&amp;nbsp; LayerNorm &amp;nbsp;+&amp;nbsp; GELU &amp;nbsp;+&amp;nbsp; Dropout(p=0.2)" vertex="1">
+          <mxGeometry height="36" width="605" x="30" y="172" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_lout" parent="rc_mlp" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontFamily=Helvetica;" value="Linear(128→5) × 10⁻² &amp;nbsp; [output head — small-residual warm-start init]" vertex="1">
+          <mxGeometry height="36" width="605" x="30" y="218" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_e1" edge="1" parent="rc_mlp" source="rc_l0" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#9673a6;strokeWidth=1.5;" target="rc_l1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_e2" edge="1" parent="rc_mlp" source="rc_l1" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#9673a6;strokeWidth=1.5;" target="rc_l2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_e3" edge="1" parent="rc_mlp" source="rc_l2" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#9673a6;strokeWidth=1.5;" target="rc_l3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_e4" edge="1" parent="rc_mlp" source="rc_l3" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#d79b00;strokeWidth=1.5;" target="rc_lout">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_tanh" parent="sw_rc" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Tanh-bounded correction (Lemma 2):&lt;/b&gt;&lt;br&gt;δ = c&lt;sub&gt;s&lt;/sub&gt; · tanh( gθ(ũ) ) ∈ ℝ&lt;sup&gt;5&lt;/sup&gt;&lt;br&gt;c&lt;sub&gt;s&lt;/sub&gt; = 0.5 &amp;nbsp;(non-learnable buffer) &amp;nbsp;|&amp;nbsp; ∥δ∥∞ &lt; c&lt;sub&gt;s&lt;/sub&gt; &amp;nbsp;unconditionally&lt;br&gt;Soft saturation: gradient → 0 when |gθ| ≫ 3" vertex="1">
+          <mxGeometry height="100" width="665" x="20" y="482" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_base" parent="sw_rc" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontFamily=Helvetica;fontStyle=2;" value="τ̃&lt;sub&gt;phys&lt;/sub&gt; = reduce_physics_to_total(φ̃) ∈ ℝ&lt;sup&gt;5&lt;/sup&gt; &amp;nbsp;&amp;nbsp; [epoch-0 prediction = RNEA, since tanh(0)=0]" vertex="1">
+          <mxGeometry height="36" width="665" x="20" y="592" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_fwd" parent="sw_rc" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontFamily=Helvetica;fontStyle=1;" value="&lt;b&gt;Forward map (hard structural prior):&lt;/b&gt;&lt;br&gt;τ̂ = τ̃&lt;sub&gt;phys&lt;/sub&gt; + c&lt;sub&gt;s&lt;/sub&gt; · tanh( gθ(ũ) ) ∈ ℝ&lt;sup&gt;5&lt;/sup&gt;&lt;br&gt;Network learns &lt;i&gt;only the residual gap&lt;/i&gt; — starts from physics-consistent prediction" vertex="1">
+          <mxGeometry height="90" width="665" x="20" y="638" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_loss" parent="sw_rc" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Training Loss (Correction Regularisation)&lt;/b&gt;&lt;br&gt;ℒ&lt;sub&gt;RC&lt;/sub&gt;(θ; α&lt;sub&gt;r&lt;/sub&gt;) = ℒ&lt;sub&gt;data&lt;/sub&gt; + α&lt;sub&gt;r&lt;/sub&gt; · (1/NJ) ∑&lt;sub&gt;i,j&lt;/sub&gt; δ&lt;sub&gt;j&lt;/sub&gt;²&lt;br&gt;Penalises post-tanh correction δ — strongest pressure in linear region |gθ| &lt; 1&lt;br&gt;Gradient vanishes when δ = 0 (no penalty) AND when |δ| → c&lt;sub&gt;s&lt;/sub&gt; (saturated)&lt;br&gt;Sweep: α&lt;sub&gt;r&lt;/sub&gt; ∈ {0.005, 0.010, 0.050, 0.100, 0.500}" vertex="1">
+          <mxGeometry height="140" width="665" x="20" y="748" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_sweep" parent="sw_rc" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontFamily=Helvetica;" value="&lt;b&gt;Hyperparameter sweep:&lt;/b&gt; 60 runs (6 fracs × 5 α&lt;sub&gt;r&lt;/sub&gt; × 2 seeds)&lt;br&gt;Data fracs f ∈ {1.0, 0.5, 0.25, 0.10, 0.05, 0.02}" vertex="1">
+          <mxGeometry height="62" width="665" x="20" y="908" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_res" parent="sw_rc" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontFamily=Helvetica;fontStyle=1;" value="&lt;b&gt;Best pooled test RMSE: &amp;nbsp;0.0967 N·m&lt;/b&gt; &amp;nbsp;(R² = 0.911)&lt;br&gt;Optimal at f = 0.05 (~3,300 samples) | α&lt;sub&gt;r&lt;/sub&gt; = 0.1 &amp;nbsp;|&amp;nbsp; Best of all three architectures" vertex="1">
+          <mxGeometry height="66" width="665" x="20" y="980" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_inf" parent="sw_rc" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#888888;fontSize=11;fontFamily=Helvetica;fontStyle=2;" value="&lt;b&gt;Inference:&lt;/b&gt; requires RNEA call (4× pin.rnea per timestep)&lt;br&gt;Hard bound: ∥τ̂ − τ̃&lt;sub&gt;phys&lt;/sub&gt;∥∞ &lt; c&lt;sub&gt;s&lt;/sub&gt; = 0.5 &amp;nbsp;(in normalised units)" vertex="1">
+          <mxGeometry height="50" width="665" x="20" y="1056" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_table" parent="sw_rc" style="text;html=1;strokeColor=#aaaaaa;fillColor=#fafafa;align=left;verticalAlign=top;spacingLeft=4;fontSize=11;fontFamily=Helvetica;" value="&lt;table style=&#39;border-collapse:collapse;width:100%;font-size:11px;font-family:Helvetica;&#39;&gt;&lt;tr style=&#39;background:#e8e8e8;&#39;&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;&lt;b&gt;Aspect&lt;/b&gt;&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;&lt;b&gt;ResCorr-FNN&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Input dim&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;7J = 35&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Physics at training&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Input + output base + loss reg&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Physics constraint&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;&lt;b&gt;Hard (architectural bound)&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Tunable HP&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;α&lt;sub&gt;r&lt;/sub&gt; &amp;nbsp;(c&lt;sub&gt;s&lt;/sub&gt;=0.5 fixed)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;Worst-case bound&lt;/td&gt;&lt;td style=&#39;padding:4px;border:1px solid #aaa;&#39;&gt;∥τ̂ − τ̃&lt;sub&gt;phys&lt;/sub&gt;∥∞ &lt; 0.5&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" vertex="1">
+          <mxGeometry height="148" width="665" x="20" y="1116" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_f1a" edge="1" parent="sw_rc" source="rc_kin" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#6c8ebf;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" target="rc_cat">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_f1b" edge="1" parent="sw_rc" source="rc_phys" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#82b366;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" target="rc_cat">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_f2" edge="1" parent="sw_rc" source="rc_cat" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#5555aa;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="rc_mlp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_f3" edge="1" parent="sw_rc" source="rc_mlp" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#9673a6;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="rc_tanh">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_f4a" edge="1" parent="sw_rc" source="rc_tanh" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#9673a6;strokeWidth=2;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" target="rc_fwd">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_f4b" edge="1" parent="sw_rc" source="rc_base" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#82b366;strokeWidth=2;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" target="rc_fwd">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rc_f5" edge="1" parent="sw_rc" source="rc_fwd" style="edgeStyle=orthogonalEdgeStyle;html=1;rounded=0;strokeColor=#b85450;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="rc_loss">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="hp_box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#555555;fontSize=12;fontFamily=Helvetica;dashed=1;strokeWidth=2;verticalAlign=middle;" value="&lt;b&gt;Shared Fixed Hyperparameters (all 144 runs)&lt;/b&gt;&lt;br&gt;Backbone: MLP [128, 256, 128] &amp;nbsp;|&amp;nbsp; Activation: GELU &amp;nbsp;|&amp;nbsp; Dropout: 0.2 &amp;nbsp;|&amp;nbsp; Init: Xavier-normal &amp;nbsp;|&amp;nbsp; Batch: 512&lt;br&gt;Optimiser: AdamW (η&lt;sub&gt;0&lt;/sub&gt;=3×10⁻⁴, β&lt;sub&gt;1&lt;/sub&gt;=0.9, β&lt;sub&gt;2&lt;/sub&gt;=0.999, λ&lt;sub&gt;wd&lt;/sub&gt;=0.05) &amp;nbsp;|&amp;nbsp; Schedule: warmup-cosine (e&lt;sub&gt;w&lt;/sub&gt;=5%, r&lt;sub&gt;min&lt;/sub&gt;=10⁻²)&lt;br&gt;Epochs: 3000 &amp;nbsp;|&amp;nbsp; Early stopping patience: 150 &amp;nbsp;|&amp;nbsp; Input noise: σ&lt;sub&gt;n&lt;/sub&gt;=0.02 &amp;nbsp;|&amp;nbsp; Joint weights w=[1, 2.5, 1, 1, 1]&lt;br&gt;Dataset: 66,735 train / 47,868 val / 38,106 test &amp;nbsp;(44 trajectories, 11 Cartesian geometries, 5-DOF Kikobot manipulator)" vertex="1">
+          <mxGeometry height="130" width="1700" x="20" y="1390" as="geometry" />
+        </mxCell>
+        <mxCell id="leg_title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=12;fontFamily=Helvetica;fontStyle=1;" value="&lt;b&gt;Color Legend&lt;/b&gt;" vertex="1">
+          <mxGeometry height="22" width="390" x="1740" y="1392" as="geometry" />
+        </mxCell>
+        <mxCell id="leg_kin" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;fontFamily=Helvetica;" value="Kinematic input" vertex="1">
+          <mxGeometry height="26" width="182" x="1740" y="1420" as="geometry" />
+        </mxCell>
+        <mxCell id="leg_phys" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontFamily=Helvetica;" value="Physics / RNEA" vertex="1">
+          <mxGeometry height="26" width="182" x="1948" y="1420" as="geometry" />
+        </mxCell>
+        <mxCell id="leg_cat" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8e8ff;strokeColor=#5555aa;fontSize=11;fontFamily=Helvetica;" value="Concatenation" vertex="1">
+          <mxGeometry height="26" width="182" x="1740" y="1452" as="geometry" />
+        </mxCell>
+        <mxCell id="leg_mlp" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;fontFamily=Helvetica;" value="MLP layers" vertex="1">
+          <mxGeometry height="26" width="182" x="1948" y="1452" as="geometry" />
+        </mxCell>
+        <mxCell id="leg_out" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;fontFamily=Helvetica;" value="Output / Prediction" vertex="1">
+          <mxGeometry height="26" width="182" x="1740" y="1484" as="geometry" />
+        </mxCell>
+        <mxCell id="leg_loss" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;fontFamily=Helvetica;" value="Loss function" vertex="1">
+          <mxGeometry height="26" width="182" x="1948" y="1484" as="geometry" />
+        </mxCell>
+        <mxCell id="leg_res" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontFamily=Helvetica;fontStyle=1;" value="Best result" vertex="1">
+          <mxGeometry height="26" width="182" x="1740" y="1516" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
