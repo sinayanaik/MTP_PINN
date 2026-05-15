@@ -42,16 +42,28 @@ def auto_select_run(models_dir: str | None = None) -> Path:
     """Return the most-recent run folder, auto-selecting if there is only one.
 
     Pass *models_dir* to override the default grid root.  If multiple runs
-    exist the most-recently-sorted one (by name, so run_MMDD_HHMM sorts
-    chronologically) is chosen automatically.
+    exist the most-recently-sorted one (by name) is chosen automatically.
+    Supports two-level hierarchy (Version/Run).
     """
     root = Path(models_dir) if models_dir else _GRID_ROOT
+    
+    # If the provided path is already a run folder, use it.
     if _is_run_folder(root):
         return root
-    runs = list_run_dirs(root)
-    if not runs:
+        
+    # Otherwise, list subdirs (could be versions or runs).
+    candidates = list_run_dirs(root)
+    if not candidates:
         raise FileNotFoundError(f"No run folders found under {root}")
-    chosen = runs[-1]
+        
+    chosen = candidates[-1]
+    
+    # If chosen is not a run folder but contains sub-runs, go one level deeper.
+    if not _is_run_folder(chosen):
+        sub_runs = list_run_dirs(chosen)
+        if sub_runs:
+            chosen = sub_runs[-1]
+            
     logger.info("Auto-selected run folder: %s", chosen.name)
     return chosen
 
@@ -108,16 +120,29 @@ def group_by_model_type(
 # ---------------------------------------------------------------------------
 
 def list_datasets() -> int:
-    runs = list_run_dirs(_GRID_ROOT)
-    if not runs:
-        print(f"No run folders found under {_GRID_ROOT}")
+    """List all versions and their runs for the CLI."""
+    versions = [d for d in sorted(_GRID_ROOT.iterdir()) if d.is_dir() and not d.name.startswith("_")]
+    if not versions:
+        print(f"No version folders found under {_GRID_ROOT}")
         return 1
-    print(f"\nAvailable run folders in {_GRID_ROOT}:\n")
-    for i, d in enumerate(runs, 1):
-        n = len(list(d.rglob("metadata.yaml")))
-        m = re.match(r"^run_(\d{2})(\d{2})_", d.name)
-        date = f"20xx-{m.group(1)}-{m.group(2)}" if m else "?"
-        print(f"  [{i}] {d.name}  ({date}, {n} trials)")
-    print(f"\nUsage: PYTHONPATH=. python -m Neural_Networks.analyzer --models-dir {runs[-1]}")
+
+    print(f"\nAvailable grid search versions in {_GRID_ROOT.name}/:\n")
+    for i, v_dir in enumerate(versions, 1):
+        runs = list_run_dirs(v_dir)
+        print(f"  [{i}] {v_dir.name}  ({len(runs)} run folders)")
+        for r_dir in runs:
+            n = len(list(r_dir.rglob("metadata.yaml")))
+            print(f"        - {r_dir.name}  ({n} trials)")
+            
+    last_run = None
+    if versions:
+        last_runs = list_run_dirs(versions[-1])
+        if last_runs:
+            last_run = last_runs[-1]
+        else:
+            last_run = versions[-1]
+
+    if last_run:
+        print(f"\nUsage: python3 -m Neural_Networks.analyzer --models-dir {last_run}")
     print()
     return 0

@@ -1,0 +1,9 @@
+The plot provides a comprehensive statistical overview of the Test $R^2$ Distribution across all evaluated hyperparameter configurations for the three architectures, utilizing a combined scatter and box plot visualization. The $R^2$ score represents the proportion of variance in the true torques that is predictably explained by the models.
+
+Black-Box: The distribution of the 12 Black-Box runs is clustered at the bottom of the graph, indicating the lowest overall $R^2$ scores. The peak performance for this group is annotated at 0.8932. The entirety of its box plot is situated below 0.895, highlighting a systemic ceiling in its predictive capability on unseen data.
+
+Physics-Reg: The distribution comprising 72 Physics-Reg runs displays a broader spread, but its mean and interquartile range are distinctly elevated compared to the Black-Box model. The optimal run within this architecture achieves an $R^2$ of 0.9080. Notably, a significant majority of this distribution lies above the 0.900 threshold.
+
+Residual-Corr: The distribution of the 60 Residual-Corr runs exhibits the highest overall statistical performance. Its median line sits substantially higher than the others, and its paramount run reaches an impressive $R^2$ of 0.9106. Remarkably, almost the entire distribution of the Residual-Corr model sits above the mean of the Physics-Reg model and completely above the maximum recorded value of the Black-Box distribution.
+
+Conclusion: Corroborating the findings from the RMSE distribution analysis, this statistical view emphatically confirms that the Residual-Corr architecture consistently yields the highest variance explanation ($R^2$ score) on unseen data across a broad spectrum of hyperparameter configurations. Both physics-informed models demonstrate a statistically significant and robust superiority in capturing the underlying physical dynamics compared to the purely data-driven approach.

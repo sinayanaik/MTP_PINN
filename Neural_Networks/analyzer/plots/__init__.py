@@ -16,6 +16,7 @@ from . import (
     topk_leaderboard,
     hp_pair_heatmaps,
     pareto_front,
+    data_efficiency,
     physics_weight_impact,
     test_r2_distribution,
 )
@@ -42,6 +43,7 @@ PLOTS: dict[str, PlotSpec] = {
     "topk_leaderboard":        PlotSpec(topk_leaderboard.plot),
     "hp_pair_heatmaps":        PlotSpec(hp_pair_heatmaps.plot),
     "pareto_front":            PlotSpec(pareto_front.plot),
+    "data_efficiency":         PlotSpec(data_efficiency.plot),
     "physics_weight_impact":   PlotSpec(physics_weight_impact.plot),
     "test_r2_distribution":    PlotSpec(test_r2_distribution.plot),
 }

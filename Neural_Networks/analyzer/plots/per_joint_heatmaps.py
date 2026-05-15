@@ -1,4 +1,4 @@
-"""Fig 3 — per-joint RMSE heatmaps (test, val) with per-panel colour scaling."""
+"""Fig 3 — per-joint RMSE heatmaps (test, train) with per-panel colour scaling."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import numpy as np
 
 from ..config import JOINT_NAMES, N_JOINTS
 from ..io.records import arch_short_label, best_per_type, split_joints
+from ..style import panel_label
 from ._common import save_fig
 
 
@@ -43,25 +44,25 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
     n_archs   = len(labels)
     joint_labels = [name.replace(" (", "\n(") for name in JOINT_NAMES]
 
-    test_rmse_mat = np.array([split_joints(r, "test", "rmse") for r in all_recs], dtype=float)
-    val_rmse_mat  = np.array([split_joints(r, "val",  "rmse") for r in all_recs], dtype=float)
+    test_rmse_mat  = np.array([split_joints(r, "test",  "rmse") for r in all_recs], dtype=float)
+    train_rmse_mat = np.array([split_joints(r, "train", "rmse") for r in all_recs], dtype=float)
 
     cmap = mcolors.LinearSegmentedColormap.from_list(
-        "rmse_best_to_worst",
-        ["#5f8f6a", "#f6efc5", "#b65f52"],  # muted green -> cream -> terracotta
+        "rmse_vibrant",
+        ["#1a9850", "#fee08b", "#d73027"],  # vibrant green -> peach-yellow -> crimson
     )
     cmap.set_bad("#f0f0f0")
     nrows_fig = max(5.2, n_archs * 1.10 + 2.2)
 
     fig, axes = plt.subplots(1, 2, figsize=(14.8, nrows_fig))
-    fig.subplots_adjust(left=0.10, right=0.96, bottom=0.23, top=0.88, wspace=0.38)
+    fig.subplots_adjust(left=0.10, right=0.96, bottom=0.25, top=0.88, wspace=0.38)
 
     panels = [
-        (axes[0], test_rmse_mat, "(a) Test RMSE (N·m)"),
-        (axes[1], val_rmse_mat,  "(b) Val RMSE (N·m)"),
+        (axes[0], test_rmse_mat,  rf"$\mathrm{{Test\ RMSE\ (N \cdot m)}}$", "a"),
+        (axes[1], train_rmse_mat, rf"$\mathrm{{Train\ RMSE\ (N \cdot m)}}$", "b"),
     ]
 
-    for ax, mat, title in panels:
+    for ax, mat, title, letter in panels:
         norm = _panel_norm(mat)
         masked = np.ma.masked_invalid(mat)
         x_edges = np.arange(N_JOINTS + 1) - 0.5
@@ -76,7 +77,7 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
         ax.set_xticklabels(joint_labels, fontsize=13, fontweight="bold")
         ax.set_yticks(range(n_archs))
         ax.set_yticklabels(labels, fontsize=16, fontweight="bold")
-        ax.set_title(title, fontsize=18, fontweight="bold", pad=10)
+        ax.set_title(title, fontsize=18, fontweight="bold", pad=12)
         ax.tick_params(axis="both", which="major", labelsize=14, width=1.4, length=6)
 
         for i in range(n_archs):
@@ -94,8 +95,11 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
         mid = 0.5 * (vmin + vmax)
         cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.035)
         cbar.set_ticks([vmin, mid, vmax])
-        cbar.set_ticklabels([f"Best\n{vmin:.3f}", f"Mid\n{mid:.3f}",
-                             f"Worst\n{vmax:.3f}"])
-        cbar.ax.tick_params(labelsize=11, width=1.2, length=5)
+        cbar.set_ticklabels([rf"$\mathrm{{Best\ ({vmin:.3f})}}$", 
+                             rf"$\mathrm{{Mid\ ({mid:.3f})}}$",
+                             rf"$\mathrm{{Worst\ ({vmax:.3f})}}$"])
+        cbar.ax.tick_params(labelsize=13, width=1.2, length=5)
+        
+        panel_label(ax, letter, fontsize=18, y_offset=-0.14)
 
     save_fig(fig, output_dir / "fig3_per_joint_heatmaps.pdf")

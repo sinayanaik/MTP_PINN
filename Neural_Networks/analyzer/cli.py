@@ -27,8 +27,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Analyse grid-search trained models.\n\n"
-            "Models are stored as:\n"
-            "  Trained_Models_Grid/<run>/ModelType/<trial>/\n\n"
+            "Models are typically stored as:\n"
+            "  Neural_Networks/Trained_Models/Grid_Searches/Trained_Models_Grid_vX/<run>/ModelType/<trial>/\n\n"
             "Pass --models-dir to analyse one run, or omit it to auto-select\n"
             "(single run) or pick from a list."
         ),
@@ -36,7 +36,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--models-dir", default=DEFAULT_MODELS_DIR,
-        help="Run folder to analyse, e.g. Trained_Models_Grid/run_0425_1112_...  "
+        help="Run folder to analyse, e.g. Neural_Networks/Trained_Models/Grid_Searches/Trained_Models_Grid/run_0425_1112_...  "
              "Defaults to the grid root (auto-selects if only one run exists).",
     )
     parser.add_argument(

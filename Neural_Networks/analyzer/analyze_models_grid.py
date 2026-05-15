@@ -32,7 +32,7 @@ from Neural_Networks.analyzer.tables.summary import print_summary_table
 
 TOP_K = 10
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -40,42 +40,66 @@ logger = logging.getLogger(__name__)
 # Interactive pickers
 # ---------------------------------------------------------------------------
 
-def _pick_run_folder() -> Path:
-    """Show available run folders and ask the user to choose one."""
-    runs = list_run_dirs(_GRID_ROOT)
-    if not runs:
-        print(f"No run folders found under {_GRID_ROOT}")
+def _pick_from_list(items: list[Path], label: str, root_name: str) -> Path:
+    """Generic picker for a list of paths."""
+    if not items:
+        print(f"No {label} folders found.")
         sys.exit(1)
 
-    if len(runs) == 1:
-        print(f"\nAuto-selected the only run folder: {runs[0].name}")
-        return runs[0]
+    if len(items) == 1:
+        print(f"\nAuto-selected the only {label} folder: {items[0].name}")
+        return items[0]
 
-    print(f"\nAvailable run folders ({_GRID_ROOT.name}/):\n")
-    for i, d in enumerate(runs, 1):
-        n = len(list(d.rglob("metadata.yaml")))
-        m = re.match(r"^run_(\d{2})(\d{2})_(\d{4})_", d.name)
-        date = f"20xx-{m.group(1)}-{m.group(2)}  {m.group(3)[:2]}:{m.group(3)[2:]}" if m else "?"
+    print(f"\nAvailable {label} folders ({root_name}/):\n")
+    for i, d in enumerate(items, 1):
+        # Optional: count trials for runs
+        n_str = ""
+        if label == "run":
+            n = len(list(d.rglob("metadata.yaml")))
+            n_str = f"   {n} trial(s)"
+        
+        # Optional: extract date for runs
+        date_str = ""
+        if label == "run":
+            m = re.match(r"^run_(\d{2})(\d{2})_(\d{4})_", d.name)
+            if m:
+                date_str = f"20xx-{m.group(1)}-{m.group(2)}  {m.group(3)[:2]}:{m.group(3)[2:]}"
+        
         print(f"  [{i}]  {d.name}")
-        print(f"        {date}   {n} trial(s)")
+        if date_str or n_str:
+            print(f"        {date_str}{n_str}")
 
     print()
     while True:
         try:
-            raw = input(f"Select run folder [1-{len(runs)}]: ").strip()
+            raw = input(f"Select {label} folder [1-{len(items)}]: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             sys.exit(0)
-        if raw.isdigit() and 1 <= int(raw) <= len(runs):
-            chosen = runs[int(raw) - 1]
+        if raw.isdigit() and 1 <= int(raw) <= len(items):
+            chosen = items[int(raw) - 1]
             print(f"Selected: {chosen.name}\n")
             return chosen
         # substring match
-        matches = [d for d in runs if raw in d.name]
+        matches = [d for d in items if raw in d.name]
         if len(matches) == 1:
             print(f"Selected: {matches[0].name}\n")
             return matches[0]
-        print(f"  Enter a number between 1 and {len(runs)}.")
+        print(f"  Enter a number between 1 and {len(items)}.")
+
+
+def _pick_run_folder() -> Path:
+    """Show available version folders, then run folders, and ask the user to choose."""
+    # Step 1: Pick Version
+    versions = [d for d in sorted(_GRID_ROOT.iterdir()) if d.is_dir() and not d.name.startswith("_")]
+    # Only keep versions that contain at least one potential run folder
+    versions = [v for v in versions if any(d.is_dir() and not d.name.startswith("_") for d in v.iterdir())]
+    
+    version_dir = _pick_from_list(versions, "version", _GRID_ROOT.name)
+    
+    # Step 2: Pick Run inside selected version
+    runs = list_run_dirs(version_dir)
+    return _pick_from_list(runs, "run", version_dir.name)
 
 
 def _ask_recompute() -> str:

@@ -50,7 +50,7 @@ _NN_ROOT = _REPO_ROOT / "Neural_Networks"
 
 TRAIN_DATA_RUN_DIR: str = str(
     _NN_ROOT / "train_data"
-    / "run_0419_1338_qraw_d25p3i_ddL_mraw_a1_R_70v15t15_f1p0t1p0_f6a3df"
+    / "run_train22_q0_qd91_qdd21_tau51_rnea15"
 )
 
 MODELS_DIR:    str = str(_NN_ROOT / "Trained_Models" / "EDR")

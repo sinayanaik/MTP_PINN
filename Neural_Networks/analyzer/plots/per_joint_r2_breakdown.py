@@ -72,4 +72,4 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
                loc="lower center", bbox_to_anchor=(0.5, 0.02),
                ncol=max(3, n_models + 2), fontsize=10)
 
-    save_fig(fig, output_dir / "fig9_per_joint_r2_breakdown.png")
+    save_fig(fig, output_dir / "fig9_per_joint_r2_breakdown.pdf")

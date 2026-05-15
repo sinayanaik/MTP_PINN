@@ -71,4 +71,4 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
     else:
         fig.tight_layout()
 
-    save_fig(fig, output_dir / "fig8_edr_physics_corrections.png")
+    save_fig(fig, output_dir / "fig8_edr_physics_corrections.pdf")

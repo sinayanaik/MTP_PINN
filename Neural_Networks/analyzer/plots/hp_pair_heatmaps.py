@@ -135,4 +135,4 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
         cbar.ax.tick_params(labelsize=10)
 
     fig.subplots_adjust(hspace=0.55, wspace=0.35)
-    save_fig(fig, output_dir / "fig12_hp_pair_heatmaps.png")
+    save_fig(fig, output_dir / "fig12_hp_pair_heatmaps.pdf")

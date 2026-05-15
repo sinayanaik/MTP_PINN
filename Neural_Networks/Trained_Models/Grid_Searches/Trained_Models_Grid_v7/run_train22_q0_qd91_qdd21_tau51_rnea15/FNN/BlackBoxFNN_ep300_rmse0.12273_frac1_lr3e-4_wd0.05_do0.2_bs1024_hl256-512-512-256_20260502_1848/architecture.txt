@@ -1,0 +1,31 @@
+Model: BlackBoxFNN
+Params: 537,861
+
+Hyperparameters:
+  n_joints: 5
+  hidden_layers: [256, 512, 512, 256]
+  dropout: 0.2
+  activation: gelu
+
+PyTorch repr:
+BlackBoxFNN(
+  (net): Sequential(
+    (0): Linear(in_features=30, out_features=256, bias=True)
+    (1): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+    (2): GELU(approximate='none')
+    (3): Dropout(p=0.2, inplace=False)
+    (4): Linear(in_features=256, out_features=512, bias=True)
+    (5): LayerNorm((512,), eps=1e-05, elementwise_affine=True)
+    (6): GELU(approximate='none')
+    (7): Dropout(p=0.2, inplace=False)
+    (8): Linear(in_features=512, out_features=512, bias=True)
+    (9): LayerNorm((512,), eps=1e-05, elementwise_affine=True)
+    (10): GELU(approximate='none')
+    (11): Dropout(p=0.2, inplace=False)
+    (12): Linear(in_features=512, out_features=256, bias=True)
+    (13): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+    (14): GELU(approximate='none')
+    (15): Dropout(p=0.2, inplace=False)
+    (16): Linear(in_features=256, out_features=5, bias=True)
+  )
+)

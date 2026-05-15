@@ -82,10 +82,10 @@ TRAIN_DATA_RUN_DIR: str = os.environ.get("MTP_TRAIN_DATA_RUN") or str(
 )
 
 # Output root — completely separate from Trained_Models/.
-# Runs land under  Trained_Models_Grid/<dataset_name>/ModelType/<run>/
+# Runs land under  Trained_Models/Grid_Searches/Trained_Models_Grid_vX/<dataset_name>/ModelType/<run>/
 # so every dataset's results stay grouped together and analysis can target
 # a single dataset folder via --models-dir.
-MODELS_DIR_ROOT: str = str(_NN_ROOT / "Trained_Models_Grid")
+MODELS_DIR_ROOT: str = str(_NN_ROOT / "Trained_Models" / "Grid_Searches" / "Trained_Models_Grid_v9")
 
 # Dataset-scoped output root — derived from TRAIN_DATA_RUN_DIR at runtime.
 _DATASET_NAME:  str = Path(TRAIN_DATA_RUN_DIR).name
@@ -123,7 +123,7 @@ FIXED_HP: dict[str, Any] = {
     # Smaller model (128-256-128 ≈ 95K params vs 267K) reduces overfitting
     # with typical training set sizes of 8K–50K samples.
     "hidden_layers":           [128, 256, 128],
-    "dropout":                 0.2,
+    "dropout":                 0.3,
     "activation":              "gelu",
 
     # Optimisation.
@@ -153,7 +153,7 @@ FIXED_HP: dict[str, Any] = {
     "data_train_seed":         0,
 
     # PhysReg-only HPs (ignored by other strategies).
-    "physics_warmup_fraction": 0.05,
+    "physics_warmup_fraction": 0.1,
 
     # ResidualCorrectionFNN: fixed tanh bound on correction magnitude.
     # Limits corrections to ±correction_scale in normalised torque units.
@@ -171,36 +171,27 @@ FIXED_HP: dict[str, Any] = {
 # BlackBox, and how does the answer change as training data gets scarcer?
 # Three data regimes (full, quarter, tenth), three physics-strength regimes
 # per PINN variant (off, moderate, strong), two seeds for mean±spread.
-_SEEDS      = [0, 1]
-_DATA_FRACS = [1.0, 0.5, 0.25, 0.1, 0.05, 0.02]  # full → 2% (exposes data-efficiency regime)
+# Best hyperparameter combinations found from previous grid search, updated to f=1.0.
+# BlackBox: f=1.0
+# PhysReg: f=1.0, pw=0.5
+# Residual: f=1.0, arw=0.1
+_SEEDS = [0]
 
-# FNN baseline: data × seed.  6 × 2 = 12 combos.
 GRID_FNN: dict[str, list] = {
-    "data_train_fraction": _DATA_FRACS,
-    "seed":                _SEEDS,
+    "data_train_fraction": [1.0],
+    "seed": _SEEDS,
 }
 
-# Physics-regularized: physics_weight × data × seed.  6 × 6 × 2 = 72 combos.
-# Loss = L_data + pw * L_phys  (additive Tikhonov — pw is the penalty coefficient).
-# pw=0.05 → weak physics nudge (near-BlackBox sanity check).
-# pw=0.5  → moderate; expect RMSE improvement vs BlackBox for all data fractions.
-# pw=2.0  → strong prior; network predictions tightly constrained to physics.
 GRID_PHYSREG: dict[str, list] = {
-    "physics_weight":      [0.05, 0.1, 0.2, 0.5, 1.0, 2.0],
-    "data_train_fraction": _DATA_FRACS,
-    "seed":                _SEEDS,
+    "physics_weight": [0.5],
+    "data_train_fraction": [1.0],
+    "seed": _SEEDS,
 }
 
-# Physics-residual: alpha_reg × data × seed.  5 × 6 × 2 = 60 combos.
-# tanh bounding (correction_scale=0.5) provides hard structural constraint;
-# alpha_reg is the additional L2 penalty on the bounded correction magnitude.
-# alpha=0.005 → minimal additional penalty (structural bound dominates).
-# alpha=0.1   → moderate L2 tightening.
-# alpha=0.5   → strong L2; expect near-physics predictions.
 GRID_RESIDUAL: dict[str, list] = {
-    "alpha_reg_weight":    [0.005, 0.01, 0.05, 0.1, 0.5],
-    "data_train_fraction": _DATA_FRACS,
-    "seed":                _SEEDS,
+    "alpha_reg_weight": [0.1],
+    "data_train_fraction": [1.0],
+    "seed": _SEEDS,
 }
 
 # Total: 12 + 72 + 60 = 144 trials when ARCH="all".
@@ -833,11 +824,7 @@ def _run_one_trial(
     worker_slot: int,
     threads_per_worker: int,
 ) -> dict[str, Any]:
-    """Run a single trial in a fresh worker process.
-
-    Must set ``CUDA_VISIBLE_DEVICES`` and thread counts BEFORE importing torch,
-    so this function does its imports lazily inside the body.
-    """
+    """Run a single trial in a fresh worker process with improvements v8 (Trig Features + High Dropout)."""
     q = _POOL_PROGRESS_QUEUE
     if q is None:
         raise RuntimeError("_pool_init did not run — progress queue missing")
@@ -850,29 +837,244 @@ def _run_one_trial(
     models_dir  = os.path.join(DATASET_OUT_ROOT, save_subdir)
     os.makedirs(models_dir, exist_ok=True)
 
-    # Thread counts, CUDA_VISIBLE_DEVICES, and NN_NUM_WORKERS are all set
-    # exactly once per worker in ``_pool_init``.  torch.set_num_interop_threads
-    # is a one-shot call — repeating it here on task 2+ raised RuntimeError
-    # ("cannot set number of interop threads after parallel work has started")
-    # which manifested as "ERR after 1 s" for every trial except the first.
-
     try:
         import torch
+        import torch.nn as nn
+        import torch.nn.functional as F
+        import numpy as np
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # ====================================================================
+        # ── V2 IMPROVEMENTS CLASSES ─────────────────────────────────────────
+        # ====================================================================
+        class JointNormalizer:
+            """Z-score normalizer for robot joint torques."""
+            def __init__(self, mean, std):
+                self.mean = mean.detach().clone().cpu()
+                self.std = torch.clamp(std.detach().clone().cpu(), min=1e-8)
+            def normalize(self, x):
+                return (x - self.mean.to(x.device)) / self.std.to(x.device)
+            def denormalize(self, x):
+                return x * self.std.to(x.device) + self.mean.to(x.device)
+
+        class WeightedHuberLoss(nn.Module):
+            """Weighted Huber loss for multi-joint torque prediction."""
+            def __init__(self, weights, delta=1.0):
+                super().__init__()
+                self.register_buffer("weights", torch.tensor(weights, dtype=torch.float32))
+                self.delta = delta
+            def forward(self, pred, target):
+                loss = F.huber_loss(pred, target, reduction="none", delta=self.delta)
+                return (loss * self.weights).mean()
+
+        # Late imports
+        from Neural_Networks.models.shared.pipeline import TrainJob, run_training
+        from Neural_Networks.models.shared.strategies import (
+            PLAIN_STRATEGY, PHYSICS_REG_STRATEGY, RESIDUAL_STRATEGY,
+            TorqueTrainStrategy, TrainEpochMetrics,
+            ACTIVE_JOINTS, reduce_physics_to_total
+        )
+        
+        strategy_map = {"fnn": PLAIN_STRATEGY, "physreg": PHYSICS_REG_STRATEGY, "residual": RESIDUAL_STRATEGY}
+        base_strategy = strategy_map[arch]
 
         # Skip-existing inside the worker — cheap, avoids redundant data load.
         if SKIP_EXISTING and _find_existing_run(Path(models_dir), model_type, hp):
             q.put(("done", worker_slot, "skip"))
             return {"status": "skipped", "arch": arch, "hp": hp}
 
-        # torch_compile / torch_compile_mode already set by _apply_env_flags()
-        # in the main process before dispatch — no override here.
-
-        # Late imports: don't touch CUDA libs at module level.
-        from Neural_Networks.models.shared.pipeline import TrainJob, run_training
-        from Neural_Networks.models.shared.strategies import (
-            PLAIN_STRATEGY, PHYSICS_REG_STRATEGY, RESIDUAL_STRATEGY,
+        # ── 1. Per-joint Target Normalization Setup ────────────────────────
+        from Neural_Networks.loader import make_dataloaders
+        
+        # Temporary loader to compute stats
+        temp_loaders = make_dataloaders(
+            run_dir=TRAIN_DATA_RUN_DIR,
+            batch_size=int(hp.get("batch_size", 1024)),
+            normalise=True, 
+            data_train_fraction=float(hp.get("data_train_fraction", 1.0)),
+            data_train_seed=int(hp.get("data_train_seed", 0)),
         )
-        strategy_map = {"fnn": PLAIN_STRATEGY, "physreg": PHYSICS_REG_STRATEGY, "residual": RESIDUAL_STRATEGY}
+        
+        all_tau = []
+        for _, target, _ in temp_loaders["train"]:
+            all_tau.append(target)
+        all_tau = torch.cat(all_tau, dim=0)
+        normalizer = JointNormalizer(all_tau.mean(dim=0), all_tau.std(dim=0))
+        del temp_loaders, all_tau
+
+        # ── 2. Weighted Huber Loss Setup ───────────────────────────────────
+        # Aggressive weights for v8: J2=3.0, J5=2.5, sharper Huber delta=0.5
+        joint_weights = [1.0, 3.0, 1.2, 0.7, 2.5]
+        huber_loss_fn = WeightedHuberLoss(weights=joint_weights, delta=0.5).to(device)
+
+        # ── 3. Custom Strategy with V8 improvements (Trig + Lag + Dropout) ──
+        def custom_train_epoch(model, loader, optimizer, device, hp, epoch, onecycle_sched, scaler):
+            model.train()
+            total_loss = 0.0
+            total_loss_data_unw = 0.0
+            total_gnorm = 0.0
+            sse_per_joint = None
+            n_samples = 0
+            use_amp = scaler is not None
+            n_batches = len(loader)
+            grad_clip = float(hp.get("grad_clip_norm", 1.0))
+            
+            epochs_max = max(1, int(hp.get("epochs", 3000)))
+            warmup_ep = max(1, int(float(hp.get("physics_warmup_fraction", 0.05)) * epochs_max))
+            pw = float(hp.get("physics_weight", 0.1)) if arch == "physreg" else 0.0
+            ar = float(hp.get("alpha_reg_weight", 0.05)) if arch == "residual" else 0.0
+            alpha_eff = pw * min(1.0, float(epoch) / float(warmup_ep))
+
+            std_meta = torch.from_numpy(loader.dataset.std_tau).to(device)
+            mean_meta = torch.from_numpy(loader.dataset.mean_tau).to(device)
+            
+            mean_q = torch.from_numpy(loader.dataset.mean_q).to(device)
+            std_q = torch.from_numpy(loader.dataset.std_q).to(device)
+
+            optimizer.zero_grad(set_to_none=True)
+            for features, target, physics in loader:
+                features = features.to(device, non_blocking=True)
+                target = target.to(device, non_blocking=True)
+                physics = physics.to(device, non_blocking=True)
+                
+                # 1. Lagged kinematics
+                feat_lag = torch.roll(features, shifts=1, dims=0)
+                feat_lag[0] = features[0]
+                
+                # 2. Trigonometric features on q_t
+                q_norm = features[:, 0:5]
+                q_unnorm = q_norm * std_q + mean_q
+                trig_feat = torch.cat([torch.sin(q_unnorm), torch.cos(q_unnorm)], dim=-1)
+                
+                # Full kinematic input (15 + 15 + 10 = 40)
+                feat_aug = torch.cat([features, feat_lag, trig_feat], dim=-1)
+
+                target_norm = normalizer.normalize(target)
+                
+                if float(hp.get("feature_noise_std", 0.0) or 0.0) > 0.0:
+                    feat_aug = feat_aug + torch.randn_like(feat_aug) * float(hp["feature_noise_std"])
+                
+                with torch.autocast(device_type=device.type, enabled=use_amp):
+                    if arch == "fnn":
+                        tau_hat_norm = model(feat_aug, None)
+                        loss = huber_loss_fn(tau_hat_norm, target_norm)
+                    elif arch == "physreg":
+                        tau_hat_norm = model(feat_aug, physics)
+                        tau_ref_norm = normalizer.normalize(reduce_physics_to_total(physics, model.n_joints))
+                        l_data = huber_loss_fn(tau_hat_norm, target_norm)
+                        l_phys = huber_loss_fn(tau_hat_norm, tau_ref_norm)
+                        loss = l_data + alpha_eff * l_phys
+                    elif arch == "residual":
+                        tau_phys_norm = normalizer.normalize(reduce_physics_to_total(physics, model.n_joints))
+                        tau_hat_raw = model(feat_aug, physics)
+                        tau_hat_norm = normalizer.normalize(tau_hat_raw)
+                        loss = huber_loss_fn(tau_hat_norm, target_norm) + ar * ((tau_hat_norm - tau_phys_norm)**2).mean()
+
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    gnorm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    gnorm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                    optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                
+                total_gnorm += gnorm.item() if hasattr(gnorm, "item") else float(gnorm)
+                if onecycle_sched is not None: onecycle_sched.step()
+                total_loss += float(loss.item())
+                
+                with torch.no_grad():
+                    p_meta_norm = normalizer.denormalize(tau_hat_norm)
+                    p_phys = p_meta_norm * std_meta + mean_meta
+                    t_phys = target * std_meta + mean_meta
+                    d = p_phys - t_phys
+                    sse_per_batch = (d * d).sum(dim=0).cpu().numpy()
+                    sse_per_joint = sse_per_batch if sse_per_joint is None else sse_per_joint + sse_per_batch
+                    n_samples += int(d.shape[0])
+                    total_loss_data_unw += float(F.mse_loss(tau_hat_norm.detach(), target_norm).item())
+            
+            return TrainEpochMetrics(
+                loss_total=total_loss / n_batches,
+                loss_data_unw=total_loss_data_unw / n_batches,
+                grad_norm=total_gnorm / n_batches,
+                sse_per_joint=sse_per_joint if sse_per_joint is not None else np.zeros(ACTIVE_JOINTS),
+                n_samples=n_samples,
+                extras=None
+            )
+
+        def custom_eval_epoch(model, loader, device):
+            model.eval()
+            total_loss = 0.0
+            all_pred_meta_norm = []
+            all_target_meta_norm = []
+            
+            mean_q = torch.from_numpy(loader.dataset.mean_q).to(device)
+            std_q = torch.from_numpy(loader.dataset.std_q).to(device)
+
+            with torch.no_grad():
+                for features, target, physics in loader:
+                    features = features.to(device, non_blocking=True)
+                    target = target.to(device, non_blocking=True)
+                    physics = physics.to(device, non_blocking=True)
+                    
+                    feat_lag = torch.roll(features, shifts=1, dims=0)
+                    feat_lag[0] = features[0]
+                    
+                    q_norm = features[:, 0:5]
+                    q_unnorm = q_norm * std_q + mean_q
+                    trig_feat = torch.cat([torch.sin(q_unnorm), torch.cos(q_unnorm)], dim=-1)
+                    feat_aug = torch.cat([features, feat_lag, trig_feat], dim=-1)
+
+                    tau_hat_raw = model(feat_aug, physics if arch != "fnn" else None)
+                    if arch == "residual":
+                        tau_hat_norm = normalizer.normalize(tau_hat_raw)
+                    else:
+                        tau_hat_norm = tau_hat_raw
+                    
+                    target_norm = normalizer.normalize(target)
+                    loss = huber_loss_fn(tau_hat_norm, target_norm)
+                    total_loss += loss.item()
+                    
+                    pred_meta_norm = normalizer.denormalize(tau_hat_norm).cpu().numpy()
+                    all_pred_meta_norm.append(pred_meta_norm)
+                    all_target_meta_norm.append(target.cpu().numpy())
+                    
+            return total_loss / len(loader), np.concatenate(all_pred_meta_norm, axis=0), np.concatenate(all_target_meta_norm, axis=0)
+
+        # ── 4. Model Wrapper to handle increased in_dim and Dropout ─────────
+        def custom_make_model(device, hp):
+            base_model = base_strategy.make_model(device, hp)
+            # New input dim: 15 (t) + 15 (t-1) + 10 (sin/cos) = 40
+            new_in_dim = 40 + (20 if arch != "fnn" else 0)
+            from Neural_Networks.models.torque_models import build_mlp
+            new_net = build_mlp(
+                in_dim=new_in_dim,
+                hidden_layers=list(hp.get("hidden_layers", [128, 256, 128])),
+                out_dim=ACTIVE_JOINTS,
+                activation=str(hp.get("activation", "gelu")),
+                dropout=float(hp.get("dropout", 0.3)),
+            ).to(device)
+            if arch == "fnn":
+                base_model.net = new_net
+            elif arch == "physreg":
+                base_model.net = new_net
+            elif arch == "residual":
+                base_model.net = new_net
+            return base_model
+
+        v8_strategy = TorqueTrainStrategy(
+            default_exhaustive_hp=base_strategy.default_exhaustive_hp,
+            run_id_hp_keys=base_strategy.run_id_hp_keys,
+            make_model=custom_make_model,
+            build_optimizer=base_strategy.build_optimizer,
+            train_epoch=custom_train_epoch,
+            eval_epoch=custom_eval_epoch,
+            physics_sched_metadata=base_strategy.physics_sched_metadata
+        )
 
         job = TrainJob(
             run_dir=TRAIN_DATA_RUN_DIR,
@@ -881,14 +1083,14 @@ def _run_one_trial(
             model_type=model_type,
             save_subdir=save_subdir,
             hp=hp,
-            strategy=strategy_map[arch],
+            strategy=v8_strategy,
             run_help=run_help,
         )
 
         q.put(("start", worker_slot, _hp_desc(arch, hp),
                int(hp.get("epochs", 3000)), int(hp.get("patience", 200))))
 
-        def _cb(epoch: int, total_ep: int, val_rmse: float, pat_ctr: int, pat_max: int) -> None:
+        def _cb(epoch, total_ep, val_rmse, pat_ctr, pat_max):
             q.put(("progress", worker_slot, int(epoch), int(total_ep),
                    float(val_rmse), int(pat_ctr), int(pat_max)))
 

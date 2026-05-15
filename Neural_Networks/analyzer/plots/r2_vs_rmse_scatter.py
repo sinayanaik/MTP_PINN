@@ -71,4 +71,4 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
                loc="lower center", bbox_to_anchor=(0.5, 0.02),
                ncol=len(type_handles) + 2, fontsize=10)
 
-    save_fig(fig, output_dir / "fig6_r2_vs_rmse_scatter.png")
+    save_fig(fig, output_dir / "fig6_r2_vs_rmse_scatter.pdf")

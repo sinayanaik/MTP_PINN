@@ -131,7 +131,7 @@ KGCM_TO_NM   = 0.09807      # kgf·cm → N·m  (= 9.807 / 1000 * 10 = 0.09807)
 #   α_j4 = 0.211, α_global = 0.093 → τ_stall_inferred = 30.0 × (0.093/0.211) = 13.2 ≈ 14.8
 # J5 (q-index 4): physically likely STS3032 but gravity signal too weak to confirm.
 #   Left at 30.0 until confirmed by direct measurement or improved calibration.
-STALL_TORQUE_PER_JOINT = np.array([30.0, 30.0, 30.0, 14.8, 30.0, 30.0])
+STALL_TORQUE_PER_JOINT = np.array([30.0, 30.0, 30.0, 14.8, 14.8, 30.0])
 
 # Clip bounds for numerical differentiation output.
 # These are generous safety margins — they should NEVER be hit for normal motion.

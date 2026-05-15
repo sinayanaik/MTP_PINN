@@ -53,6 +53,8 @@ def read_cache(rec: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+_DATASET_CACHE: dict[Path, Any] = {}
+
 def compute(rec: dict[str, Any], force: bool = False) -> dict[str, Any]:
     """Load model.pt, run inference on training split, compute full metrics.
 
@@ -72,10 +74,39 @@ def compute(rec: dict[str, Any], force: bool = False) -> dict[str, Any]:
         logger.debug("No model.pt in %s — skipping train metrics.", run_dir)
         return {}
 
-    data_run_dir = rec.get("data_run_dir", "")
-    if not data_run_dir or not Path(data_run_dir).is_dir():
-        logger.debug("data_run_dir missing/invalid for %s — skipping.", run_dir)
+    data_run_dir_raw = rec.get("data_run_dir", "")
+    if not data_run_dir_raw:
+        logger.debug("data_run_dir missing for %s — skipping.", run_dir)
         return {}
+    
+    data_run_dir = Path(data_run_dir_raw)
+    if not data_run_dir.is_dir():
+        # Try resolving relative to repo root if absolute path fails
+        try:
+            from ..config import _NN_ROOT
+            repo_root = _NN_ROOT.parent # analyzer is in Neural_Networks/analyzer
+            # Common pattern: .../Neural_Networks/train_data/run_name
+            parts = data_run_dir.parts
+            if "Neural_Networks" in parts:
+                idx = parts.index("Neural_Networks")
+                rel_path = Path(*parts[idx:])
+                potential = repo_root / rel_path
+                if potential.is_dir():
+                    data_run_dir = potential
+                else:
+                    logger.debug("Could not resolve %s relative to %s", rel_path, repo_root)
+                    return {}
+            else:
+                # Just try the name of the folder inside Neural_Networks/train_data
+                potential = repo_root / "Neural_Networks" / "train_data" / data_run_dir.name
+                if potential.is_dir():
+                    data_run_dir = potential
+                else:
+                    logger.debug("Path %s invalid and no fallback found.", data_run_dir)
+                    return {}
+        except Exception as e:
+            logger.debug("Fallback resolution failed: %s", e)
+            return {}
 
     try:
         import torch
@@ -125,10 +156,17 @@ def compute(rec: dict[str, Any], force: bool = False) -> dict[str, Any]:
 
         model = cls_final(n_joints=N_JOINTS, hidden_layers=ckpt_hl,
                           dropout=ckpt_do, activation=ckpt_act)
-        model.load_state_dict(model_state)
+        
+        # Handle torch.compile prefix that might be present in the saved state dict
+        clean_state = {k.replace("_orig_mod.", ""): v for k, v in model_state.items()}
+        model.load_state_dict(clean_state)
         model.eval()
 
-        dataset = RobotDataset(data_run_dir, split="train", mode="pointwise", normalise=True)
+        global _DATASET_CACHE
+        if data_run_dir not in _DATASET_CACHE:
+            _DATASET_CACHE[data_run_dir] = RobotDataset(data_run_dir, split="train", mode="pointwise", normalise=True)
+        dataset = _DATASET_CACHE[data_run_dir]
+        
         ckpt_norm = ckpt.get("norm_stats", {})
         if ckpt_norm and "mean_tau" in ckpt_norm:
             mean_tau = np.asarray(ckpt_norm["mean_tau"], dtype=np.float32)
@@ -143,15 +181,14 @@ def compute(rec: dict[str, Any], force: bool = False) -> dict[str, Any]:
         n = len(dataset)
 
         with torch.no_grad():
+            f_all, t_all, p_all = dataset[slice(0, n)]
+            
             for start in range(0, n, batch_size):
                 end = min(start + batch_size, n)
-                feat_list, tgt_list, phy_list = [], [], []
-                for i in range(start, end):
-                    f, t, p = dataset[i]
-                    feat_list.append(f); tgt_list.append(t); phy_list.append(p)
-                feat = torch.stack(feat_list)
-                tgt  = torch.stack(tgt_list)
-                phy  = torch.stack(phy_list)
+                feat = f_all[start:end]
+                tgt  = t_all[start:end]
+                phy  = p_all[start:end]
+                
                 pred_norm = model(feat, phy)
                 pred_phys = pred_norm.numpy() * std_tau + mean_tau
                 tgt_phys  = tgt.numpy()       * std_tau + mean_tau

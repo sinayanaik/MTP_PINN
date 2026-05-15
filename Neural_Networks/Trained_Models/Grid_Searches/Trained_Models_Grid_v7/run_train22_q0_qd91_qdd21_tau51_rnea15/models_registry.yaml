@@ -1,0 +1,298 @@
+total_models: 3
+last_updated: '2026-05-02T18:49:07.125842'
+models:
+- model_type: PhysicsRegularizedFNN
+  run_id: PhysicsRegularizedFNN_ep300_rmse0.11247_frac1_lr3e-4_wd0.05_do0.2_bs1024_hl256-512-512-256_pw0.5_20260502_1849
+  run_dir: /home/san/Desktop/MTP_PINN/Neural_Networks/Trained_Models_Grid_v7/run_train22_q0_qd91_qdd21_tau51_rnea15/PhysicsRegularizedFNN/PhysicsRegularizedFNN_ep300_rmse0.11247_frac1_lr3e-4_wd0.05_do0.2_bs1024_hl256-512-512-256_pw0.5_20260502_1849
+  trained_at: '2026-05-02T18:49:07.125753'
+  model_path: /home/san/Desktop/MTP_PINN/Neural_Networks/Trained_Models_Grid_v7/run_train22_q0_qd91_qdd21_tau51_rnea15/PhysicsRegularizedFNN/PhysicsRegularizedFNN_ep300_rmse0.11247_frac1_lr3e-4_wd0.05_do0.2_bs1024_hl256-512-512-256_pw0.5_20260502_1849/model.pt
+  training:
+    time_seconds: 832.9
+    time_formatted: 13m 52s
+    epochs_ran: 300
+    epochs_max: 3000
+    stopped_early: true
+    final_train_loss: 0.0315325
+    final_val_loss: 0.1225727
+  hardware:
+    device: cuda:NVIDIA GeForce RTX 3050 Laptop GPU
+    torch_version: 2.5.1+cu124
+  data:
+    num_train_samples: 66735
+    num_val_samples: 47868
+    num_test_samples: 38106
+  hyperparams:
+    hidden_layers:
+    - 256
+    - 512
+    - 512
+    - 256
+    dropout: 0.2
+    activation: gelu
+    learning_rate: 0.0003
+    weight_decay: 0.05
+    batch_size: 1024
+    lr_scheduler: warmup_cosine
+    grad_clip_norm: 1.0
+    feature_noise_std: 0.05
+    epochs: 3000
+    patience: 150
+    min_delta: 0.0001
+    early_stopping: true
+    early_stop_metric: val_rmse
+    dataset_memmap: true
+    stride: 1
+    seed: 0
+    data_train_seed: 0
+    physics_warmup_fraction: 0.05
+    correction_scale: 0.5
+    physics_weight: 0.5
+    data_train_fraction: 1.0
+    phys_input_concat: 7J
+    torch_compile: false
+    torch_compile_mode: default
+  metrics:
+    avg_rmse_mean: 0.10343918949365616
+    avg_rmse_pooled: 0.11247177151295147
+    avg_r2_overall: 0.8844831125033585
+    avg_r2_mean: 0.8324626088142395
+    avg_nrmse_mean: 0.08170949667692184
+    avg_mse_mean: 0.01264955848455429
+    avg_pearson_mean: 0.9120006171761776
+    per_joint_rmse:
+    - 0.07497090101242065
+    - 0.17729873955249786
+    - 0.10055535286664963
+    - 0.04632445052266121
+    - 0.11804651468992233
+    per_joint_r2:
+    - 0.8725473284721375
+    - 0.9012904167175293
+    - 0.905288577079773
+    - 0.8010348081588745
+    - 0.6821518540382385
+    test_rmse_mean: 0.1006489023566246
+    test_rmse_pooled: 0.1089085742039976
+    test_r2_overall: 0.8865139474577228
+    test_nrmse_mean: 0.0921153873205185
+    test_mse_mean: 0.01186097227036953
+  val_metrics:
+    rmse_pooled: 0.11522956307023927
+    rmse_mean: 0.10549713671207428
+    r2_overall: 0.8829941329899572
+    r2_mean: 0.8276603817939758
+    nrmse_mean: 0.08334408700466156
+    per_joint_rmse:
+    - 0.07834316045045853
+    - 0.18555746972560883
+    - 0.10284885764122009
+    - 0.046284981071949005
+    - 0.11445119231939316
+  test_metrics:
+    rmse_pooled: 0.1089085742039976
+    rmse_mean: 0.1006489023566246
+    r2_overall: 0.8865139474577228
+    r2_mean: 0.8305795788764954
+    nrmse_mean: 0.0921153873205185
+    per_joint_rmse:
+    - 0.07050632685422897
+    - 0.16634932160377502
+    - 0.09759882092475891
+    - 0.046374958008527756
+    - 0.12241508811712265
+- model_type: ResidualCorrectionFNN
+  run_id: ResidualCorrectionFNN_ep300_rmse0.10663_frac1_lr3e-4_wd0.05_do0.2_bs1024_hl256-512-512-256_alphareg0.1_20260502_1849
+  run_dir: /home/san/Desktop/MTP_PINN/Neural_Networks/Trained_Models_Grid_v7/run_train22_q0_qd91_qdd21_tau51_rnea15/ResidualCorrectionFNN/ResidualCorrectionFNN_ep300_rmse0.10663_frac1_lr3e-4_wd0.05_do0.2_bs1024_hl256-512-512-256_alphareg0.1_20260502_1849
+  trained_at: '2026-05-02T18:49:06.605093'
+  model_path: /home/san/Desktop/MTP_PINN/Neural_Networks/Trained_Models_Grid_v7/run_train22_q0_qd91_qdd21_tau51_rnea15/ResidualCorrectionFNN/ResidualCorrectionFNN_ep300_rmse0.10663_frac1_lr3e-4_wd0.05_do0.2_bs1024_hl256-512-512-256_alphareg0.1_20260502_1849/model.pt
+  training:
+    time_seconds: 832.4
+    time_formatted: 13m 52s
+    epochs_ran: 300
+    epochs_max: 3000
+    stopped_early: true
+    final_train_loss: 0.0331843
+    final_val_loss: 0.1154842
+  hardware:
+    device: cuda:NVIDIA GeForce RTX 3050 Laptop GPU
+    torch_version: 2.5.1+cu124
+  data:
+    num_train_samples: 66735
+    num_val_samples: 47868
+    num_test_samples: 38106
+  hyperparams:
+    hidden_layers:
+    - 256
+    - 512
+    - 512
+    - 256
+    dropout: 0.2
+    activation: gelu
+    learning_rate: 0.0003
+    weight_decay: 0.05
+    batch_size: 1024
+    lr_scheduler: warmup_cosine
+    grad_clip_norm: 1.0
+    feature_noise_std: 0.05
+    epochs: 3000
+    patience: 150
+    min_delta: 0.0001
+    early_stopping: true
+    early_stop_metric: val_rmse
+    dataset_memmap: true
+    stride: 1
+    seed: 0
+    data_train_seed: 0
+    physics_warmup_fraction: 0.05
+    correction_scale: 0.5
+    alpha_reg_weight: 0.1
+    data_train_fraction: 1.0
+    phys_input_concat: 7J
+    torch_compile: false
+    torch_compile_mode: default
+  metrics:
+    avg_rmse_mean: 0.09809315204620361
+    avg_rmse_pooled: 0.1066284517822426
+    avg_r2_overall: 0.8961743605110277
+    avg_r2_mean: 0.8482581377029419
+    avg_nrmse_mean: 0.07744729518890381
+    avg_mse_mean: 0.011369341984391212
+    avg_pearson_mean: 0.9212046819740733
+    per_joint_rmse:
+    - 0.07404634356498718
+    - 0.16756004095077515
+    - 0.09199777245521545
+    - 0.042926542460918427
+    - 0.11393505334854126
+    per_joint_r2:
+    - 0.8756714463233948
+    - 0.9118364453315735
+    - 0.9207230806350708
+    - 0.8291525840759277
+    - 0.7039070129394531
+    test_rmse_mean: 0.0935436561703682
+    test_rmse_pooled: 0.10081635392285812
+    test_r2_overall: 0.9027520805252084
+    test_nrmse_mean: 0.08572463691234589
+    test_mse_mean: 0.010163864120841026
+  val_metrics:
+    rmse_pooled: 0.11103797979651733
+    rmse_mean: 0.10150809586048126
+    r2_overall: 0.8913517055633334
+    r2_mean: 0.839137077331543
+    nrmse_mean: 0.07996589690446854
+    per_joint_rmse:
+    - 0.0738905519247055
+    - 0.17687413096427917
+    - 0.09695222973823547
+    - 0.04296102002263069
+    - 0.11686250567436218
+  test_metrics:
+    rmse_pooled: 0.10081635392285812
+    rmse_mean: 0.0935436561703682
+    r2_overall: 0.9027520805252084
+    r2_mean: 0.8545781970024109
+    nrmse_mean: 0.08572463691234589
+    per_joint_rmse:
+    - 0.07424245774745941
+    - 0.1550714522600174
+    - 0.08537016063928604
+    - 0.04288358613848686
+    - 0.11015063524246216
+- model_type: BlackBoxFNN
+  run_id: BlackBoxFNN_ep300_rmse0.12273_frac1_lr3e-4_wd0.05_do0.2_bs1024_hl256-512-512-256_20260502_1848
+  run_dir: /home/san/Desktop/MTP_PINN/Neural_Networks/Trained_Models_Grid_v7/run_train22_q0_qd91_qdd21_tau51_rnea15/FNN/BlackBoxFNN_ep300_rmse0.12273_frac1_lr3e-4_wd0.05_do0.2_bs1024_hl256-512-512-256_20260502_1848
+  trained_at: '2026-05-02T18:48:44.631631'
+  model_path: /home/san/Desktop/MTP_PINN/Neural_Networks/Trained_Models_Grid_v7/run_train22_q0_qd91_qdd21_tau51_rnea15/FNN/BlackBoxFNN_ep300_rmse0.12273_frac1_lr3e-4_wd0.05_do0.2_bs1024_hl256-512-512-256_20260502_1848/model.pt
+  training:
+    time_seconds: 810.3
+    time_formatted: 13m 30s
+    epochs_ran: 300
+    epochs_max: 3000
+    stopped_early: true
+    final_train_loss: 0.0242168
+    final_val_loss: 0.1529675
+  hardware:
+    device: cuda:NVIDIA GeForce RTX 3050 Laptop GPU
+    torch_version: 2.5.1+cu124
+  data:
+    num_train_samples: 66735
+    num_val_samples: 47868
+    num_test_samples: 38106
+  hyperparams:
+    hidden_layers:
+    - 256
+    - 512
+    - 512
+    - 256
+    dropout: 0.2
+    activation: gelu
+    learning_rate: 0.0003
+    weight_decay: 0.05
+    batch_size: 1024
+    lr_scheduler: warmup_cosine
+    grad_clip_norm: 1.0
+    feature_noise_std: 0.05
+    epochs: 3000
+    patience: 150
+    min_delta: 0.0001
+    early_stopping: true
+    early_stop_metric: val_rmse
+    dataset_memmap: true
+    stride: 1
+    seed: 0
+    data_train_seed: 0
+    physics_warmup_fraction: 0.05
+    correction_scale: 0.5
+    data_train_fraction: 1.0
+    torch_compile: false
+    torch_compile_mode: default
+  metrics:
+    avg_rmse_mean: 0.11465124785900116
+    avg_rmse_pooled: 0.12273234364151892
+    avg_r2_overall: 0.862444974362921
+    avg_r2_mean: 0.7870143055915833
+    avg_nrmse_mean: 0.09248346835374832
+    avg_mse_mean: 0.015062911435961723
+    avg_pearson_mean: 0.8892354826467643
+    per_joint_rmse:
+    - 0.0869528204202652
+    - 0.18601588904857635
+    - 0.11696384847164154
+    - 0.05514111369848251
+    - 0.1281825602054596
+    per_joint_r2:
+    - 0.8285526037216187
+    - 0.8913453817367554
+    - 0.8718569278717041
+    - 0.7180918455123901
+    - 0.6252244710922241
+    test_rmse_mean: 0.10828236490488052
+    test_rmse_pooled: 0.11484849730674596
+    test_r2_overall: 0.8737972032135564
+    test_nrmse_mean: 0.10146045684814453
+    test_mse_mean: 0.013190098106861115
+  val_metrics:
+    rmse_pooled: 0.12866350240798324
+    rmse_mean: 0.11937777698040009
+    r2_overall: 0.8541217490585082
+    r2_mean: 0.7718250155448914
+    nrmse_mean: 0.0957849845290184
+    per_joint_rmse:
+    - 0.09037859737873077
+    - 0.1991386115550995
+    - 0.12310677021741867
+    - 0.05461962893605232
+    - 0.1296452283859253
+  test_metrics:
+    rmse_pooled: 0.11484849730674596
+    rmse_mean: 0.10828236490488052
+    r2_overall: 0.8737972032135564
+    r2_mean: 0.7972664833068848
+    nrmse_mean: 0.10146045684814453
+    per_joint_rmse:
+    - 0.08245035260915756
+    - 0.1680869311094284
+    - 0.10875976830720901
+    - 0.055789656937122345
+    - 0.12632513046264648

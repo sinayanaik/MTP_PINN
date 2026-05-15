@@ -79,10 +79,9 @@ from Neural_Networks.models.shared.optim import build_optimizer_default  # noqa:
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Joint weights — EDR uses uniform weights so train MSE matches val RMSE scale
-# (macro mean over joints; early stopping on val_rmse stays consistent).
+# Joint weights — EDR uses custom weights to focus on bottlenecks
 # ---------------------------------------------------------------------------
-_JOINT_WEIGHTS: list[float] = [1.0, 1.0, 1.0, 1.0, 1.0]
+_JOINT_WEIGHTS: list[float] = [1.0, 3.0, 1.2, 0.7, 2.5]
 
 
 # ===========================================================================
@@ -233,27 +232,41 @@ def _weighted_mse_loss(
     tau_hat:       torch.Tensor,
     target:        torch.Tensor,
     joint_weights: torch.Tensor | None,
+    mean:          torch.Tensor | None = None,
+    std:           torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Per-joint weighted mean-squared error.
+    """Per-joint Weighted Huber loss on normalized space.
 
     Parameters
     ----------
     tau_hat:
-        Predicted torques, shape (B, n_joints).
+        Predicted torques in physical space, shape (B, n_joints).
     target:
-        Ground-truth torques, shape (B, n_joints).
+        Ground-truth torques in physical space, shape (B, n_joints).
     joint_weights:
         Per-joint scalar weights, shape (n_joints,) or None.
-        When None, falls back to unweighted MSE.
+    mean:
+        Target mean, shape (n_joints,).
+    std:
+        Target standard deviation, shape (n_joints,).
 
     Returns
     -------
     torch.Tensor
         Scalar loss value.
     """
-    if joint_weights is None:
-        return F.mse_loss(tau_hat, target)
-    return (joint_weights * (tau_hat - target) ** 2).mean()
+    if mean is not None and std is not None:
+        std = torch.clamp(std, min=1e-8)
+        p_norm = (tau_hat - mean) / std
+        t_norm = (target - mean) / std
+        if joint_weights is None:
+            return F.huber_loss(p_norm, t_norm, delta=0.5)
+        loss = F.huber_loss(p_norm, t_norm, reduction="none", delta=0.5)
+        return (joint_weights * loss).mean()
+    else:
+        if joint_weights is None:
+            return F.mse_loss(tau_hat, target)
+        return (joint_weights * (tau_hat - target) ** 2).mean()
 
 
 def _correction_reg_loss(
@@ -493,6 +506,9 @@ def _train_epoch_edr(
     _use_pass   = bool(hp.get("enable_passivity_loss",   False))
     _lambda_pass= float(hp.get("lambda_passivity",       1e-2))
 
+    std_meta = torch.from_numpy(loader.dataset.std_tau).to(device)
+    mean_meta = torch.from_numpy(loader.dataset.mean_tau).to(device)
+
     total_loss  = 0.0
     total_l_data = 0.0
     total_l_corr = 0.0
@@ -551,7 +567,7 @@ def _train_epoch_edr(
         )
 
         # ── Loss assembly ────────────────────────────────────────────────
-        l_data = _weighted_mse_loss(tau_hat, target, _jw)
+        l_data = _weighted_mse_loss(tau_hat, target, _jw, mean=mean_meta, std=std_meta)
         l_corr = _correction_reg_loss(
             delta_g,
             delta_M,
@@ -667,6 +683,9 @@ def _eval_epoch_edr(
     all_pred:   list[np.ndarray] = []
     all_target: list[np.ndarray] = []
     _jw = torch.tensor(_JOINT_WEIGHTS, device=device)
+    
+    std_meta = torch.from_numpy(loader.dataset.std_tau).to(device)
+    mean_meta = torch.from_numpy(loader.dataset.mean_tau).to(device)
 
     with torch.no_grad():
         for features, target, physics in loader:
@@ -675,7 +694,7 @@ def _eval_epoch_edr(
             physics  = physics.to(device,  non_blocking=True)
 
             tau_hat = model(features, physics)
-            loss    = _weighted_mse_loss(tau_hat, target, _jw)
+            loss    = _weighted_mse_loss(tau_hat, target, _jw, mean=mean_meta, std=std_meta)
             total_loss += loss.item()
 
             p    = tau_hat.cpu().numpy()

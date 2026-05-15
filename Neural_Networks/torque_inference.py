@@ -30,6 +30,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+import matplotlib.ticker
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -55,25 +56,45 @@ from Neural_Networks.models.torque_models import (
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_STANDALONE_MODEL_ROOT = ROOT / "Trained_Models"
-DEFAULT_GRID_MODEL_ROOT = ROOT / "Trained_Models_Grid"
+DEFAULT_GRID_MODEL_ROOT = ROOT / "Trained_Models" / "Grid_Searches"
 DEFAULT_MODEL_ROOTS = [DEFAULT_STANDALONE_MODEL_ROOT, DEFAULT_GRID_MODEL_ROOT]
 DEFAULT_DATA_ROOT = ROOT / "train_data"
 DEFAULT_RAW_ROOT = ROOT.parent / "raw_samples"
 EDR_DIR = ROOT / "models" / "Equivariant-Decomposed-Residual"
 CATALOG_FILENAMES = ("trajectories_catalog.csv", "trajectory_catalog.csv")
 TRAJECTORY_ALL_LABEL = "[All catalog trajectories]"
-JOINT_LABELS = ["J1 yaw", "J2 shoulder", "J3 elbow", "J4 wrist", "J5 wrist roll"]
+JOINT_LABELS = [r"$J_1$", r"$J_2$", r"$J_3$", r"$J_4$", r"$J_5$"]
+# High-contrast standard colors
+STD_COLORS = [
+    "#E41A1C",  # Red
+    "#377EB8",  # Blue
+    "#4DAF4A",  # Green
+    "#984EA3",  # Purple
+    "#FF7F00",  # Orange
+    "#A65628",  # Brown
+]
+COLOR_CHOICES = {
+    "Red": "#E41A1C",
+    "Blue": "#377EB8",
+    "Green": "#4DAF4A",
+    "Purple": "#984EA3",
+    "Orange": "#FF7F00",
+    "Brown": "#A65628",
+    "Black": "#000000",
+    "Dark Gray": "#444444",
+}
+REV_COLOR_CHOICES = {v: k for k, v in COLOR_CHOICES.items()}
 MODEL_COLORS = {
-    "BlackBoxFNN": "#e41a1c",
-    "FNN": "#e41a1c",
-    "PhysicsRegularizedFNN": "#148414",
-    "ResidualCorrectionFNN": "#8a148a",
-    "EDR": "#0047ff",
+    "BlackBoxFNN": STD_COLORS[0],            # Red
+    "FNN": STD_COLORS[0],                     # Red
+    "PhysicsRegularizedFNN": STD_COLORS[2],   # Green
+    "ResidualCorrectionFNN": STD_COLORS[1],   # Blue
+    "EDR": STD_COLORS[3],                     # Purple
 }
 MODEL_ALIASES = {
-    "BlackBoxFNN": "FNN",
-    "PhysicsRegularizedFNN": "PINN_FNN",
-    "ResidualCorrectionFNN": "Residual",
+    "BlackBoxFNN": "Baseline FNN",
+    "PhysicsRegularizedFNN": "PINN-FNN",
+    "ResidualCorrectionFNN": "Residual PINN",
     "EDR": "EDR",
 }
 
@@ -86,6 +107,7 @@ class ModelRecord:
     metadata_path: Path
     model_type: str
     run_id: str
+    iteration: str
     data_run_dir: Path | None
     rmse: float | None
     r2: float | None
@@ -271,8 +293,7 @@ def _model_alias(model_type: str) -> str:
 
 
 def _model_color(model_type: str, index: int = 0) -> str:
-    fallback = ["#0047ff", "#148414", "#8a148a", "#e41a1c", "#ff7f00", "#4d4d4d"]
-    return MODEL_COLORS.get(model_type, fallback[index % len(fallback)])
+    return MODEL_COLORS.get(model_type, STD_COLORS[index % len(STD_COLORS)])
 
 
 def _physics_tag(hp: dict[str, Any]) -> str:
@@ -341,6 +362,10 @@ def discover_models(model_roots: list[Path]) -> list[ModelRecord]:
                 meta = _read_yaml(meta_path)
             except Exception:
                 continue
+            
+            rel = meta_path.relative_to(root)
+            iteration = rel.parts[0] if len(rel.parts) > 1 else "default"
+            
             model_type = str(meta.get("model_type") or run_dir.parent.name)
             run_id = str(meta.get("run_id") or run_dir.name)
             data_raw = meta.get("data_run_dir") or meta.get("run_dir")
@@ -371,6 +396,7 @@ def discover_models(model_roots: list[Path]) -> list[ModelRecord]:
                     meta_path,
                     model_type,
                     run_id,
+                    iteration,
                     data_run_dir,
                     rmse,
                     r2,
@@ -808,9 +834,15 @@ class TorqueInferenceApp(tk.Tk):
         self.filtered_records: list[ModelRecord] = []
         self.selected_model_paths: set[Path] = set()
         self.legend_label_vars: dict[str, tk.StringVar] = {}
+        self.legend_order_vars: dict[str, tk.StringVar] = {}
+        self.legend_width_vars: dict[str, tk.StringVar] = {}
+        self.legend_color_vars: dict[str, tk.StringVar] = {}
+        self.legend_style_vars: dict[str, tk.StringVar] = {}
+        self.legend_smooth_vars: dict[str, tk.StringVar] = {}
         self.model_groups: list[ModelGroup] = []
         self.extra_model_groups: list[ModelGroup] = []
         self.results: list[PredictionResult] = []
+        self.hidden_builtins: set[str] = set()
         self.trajectory_catalog: list[TrajectoryEntry] = []
         self.trajectory_choice_by_label: dict[str, str | None] = {}
         self.joint_vars = [tk.BooleanVar(value=True) for _ in range(ACTIVE_JOINTS)]
@@ -857,45 +889,59 @@ class TorqueInferenceApp(tk.Tk):
         filters = ttk.LabelFrame(left, text="Filter", padding=8)
         filters.pack(fill=tk.X, pady=(4, 8))
         self.group_var = tk.StringVar()
+        self.iteration_var = tk.StringVar(value="All")
         self.search_var = tk.StringVar()
         self.type_filter_var = tk.StringVar(value="All")
         self.max_rmse_filter_var = tk.StringVar()
         self.top_n_filter_var = tk.StringVar(value="")
         self.runnable_only_var = tk.BooleanVar(value=True)
+        
         ttk.Label(filters, text="Model group").grid(row=0, column=0, sticky="w")
         self.group_box = ttk.Combobox(filters, textvariable=self.group_var, values=[], state="readonly", width=42)
         self.group_box.grid(row=0, column=1, sticky="ew", padx=(6, 0), pady=2)
         self.group_box.bind("<<ComboboxSelected>>", lambda _e: self._on_model_group_selected())
-        ttk.Label(filters, text="Search").grid(row=1, column=0, sticky="w")
+        
+        ttk.Label(filters, text="Iteration").grid(row=1, column=0, sticky="w")
+        self.iteration_box = ttk.Combobox(filters, textvariable=self.iteration_var, values=["All"], state="readonly", width=42)
+        self.iteration_box.grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=2)
+        self.iteration_box.bind("<<ComboboxSelected>>", lambda _e: self.apply_model_filter())
+        
+        ttk.Label(filters, text="Search").grid(row=2, column=0, sticky="w")
         search_entry = ttk.Entry(filters, textvariable=self.search_var, width=24)
-        search_entry.grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=2)
-        ttk.Label(filters, text="Type").grid(row=2, column=0, sticky="w")
+        search_entry.grid(row=2, column=1, sticky="ew", padx=(6, 0), pady=2)
+        
+        ttk.Label(filters, text="Type").grid(row=3, column=0, sticky="w")
         self.type_filter_box = ttk.Combobox(filters, textvariable=self.type_filter_var, values=["All"], state="readonly", width=22)
-        self.type_filter_box.grid(row=2, column=1, sticky="ew", padx=(6, 0), pady=2)
-        ttk.Label(filters, text="Max RMSE").grid(row=3, column=0, sticky="w")
-        ttk.Entry(filters, textvariable=self.max_rmse_filter_var, width=12).grid(row=3, column=1, sticky="ew", padx=(6, 0), pady=2)
-        ttk.Label(filters, text="Show top").grid(row=4, column=0, sticky="w")
-        ttk.Entry(filters, textvariable=self.top_n_filter_var, width=12).grid(row=4, column=1, sticky="ew", padx=(6, 0), pady=2)
-        ttk.Checkbutton(filters, text="Runnable data only", variable=self.runnable_only_var, command=self.apply_model_filter).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        ttk.Button(filters, text="Apply Filter", command=self.apply_model_filter).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.type_filter_box.grid(row=3, column=1, sticky="ew", padx=(6, 0), pady=2)
+        
+        ttk.Label(filters, text="Max RMSE").grid(row=4, column=0, sticky="w")
+        ttk.Entry(filters, textvariable=self.max_rmse_filter_var, width=12).grid(row=4, column=1, sticky="ew", padx=(6, 0), pady=2)
+        
+        ttk.Label(filters, text="Show top").grid(row=5, column=0, sticky="w")
+        ttk.Entry(filters, textvariable=self.top_n_filter_var, width=12).grid(row=5, column=1, sticky="ew", padx=(6, 0), pady=2)
+        
+        ttk.Checkbutton(filters, text="Runnable data only", variable=self.runnable_only_var, command=self.apply_model_filter).grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Button(filters, text="Apply Filter", command=self.apply_model_filter).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        
         self.filter_summary_var = tk.StringVar(value="Filter: runnable data only; no search/type/RMSE/top limit")
-        ttk.Label(filters, textvariable=self.filter_summary_var, wraplength=620).grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(filters, textvariable=self.filter_summary_var, wraplength=620).grid(row=8, column=0, columnspan=2, sticky="w", pady=(6, 0))
         filters.columnconfigure(1, weight=1)
         self.search_var.trace_add("write", lambda *_: self.apply_model_filter())
         self.type_filter_var.trace_add("write", lambda *_: self.apply_model_filter())
 
         list_frame = ttk.Frame(left)
         list_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 8))
-        columns = ("use", "type", "data", "rmse", "frac", "tag", "run")
+        columns = ("use", "type", "iter", "data", "rmse", "frac", "tag", "run")
         self.model_table = ttk.Treeview(list_frame, columns=columns, show="headings", height=13, selectmode="browse")
         for col, text, width, anchor in [
             ("use", "Use", 44, "center"),
             ("type", "Type", 88, "w"),
+            ("iter", "Iteration", 120, "w"),
             ("data", "Data", 48, "center"),
             ("rmse", "TEST RMSE", 72, "e"),
             ("frac", "Frac", 50, "e"),
             ("tag", "HP", 88, "w"),
-            ("run", "Run", 292, "w"),
+            ("run", "Run", 182, "w"),
         ]:
             self.model_table.heading(col, text=text)
             self.model_table.column(col, width=width, anchor=anchor, stretch=(col == "run"))
@@ -926,11 +972,10 @@ class TorqueInferenceApp(tk.Tk):
         ttk.Button(action_row, text="Save Figure", command=self.save_figure).pack(side=tk.LEFT, padx=6)
         ttk.Button(action_row, text="Save CSV", command=self.save_predictions_csv).pack(side=tk.LEFT)
 
-        legends = ttk.LabelFrame(left, text="Legend Labels", padding=8)
+        legends = ttk.LabelFrame(left, text="Legend & Style Editor", padding=8)
         legends.pack(fill=tk.X, pady=(0, 8))
         self.legend_editor = ttk.Frame(legends)
         self.legend_editor.pack(fill=tk.X)
-        ttk.Label(legends, text="Edit these names before or after running comparison.", wraplength=620).pack(anchor="w", pady=(4, 0))
 
         settings = ttk.LabelFrame(left, text="Evaluation", padding=8)
         settings.pack(fill=tk.X, pady=(0, 8))
@@ -982,15 +1027,44 @@ class TorqueInferenceApp(tk.Tk):
             state="readonly",
             width=12,
         ).grid(row=0, column=1, sticky="ew", padx=(6, 0), pady=2)
-        ttk.Label(style_grid, text="Smooth").grid(row=1, column=0, sticky="w")
-        ttk.Entry(style_grid, textvariable=self.smooth_var, width=10).grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=2)
-        ttk.Label(style_grid, text="Line width").grid(row=2, column=0, sticky="w")
-        ttk.Entry(style_grid, textvariable=self.line_width_var, width=10).grid(row=2, column=1, sticky="ew", padx=(6, 0), pady=2)
-        ttk.Label(style_grid, text="Legend cols").grid(row=3, column=0, sticky="w")
-        ttk.Entry(style_grid, textvariable=self.legend_cols_var, width=10).grid(row=3, column=1, sticky="ew", padx=(6, 0), pady=2)
+        
+        # Sizes configuration
+        self.title_size_var = tk.StringVar(value="14")
+        self.label_size_var = tk.StringVar(value="12")
+        self.tick_size_var = tk.StringVar(value="10")
+        self.legend_size_var = tk.StringVar(value="11")
+        
+        ttk.Label(style_grid, text="Title Size").grid(row=1, column=0, sticky="w")
+        ttk.Entry(style_grid, textvariable=self.title_size_var, width=10).grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=2)
+        ttk.Label(style_grid, text="Label Size").grid(row=2, column=0, sticky="w")
+        ttk.Entry(style_grid, textvariable=self.label_size_var, width=10).grid(row=2, column=1, sticky="ew", padx=(6, 0), pady=2)
+        ttk.Label(style_grid, text="Legend Size").grid(row=3, column=0, sticky="w")
+        ttk.Entry(style_grid, textvariable=self.legend_size_var, width=10).grid(row=3, column=1, sticky="ew", padx=(6, 0), pady=2)
+        
+        ttk.Label(style_grid, text="Line width").grid(row=4, column=0, sticky="w")
+        ttk.Entry(style_grid, textvariable=self.line_width_var, width=10).grid(row=4, column=1, sticky="ew", padx=(6, 0), pady=2)
+        
+        # Physics Toggle
+        ttk.Checkbutton(style_grid, text="Show Physics", variable=self.show_physics_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=2)
+
+        # Highlight region fields
+        self.t1_var = tk.StringVar(value="")
+        self.t2_var = tk.StringVar(value="")
+        ttk.Label(style_grid, text="Crop t1").grid(row=6, column=0, sticky="w")
+        ttk.Entry(style_grid, textvariable=self.t1_var, width=10).grid(row=6, column=1, sticky="ew", padx=(6, 0), pady=2)
+        ttk.Label(style_grid, text="Crop t2").grid(row=7, column=0, sticky="w")
+        ttk.Entry(style_grid, textvariable=self.t2_var, width=10).grid(row=7, column=1, sticky="ew", padx=(6, 0), pady=2)
+        
         style_grid.columnconfigure(1, weight=1)
-        for v in (self.grid_layout_var, self.smooth_var, self.line_width_var, self.legend_cols_var):
-            v.trace_add("write", lambda *_: self.redraw_plot())
+        
+        def _on_style_change(*_):
+            self._refresh_legend_editor()
+            self.redraw_plot()
+
+        for v in (self.grid_layout_var, self.smooth_var, self.line_width_var, self.legend_cols_var, 
+                  self.t1_var, self.t2_var, self.title_size_var, self.label_size_var, 
+                  self.tick_size_var, self.legend_size_var, self.show_physics_var):
+            v.trace_add("write", _on_style_change)
 
         joints = ttk.Frame(plots)
         joints.pack(fill=tk.X, pady=(8, 0))
@@ -1000,7 +1074,16 @@ class TorqueInferenceApp(tk.Tk):
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(left, textvariable=self.status_var, wraplength=520).pack(fill=tk.X, pady=(8, 0))
 
-        self.figure = Figure(figsize=(12, 9), dpi=100, constrained_layout=False)
+        # Scientific publication defaults
+        matplotlib.rcParams.update({
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "DejaVu Serif", "Liberation Serif", "serif"],
+            "mathtext.fontset": "stix",
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        })
+        # Increase height for better subplot visibility
+        self.figure = Figure(figsize=(7.16, 12.0), dpi=100, constrained_layout=True)
         self.canvas = FigureCanvasTkAgg(self.figure, master=right)
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
@@ -1077,6 +1160,13 @@ class TorqueInferenceApp(tk.Tk):
         self.records = discover_models(list(group.roots)) if group is not None else []
         current_paths = {r.model_path for r in self.records}
         self.selected_model_paths.intersection_update(current_paths)
+        
+        # Iteration filtering
+        iters = ["All"] + sorted({r.iteration for r in self.records})
+        self.iteration_box.configure(values=iters)
+        if self.iteration_var.get() not in iters:
+            self.iteration_var.set("All")
+            
         types = ["All"] + sorted({r.model_type for r in self.records})
         self.type_filter_box.configure(values=types)
         if self.type_filter_var.get() not in types:
@@ -1105,6 +1195,7 @@ class TorqueInferenceApp(tk.Tk):
     def apply_model_filter(self) -> None:
         query = self.search_var.get().strip().lower()
         type_filter = self.type_filter_var.get()
+        iter_filter = self.iteration_var.get()
         try:
             max_rmse = float(self.max_rmse_filter_var.get()) if self.max_rmse_filter_var.get().strip() else None
         except ValueError:
@@ -1116,10 +1207,12 @@ class TorqueInferenceApp(tk.Tk):
 
         filtered: list[ModelRecord] = []
         for rec in self.records:
-            haystack = f"{rec.model_type} {rec.run_id} {rec.physics_tag} {rec.data_run_dir or ''}".lower()
+            haystack = f"{rec.model_type} {rec.run_id} {rec.iteration} {rec.physics_tag} {rec.data_run_dir or ''}".lower()
             if query and query not in haystack:
                 continue
             if type_filter != "All" and rec.model_type != type_filter:
+                continue
+            if iter_filter != "All" and rec.iteration != iter_filter:
                 continue
             if self.runnable_only_var.get() and not rec.data_available:
                 continue
@@ -1135,6 +1228,7 @@ class TorqueInferenceApp(tk.Tk):
         self._refresh_metric_headings()
         parts = []
         parts.append(f"group={self.group_var.get() or 'none'}")
+        parts.append(f"iter={iter_filter}")
         parts.append("runnable data only" if self.runnable_only_var.get() else "including missing-data checkpoints")
         parts.append(f"type={type_filter}")
         parts.append(f"search={query!r}" if query else "search=none")
@@ -1156,6 +1250,7 @@ class TorqueInferenceApp(tk.Tk):
                 values=(
                     mark,
                     _model_alias(rec.model_type),
+                    rec.iteration,
                     "ok" if rec.data_available else "missing",
                     _fmt_optional_float(self._record_stored_rmse(rec), 5),
                     _fmt_optional_float(rec.data_fraction, 2),
@@ -1165,25 +1260,128 @@ class TorqueInferenceApp(tk.Tk):
             )
 
     def _default_legend_label(self, rec: ModelRecord) -> str:
-        return _model_alias(rec.model_type)
+        alias = _model_alias(rec.model_type)
+        if rec.iteration and rec.iteration != "default":
+            # If iteration is long, maybe shorten it? 
+            # e.g. run_train22_q0_qd91_qdd21_tau51_rnea15 -> rnea15
+            it = rec.iteration
+            if "_" in it:
+                parts = it.split("_")
+                if len(parts) > 1:
+                    it = parts[-1]
+            return f"{it}: {alias}"
+        return alias
 
     def _refresh_legend_editor(self) -> None:
         for child in self.legend_editor.winfo_children():
             child.destroy()
+        
         selected = [r for r in self.records if r.model_path in self.selected_model_paths]
         selected = selected[:8]
-        if not selected:
-            ttk.Label(self.legend_editor, text="No models selected. Check Use in the table.").grid(row=0, column=0, sticky="w")
-            return
-        for row, rec in enumerate(selected):
-            key = str(rec.model_path)
+        
+        # We also want to style Ground Truth and Physics
+        virtual_keys = []
+        if "GROUND_TRUTH" not in self.hidden_builtins:
+            virtual_keys.append("GROUND_TRUTH")
+        if self.show_physics_var.get() and "PHYSICS" not in self.hidden_builtins:
+            virtual_keys.append("PHYSICS")
+        
+        all_keys = virtual_keys + [str(r.model_path) for r in selected]
+        
+        # Action row for restoring
+        if self.hidden_builtins:
+            btn_frame = ttk.Frame(self.legend_editor)
+            btn_frame.grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 4))
+            ttk.Button(btn_frame, text="Restore Built-ins", command=self._restore_builtins, padding=2).pack(side=tk.LEFT)
+
+        # Headers
+        headers = ["Series", "Label", "Ord", "LW", "Smth", "Color", "Style", "Del"]
+        header_row = 1 if self.hidden_builtins else 0
+        for col, text in enumerate(headers):
+            ttk.Label(self.legend_editor, text=text, font=("TkDefaultFont", 8, "bold")).grid(row=header_row, column=col, sticky="w", padx=1)
+
+        default_styles = {
+            "GROUND_TRUTH": {"label": "Ground Truth", "order": "1", "lw": "2.2", "color": "#000000", "ls": "-", "sm": "1"},
+            "PHYSICS": {"label": "Physics", "order": "5", "lw": "1.0", "color": "#444444", "ls": "--", "sm": "1"},
+        }
+        
+        model_ls = ["--", "-.", ":", "-", "--", "-.", ":", "-"]
+        
+        for idx, key in enumerate(all_keys):
+            row = idx + header_row + 1
             if key not in self.legend_label_vars:
-                suffix = "" if len([r for r in selected if r.model_type == rec.model_type]) == 1 else f" {row + 1}"
-                self.legend_label_vars[key] = tk.StringVar(value=self._default_legend_label(rec) + suffix)
-                self.legend_label_vars[key].trace_add("write", lambda *_: self.redraw_plot())
-            ttk.Label(self.legend_editor, text=_model_alias(rec.model_type), width=12).grid(row=row, column=0, sticky="w", pady=1)
-            ttk.Entry(self.legend_editor, textvariable=self.legend_label_vars[key], width=28).grid(row=row, column=1, sticky="ew", padx=(6, 0), pady=1)
+                if key == "GROUND_TRUTH":
+                    d = default_styles["GROUND_TRUTH"]
+                    self.legend_label_vars[key] = tk.StringVar(value=d["label"])
+                    self.legend_order_vars[key] = tk.StringVar(value=d["order"])
+                    self.legend_width_vars[key] = tk.StringVar(value=d["lw"])
+                    col_hex = d["color"]
+                    self.legend_color_vars[key] = tk.StringVar(value=REV_COLOR_CHOICES.get(col_hex, col_hex))
+                    self.legend_style_vars[key] = tk.StringVar(value=d["ls"])
+                    self.legend_smooth_vars[key] = tk.StringVar(value=d["sm"])
+                elif key == "PHYSICS":
+                    d = default_styles["PHYSICS"]
+                    self.legend_label_vars[key] = tk.StringVar(value=d["label"])
+                    self.legend_order_vars[key] = tk.StringVar(value=d["order"])
+                    self.legend_width_vars[key] = tk.StringVar(value=d["lw"])
+                    col_hex = d["color"]
+                    self.legend_color_vars[key] = tk.StringVar(value=REV_COLOR_CHOICES.get(col_hex, col_hex))
+                    self.legend_style_vars[key] = tk.StringVar(value=d["ls"])
+                    self.legend_smooth_vars[key] = tk.StringVar(value=d["sm"])
+                else:
+                    # It's a model
+                    rec = next(r for r in selected if str(r.model_path) == key)
+                    m_idx = next(i for i, r in enumerate(selected) if str(r.model_path) == key)
+                    self.legend_label_vars[key] = tk.StringVar(value=self._default_legend_label(rec))
+                    self.legend_order_vars[key] = tk.StringVar(value=str(m_idx + 2))
+                    self.legend_width_vars[key] = tk.StringVar(value="1.6")
+                    col_hex = _model_color(rec.model_type, m_idx)
+                    self.legend_color_vars[key] = tk.StringVar(value=REV_COLOR_CHOICES.get(col_hex, col_hex))
+                    self.legend_style_vars[key] = tk.StringVar(value=model_ls[m_idx % len(model_ls)])
+                    self.legend_smooth_vars[key] = tk.StringVar(value="7")
+                
+                for v in (self.legend_label_vars[key], self.legend_order_vars[key], 
+                          self.legend_width_vars[key], self.legend_color_vars[key], 
+                          self.legend_style_vars[key], self.legend_smooth_vars[key]):
+                    v.trace_add("write", lambda *_: self.redraw_plot())
+
+            # Series Name
+            s_name = "Ground Truth" if key == "GROUND_TRUTH" else ("Physics" if key == "PHYSICS" else _model_alias(next(r for r in selected if str(r.model_path) == key).model_type))
+            ttk.Label(self.legend_editor, text=s_name, width=10, font=("TkDefaultFont", 8)).grid(row=row, column=0, sticky="w", pady=1)
+            
+            # Entry styles optimized for space
+            ttk.Entry(self.legend_editor, textvariable=self.legend_label_vars[key], width=14).grid(row=row, column=1, sticky="ew", padx=1, pady=1)
+            ttk.Entry(self.legend_editor, textvariable=self.legend_order_vars[key], width=3).grid(row=row, column=2, sticky="ew", padx=1, pady=1)
+            ttk.Entry(self.legend_editor, textvariable=self.legend_width_vars[key], width=3).grid(row=row, column=3, sticky="ew", padx=1, pady=1)
+            ttk.Entry(self.legend_editor, textvariable=self.legend_smooth_vars[key], width=3).grid(row=row, column=4, sticky="ew", padx=1, pady=1)
+            ttk.Combobox(self.legend_editor, textvariable=self.legend_color_vars[key], values=list(COLOR_CHOICES.keys()), width=8, state="readonly").grid(row=row, column=5, sticky="ew", padx=1, pady=1)
+            
+            cb = ttk.Combobox(self.legend_editor, textvariable=self.legend_style_vars[key], values=["-", "--", "-.", ":"], width=4, state="readonly")
+            cb.grid(row=row, column=6, sticky="ew", padx=1, pady=1)
+            
+            del_btn = ttk.Button(self.legend_editor, text="X", width=2, command=lambda k=key: self._delete_series(k))
+            del_btn.grid(row=row, column=7, padx=1)
+            
         self.legend_editor.columnconfigure(1, weight=1)
+
+    def _delete_series(self, key: str) -> None:
+        if key in {"GROUND_TRUTH", "PHYSICS"}:
+            self.hidden_builtins.add(key)
+        else:
+            try:
+                path = Path(key)
+                if path in self.selected_model_paths:
+                    self.selected_model_paths.remove(path)
+                    self._populate_model_table()
+            except Exception:
+                pass
+        self._refresh_legend_editor()
+        self.redraw_plot()
+
+    def _restore_builtins(self) -> None:
+        self.hidden_builtins.clear()
+        self._refresh_legend_editor()
+        self.redraw_plot()
 
     def _on_model_table_click(self, event) -> None:
         iid = self.model_table.identify_row(event.y)
@@ -1456,6 +1654,51 @@ class TorqueInferenceApp(tk.Tk):
         trajectory = results[0].trajectory_label if results else "-"
         self.status_var.set(f"Completed {len(results)} model(s) on {trajectory}")
         self.redraw_plot()
+        self._auto_save_outputs()
+
+    def _auto_save_outputs(self) -> None:
+        if not self.results:
+            return
+        import re
+        labels = []
+        for res in self.results:
+            key = str(res.record.model_path)
+            if key in self.legend_label_vars:
+                lab = self.legend_label_vars[key].get().strip()
+                if lab:
+                    labels.append(lab)
+            if not labels:
+                labels.append(res.record.run_id)
+        
+        safe_labels = [re.sub(r'[^a-zA-Z0-9_\-]', '_', l) for l in labels]
+        models_str = "_".join(safe_labels)[:50]
+        traj = self.results[0].trajectory_label
+        safe_traj = re.sub(r'[^a-zA-Z0-9_\-]', '_', traj)[:40]
+        base_name = f"inference_{safe_traj}_{models_str}"
+        
+        out_dir = Path.cwd()
+        pdf_path = out_dir / f"{base_name}.pdf"
+        self.figure.savefig(pdf_path, dpi=300, bbox_inches="tight", facecolor="white")
+        
+        csv_path = out_dir / f"{base_name}_stats.csv"
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Label", "Model_Run_ID", "Trajectory", "RMSE_Pooled", "MAE_Mean", "R2_Overall", "NRMSE_Mean"])
+            for res in self.results:
+                key = str(res.record.model_path)
+                label = self.legend_label_vars.get(key)
+                label_str = label.get().strip() if label else res.record.run_id
+                m = res.metrics
+                writer.writerow([
+                    label_str,
+                    res.record.run_id,
+                    res.trajectory_label,
+                    m["rmse_pooled"],
+                    m["mae_mean"],
+                    m["r2_overall"],
+                    m["nrmse_mean"]
+                ])
+        self.status_var.set(f"Completed & auto-saved to {base_name}.(pdf|csv)")
 
     def _selected_joints(self) -> list[int]:
         joints = [i for i, v in enumerate(self.joint_vars) if v.get()]
@@ -1501,82 +1744,72 @@ class TorqueInferenceApp(tk.Tk):
 
     def _prepare_axes_grid(self, joints: list[int]) -> tuple[list[Any], list[Any]]:
         self.figure.clear()
-        rows, cols = self._grid_shape(len(joints))
-        if len(joints) == 5 and self.grid_layout_var.get() in {"Auto grid", "3 columns"}:
-            gs = self.figure.add_gridspec(2, 12, hspace=0.38, wspace=0.26)
-            axes = [
-                self.figure.add_subplot(gs[0, 0:4]),
-                self.figure.add_subplot(gs[0, 4:8]),
-                self.figure.add_subplot(gs[0, 8:12]),
-                self.figure.add_subplot(gs[1, 2:6]),
-                self.figure.add_subplot(gs[1, 6:10]),
-            ]
-            return axes, axes
-        axes = self.figure.subplots(rows, cols, squeeze=False).flatten().tolist()
+        layout = self.grid_layout_var.get()
+        if layout == "Auto grid":
+            rows, cols = (len(joints), 1) if len(joints) <= 5 else self._grid_shape(len(joints))
+        else:
+            rows, cols = self._grid_shape(len(joints))
+
+        # Re-enable sharex=True for shared x-axis as requested
+        axes_raw = self.figure.subplots(rows, cols, squeeze=False, sharex=True)
+        axes = axes_raw.flatten().tolist()
+        
         for ax in axes[len(joints):]:
             ax.axis("off")
         return axes[:len(joints)], axes
 
     def _axis_label_flags(self, plot_idx: int, n_axes: int) -> tuple[bool, bool]:
         rows, cols = self._grid_shape(n_axes)
-        if n_axes == 5 and self.grid_layout_var.get() in {"Auto grid", "3 columns"}:
-            return plot_idx >= 3, plot_idx in {0, 3}
-        return plot_idx >= (rows - 1) * cols, (plot_idx % cols) == 0
+        # Check if there's any subplot below this one
+        has_below = (plot_idx + cols) < n_axes
+        # It's a bottom subplot if there's nothing below it
+        is_bottom = not has_below
+        # It's a left-most subplot
+        is_left = (plot_idx % cols) == 0
+        return is_bottom, is_left
 
-    def _format_joint_axis(self, ax, title: str, show_xlabel: bool, show_ylabel: bool = True) -> None:
-        ax.set_title(title, fontsize=9.5, pad=4)
-        ax.set_ylabel(r"$\tau$ (N m)" if show_ylabel else "", fontsize=9, labelpad=4)
-        ax.set_xlabel("Time (s)" if show_xlabel else "", fontsize=9, labelpad=3)
-        ax.grid(True, color="#b8b8b8", alpha=0.32, linewidth=0.75)
-        ax.tick_params(axis="both", labelsize=8.5, pad=2)
+    def _format_joint_axis(self, ax, title: str, show_xlabel: bool, show_ylabel: bool = True, idx: int = 0) -> None:
+        try:
+            title_fs = float(self.title_size_var.get())
+            label_fs = float(self.label_size_var.get())
+            tick_fs = float(self.tick_size_var.get())
+        except ValueError:
+            title_fs, label_fs, tick_fs = 14, 12, 10
+
+        # Joint identifier on the right side
+        ax.text(1.02, 0.5, title, transform=ax.transAxes, fontsize=title_fs, 
+                va='center', ha='left', rotation=0)
+
+        # Grid and Ticks - Faint dotted grid (alpha=0.2)
+        ax.grid(True, which='major', color="#b8b8b8", linestyle=':', alpha=0.2, linewidth=0.5)
+        ax.minorticks_on()
+
+        # Standardize y-ticks to 4 per panel with consistent decimals
+        ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=4, prune=None))
+        ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%.1f'))
+
+        # Tick parameters
+        ax.tick_params(axis="both", which='major', labelsize=tick_fs, pad=2)
+
+        # Keep "Time (s)" only on the absolute bottom panel(s)
         if not show_xlabel:
             ax.tick_params(axis="x", labelbottom=False)
+        ax.set_xlabel("")
+
         ax.margins(x=0.01)
         for spine in ax.spines.values():
-            spine.set_color("#222222")
             spine.set_linewidth(0.8)
+            spine.set_color("#333333")
 
-    def _shared_legend(self, handles: list[Any], labels: list[str]) -> None:
-        unique_handles: list[Any] = []
-        unique_labels: list[str] = []
-        seen: set[str] = set()
-        for h, label in zip(handles, labels):
-            if label in seen:
-                continue
-            seen.add(label)
-            unique_handles.append(h)
-            unique_labels.append(label)
-        self.figure.legend(
-            unique_handles,
-            unique_labels,
-            loc="upper center",
-            ncol=min(self._legend_cols(), max(1, len(unique_labels))),
-            frameon=True,
-            fancybox=True,
-            fontsize=9,
-            columnspacing=1.0,
-            handlelength=2.4,
-            borderaxespad=0.1,
-            bbox_to_anchor=(0.5, 1.008),
-        )
-        self.figure.subplots_adjust(left=0.07, right=0.99, bottom=0.085, top=0.92, hspace=0.38, wspace=0.26)
+        # Highlighting: Crop the view to [t1, t2] if provided
         try:
-            self.figure.align_ylabels()
-        except Exception:
+            t1_str = self.t1_var.get().strip()
+            t2_str = self.t2_var.get().strip()
+            if t1_str and t2_str:
+                t1, t2 = float(t1_str), float(t2_str)
+                ax.set_xlim(t1, t2)
+        except (ValueError, TypeError):
             pass
-
-    def _result_label(self, res: PredictionResult, seen: dict[str, int]) -> str:
-        key = str(res.record.model_path)
-        if key in self.legend_label_vars:
-            label = self.legend_label_vars[key].get().strip()
-            if label:
-                return label
-        base = _model_alias(res.record.model_type)
-        seen[base] = seen.get(base, 0) + 1
-        if seen[base] == 1:
-            return base
-        rmse = f"{res.metrics['rmse_pooled']:.4f}"
-        return f"{base} {seen[base]} ({rmse})"
 
     def redraw_plot(self) -> None:
         if not self.results:
@@ -1599,117 +1832,219 @@ class TorqueInferenceApp(tk.Tk):
 
     def _draw_overlay(self) -> None:
         joints = self._selected_joints()
-        axes, all_axes = self._prepare_axes_grid(joints)
+        axes, _ = self._prepare_axes_grid(joints)
         base = self.results[0]
         idx = self._plot_indices(len(base.time))
-        handles: list[Any] = []
-        labels: list[str] = []
-        label_counts: dict[str, int] = {}
-        result_labels = {id(res): self._result_label(res, label_counts) for res in self.results}
-        line_width = self._line_width()
+        # Store (handle, label, key) to pass to _shared_legend
+        legend_data: list[tuple[Any, str, str]] = []
+        
         time0 = base.time[idx] - base.time[idx][0] if len(idx) else base.time[idx]
         for plot_idx, (ax, j) in enumerate(zip(axes, joints)):
-            target_line = ax.plot(
-                time0,
-                self._smooth_series(base.target[idx, j]),
-                color="#666666",
-                linewidth=line_width + 0.4,
-                label="Ground Truth",
-                zorder=4,
-            )[0]
-            if plot_idx == 0:
-                handles.append(target_line)
-                labels.append("Ground Truth")
-            if self.show_physics_var.get() and base.physics_total is not None:
-                phys_line = ax.plot(
+            # Ground Truth
+            key_gt = "GROUND_TRUTH"
+            if key_gt in self.legend_label_vars and key_gt not in self.hidden_builtins:
+                l_gt = self.legend_label_vars[key_gt].get()
+                c_gt_name = self.legend_color_vars[key_gt].get()
+                c_gt = COLOR_CHOICES.get(c_gt_name, c_gt_name)
+                try: lw_gt = float(self.legend_width_vars[key_gt].get())
+                except: lw_gt = 2.2
+                ls_gt = self.legend_style_vars[key_gt].get()
+                try: sm_gt = int(self.legend_smooth_vars[key_gt].get())
+                except: sm_gt = 1
+                
+                target_line = ax.plot(
                     time0,
-                    self._smooth_series(base.physics_total[idx, j]),
-                    color="#111111",
-                    linewidth=max(1.0, line_width - 1.1),
-                    linestyle="--",
-                    alpha=0.55,
-                    label="Physics",
+                    self._smooth_series_custom(base.target[idx, j], sm_gt),
+                    color=c_gt,
+                    linestyle=ls_gt,
+                    linewidth=lw_gt,
+                    label=l_gt,
+                    zorder=2,
                 )[0]
                 if plot_idx == 0:
-                    handles.append(phys_line)
-                    labels.append("Physics")
+                    legend_data.append((target_line, l_gt, key_gt))
+                
+            if self.show_physics_var.get() and base.physics_total is not None and "PHYSICS" not in self.hidden_builtins:
+                key_ph = "PHYSICS"
+                if key_ph in self.legend_label_vars:
+                    l_ph = self.legend_label_vars[key_ph].get()
+                    c_ph_name = self.legend_color_vars[key_ph].get()
+                    c_ph = COLOR_CHOICES.get(c_ph_name, c_ph_name)
+                    try: lw_ph = float(self.legend_width_vars[key_ph].get())
+                    except: lw_ph = 1.0
+                    ls_ph = self.legend_style_vars[key_ph].get()
+                    try: sm_ph = int(self.legend_smooth_vars[key_ph].get())
+                    except: sm_ph = 1
+                    
+                    phys_line = ax.plot(
+                        time0,
+                        self._smooth_series_custom(base.physics_total[idx, j], sm_ph),
+                        color=c_ph,
+                        linewidth=lw_ph,
+                        linestyle=ls_ph,
+                        alpha=0.6,
+                        label=l_ph,
+                        zorder=5,
+                    )[0]
+                    if plot_idx == 0:
+                        legend_data.append((phys_line, l_ph, key_ph))
+                    
             for model_idx, res in enumerate(self.results):
-                idx_r = self._plot_indices(len(res.time))
-                time_r = res.time[idx_r] - res.time[idx_r][0] if len(idx_r) else res.time[idx_r]
-                line = ax.plot(
-                    time_r,
-                    self._smooth_series(res.pred[idx_r, j]),
-                    linewidth=line_width,
-                    alpha=0.98,
-                    color=_model_color(res.record.model_type, model_idx),
-                    label=result_labels[id(res)],
-                    zorder=3,
-                )[0]
-                if plot_idx == 0:
-                    handles.append(line)
-                    labels.append(result_labels[id(res)])
+                key_m = str(res.record.model_path)
+                if key_m in self.legend_label_vars:
+                    l_m = self.legend_label_vars[key_m].get()
+                    c_m_name = self.legend_color_vars[key_m].get()
+                    c_m = COLOR_CHOICES.get(c_m_name, c_m_name)
+                    try: lw_m = float(self.legend_width_vars[key_m].get())
+                    except: lw_m = 1.6
+                    ls_m = self.legend_style_vars[key_m].get()
+                    try: order_val = int(self.legend_order_vars[key_m].get())
+                    except: order_val = 10
+                    try: sm_m = int(self.legend_smooth_vars[key_m].get())
+                    except: sm_m = 7
+                    
+                    idx_r = self._plot_indices(len(res.time))
+                    time_r = res.time[idx_r] - res.time[idx_r][0] if len(idx_r) else res.time[idx_r]
+                    
+                    line = ax.plot(
+                        time_r,
+                        self._smooth_series_custom(res.pred[idx_r, j], sm_m),
+                        linewidth=lw_m,
+                        linestyle=ls_m,
+                        alpha=0.9,
+                        color=c_m,
+                        label=l_m,
+                        zorder=8 + order_val,
+                    )[0]
+                    if plot_idx == 0:
+                        legend_data.append((line, l_m, key_m))
+                    
             show_xlabel, show_ylabel = self._axis_label_flags(plot_idx, len(joints))
-            self._format_joint_axis(ax, f"Joint {j + 1}", show_xlabel, show_ylabel)
-        self._shared_legend(handles, labels)
+            self._format_joint_axis(ax, JOINT_LABELS[j], show_xlabel, show_ylabel, idx=plot_idx)
+            
+        self._shared_legend(legend_data)
+
+    def _smooth_series_custom(self, values: np.ndarray, window: int) -> np.ndarray:
+        if window <= 1 or len(values) < window:
+            return values
+        if window % 2 == 0:
+            window += 1
+        kernel = np.ones(window, dtype=np.float64) / float(window)
+        return np.convolve(values, kernel, mode="same")
+
+    def _shared_legend(self, legend_data: list[tuple[Any, str, str]]) -> None:
+        # Sort based on the order value from the legend editor
+        def get_order(item):
+            key = item[2]
+            try:
+                return int(self.legend_order_vars[key].get())
+            except (ValueError, KeyError):
+                return 99
+        
+        sorted_data = sorted(legend_data, key=get_order)
+        final_handles = [x[0] for x in sorted_data]
+        final_labels = [x[1] for x in sorted_data]
+
+        try:
+            leg_fs = float(self.legend_size_var.get())
+            y_label_fs = float(self.label_size_var.get()) + 1
+        except ValueError:
+            leg_fs, y_label_fs = 11, 13
+
+        # Large horizontal legend above the figure
+        leg = self.figure.legend(
+            final_handles,
+            final_labels,
+            loc="upper center",
+            ncol=len(final_labels),
+            frameon=False,
+            fontsize=leg_fs,
+            columnspacing=2.0,
+            handlelength=3.0,
+            borderaxespad=0.1,
+            bbox_to_anchor=(0.5, 1.0),
+        )
+        
+        # Adjust layout spacing to accommodate labels on all subplots
+        try:
+            kind = self.plot_kind_var.get()
+            if kind == "Scatter":
+                self.figure.supylabel(r"$\mathrm{Predicted}\ \tau\ \mathrm{(N\cdot m)}$", fontsize=y_label_fs, x=0.02)
+                self.figure.supxlabel(r"$\mathrm{Target}\ \tau\ \mathrm{(N\cdot m)}$", fontsize=y_label_fs, y=0.02)
+            else:
+                self.figure.supylabel(r"$\mathrm{Joint\ torque,}\ \tau\ \mathrm{(N\cdot m)}$", fontsize=y_label_fs, x=0.02)
+                self.figure.supxlabel(r"$\mathrm{Time\ (s)}$", fontsize=y_label_fs, y=0.02)
+            
+            # Minimize hspace between subplots
+            self.figure.tight_layout(rect=[0.01, 0.04, 1, 0.95], h_pad=0.05)
+        except Exception:
+            self.figure.subplots_adjust(left=0.08, right=0.98, bottom=0.08, top=0.9, hspace=0.05)
+        
+        try:
+            self.figure.align_ylabels()
+        except Exception:
+            pass
 
     def _draw_residuals(self) -> None:
         joints = self._selected_joints()
         axes, _ = self._prepare_axes_grid(joints)
-        handles: list[Any] = []
-        labels: list[str] = []
-        label_counts: dict[str, int] = {}
-        result_labels = {id(res): self._result_label(res, label_counts) for res in self.results}
-        line_width = self._line_width()
+        legend_data: list[tuple[Any, str, str]] = []
+        line_width = 0.9
         for plot_idx, (ax, j) in enumerate(zip(axes, joints)):
             for model_idx, res in enumerate(self.results):
-                idx = self._plot_indices(len(res.time))
-                time_r = res.time[idx] - res.time[idx][0] if len(idx) else res.time[idx]
-                line = ax.plot(
-                    time_r,
-                    self._smooth_series(res.residual[idx, j]),
-                    linewidth=line_width,
-                    alpha=0.95,
-                    color=_model_color(res.record.model_type, model_idx),
-                    label=result_labels[id(res)],
-                )[0]
-            if plot_idx == 0:
-                handles.append(line)
-                labels.append(result_labels[id(res)])
-            ax.axhline(0.0, color="#444444", linewidth=1.0)
+                key_m = str(res.record.model_path)
+                if key_m in self.legend_label_vars:
+                    l_m = self.legend_label_vars[key_m].get()
+                    c_m_name = self.legend_color_vars[key_m].get()
+                    c_m = COLOR_CHOICES.get(c_m_name, c_m_name)
+                    
+                    idx = self._plot_indices(len(res.time))
+                    time_r = res.time[idx] - res.time[idx][0] if len(idx) else res.time[idx]
+                    line = ax.plot(
+                        time_r,
+                        self._smooth_series(res.residual[idx, j]),
+                        linewidth=line_width,
+                        alpha=0.85,
+                        color=c_m,
+                        label=l_m,
+                    )[0]
+                    if plot_idx == 0:
+                        legend_data.append((line, l_m, key_m))
+            ax.axhline(0.0, color="#000000", linewidth=0.8, linestyle="-", alpha=0.5, zorder=2)
             show_xlabel, show_ylabel = self._axis_label_flags(plot_idx, len(joints))
-            self._format_joint_axis(ax, f"Joint {j + 1} Residual", show_xlabel, show_ylabel)
-        self._shared_legend(handles, labels)
+            self._format_joint_axis(ax, f"{JOINT_LABELS[j]} Residual", show_xlabel, show_ylabel, idx=plot_idx)
+        self._shared_legend(legend_data)
 
     def _draw_scatter(self) -> None:
         joints = self._selected_joints()
         axes, _ = self._prepare_axes_grid(joints)
-        handles: list[Any] = []
-        labels: list[str] = []
-        label_counts: dict[str, int] = {}
-        result_labels = {id(res): self._result_label(res, label_counts) for res in self.results}
+        legend_data: list[tuple[Any, str, str]] = []
         for plot_idx, (ax, j) in enumerate(zip(axes, joints)):
             for model_idx, res in enumerate(self.results):
-                idx = self._plot_indices(len(res.target))
-                sc = ax.scatter(
-                    res.target[idx, j],
-                    res.pred[idx, j],
-                    s=10,
-                    alpha=0.42,
-                    color=_model_color(res.record.model_type, model_idx),
-                    label=result_labels[id(res)],
-                    edgecolors="none",
-                )
-                if plot_idx == 0:
-                    handles.append(sc)
-                    labels.append(result_labels[id(res)])
+                key_m = str(res.record.model_path)
+                if key_m in self.legend_label_vars:
+                    l_m = self.legend_label_vars[key_m].get()
+                    c_m_name = self.legend_color_vars[key_m].get()
+                    c_m = COLOR_CHOICES.get(c_m_name, c_m_name)
+                    
+                    idx = self._plot_indices(len(res.target))
+                    sc = ax.scatter(
+                        res.target[idx, j],
+                        res.pred[idx, j],
+                        s=8,
+                        alpha=0.4,
+                        color=c_m,
+                        label=l_m,
+                        edgecolors="none",
+                    )
+                    if plot_idx == 0:
+                        legend_data.append((sc, l_m, key_m))
             lo = min(float(res.target[:, j].min()) for res in self.results)
             hi = max(float(res.target[:, j].max()) for res in self.results)
-            ax.plot([lo, hi], [lo, hi], color="#666666", linewidth=1.2)
+            ax.plot([lo, hi], [lo, hi], color="#000000", linewidth=1.0, linestyle="--", alpha=0.7)
             show_xlabel, show_ylabel = self._axis_label_flags(plot_idx, len(joints))
-            self._format_joint_axis(ax, f"Joint {j + 1}", show_xlabel, show_ylabel)
-            ax.set_xlabel(r"Target $\tau$ (N m)" if show_xlabel else "", fontsize=9, labelpad=3)
-            ax.set_ylabel(r"Predicted $\tau$ (N m)" if show_ylabel else "", fontsize=9, labelpad=3)
-        self._shared_legend(handles, labels)
+            self._format_joint_axis(ax, JOINT_LABELS[j], show_xlabel, show_ylabel, idx=plot_idx)
+        self._shared_legend(legend_data)
 
     def _draw_metrics(self) -> None:
         self.figure.clear()
@@ -1720,15 +2055,28 @@ class TorqueInferenceApp(tk.Tk):
         rmse = [r.metrics["rmse_pooled"] for r in self.results]
         r2 = [r.metrics["r2_overall"] for r in self.results]
         colors = [_model_color(r.record.model_type, i) for i, r in enumerate(self.results)]
-        axes[0].bar(x, rmse, color=colors)
-        axes[0].set_xticks(x, labels, rotation=25, ha="right")
-        axes[0].set_ylabel("RMSE pooled (N m)")
-        axes[0].grid(True, axis="y", color="#b8b8b8", alpha=0.35)
-        axes[1].bar(x, r2, color=colors)
-        axes[1].set_xticks(x, labels, rotation=25, ha="right")
-        axes[1].set_ylabel("R2 overall")
-        axes[1].grid(True, axis="y", color="#b8b8b8", alpha=0.35)
-        self.figure.subplots_adjust(left=0.055, right=0.99, top=0.94, bottom=0.18, wspace=0.18)
+        axes[0].bar(x, rmse, color=colors, alpha=0.8)
+        axes[0].set_xticks(x, labels, rotation=25, ha="right", fontsize=8)
+        axes[0].set_ylabel(r"$\mathrm{RMSE\ (N\cdot m)}$", fontsize=9)
+        axes[0].grid(True, axis="y", color="#b8b8b8", linestyle='--', alpha=0.3)
+        axes[1].bar(x, r2, color=colors, alpha=0.8)
+        axes[1].set_xticks(x, labels, rotation=25, ha="right", fontsize=8)
+        axes[1].set_ylabel(r"$R^2\ \mathrm{Score}$", fontsize=9)
+        axes[1].grid(True, axis="y", color="#b8b8b8", linestyle='--', alpha=0.3)
+        self.figure.tight_layout()
+
+    def _result_label(self, res: PredictionResult, seen: dict[str, int]) -> str:
+        key = str(res.record.model_path)
+        if key in self.legend_label_vars:
+            label = self.legend_label_vars[key].get().strip()
+            if label:
+                return label
+        base = _model_alias(res.record.model_type)
+        seen[base] = seen.get(base, 0) + 1
+        if seen[base] == 1:
+            return base
+        rmse = f"{res.metrics['rmse_pooled']:.4f}"
+        return f"{base} {seen[base]} ({rmse})"
 
     def save_figure(self) -> None:
         if not self.results:
@@ -1736,13 +2084,13 @@ class TorqueInferenceApp(tk.Tk):
             return
         path = filedialog.asksaveasfilename(
             title="Save high-quality figure",
-            defaultextension=".png",
-            filetypes=[("PNG", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg"), ("TIFF", "*.tiff")],
+            defaultextension=".pdf",
+            filetypes=[("PDF", "*.pdf"), ("SVG", "*.svg"), ("PNG", "*.png"), ("TIFF", "*.tiff")],
         )
         if not path:
             return
-        dpi = 300
-        self.figure.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
+        # Scientific standards: 300 DPI, vector where possible, tight layout
+        self.figure.savefig(path, dpi=300, bbox_inches="tight", facecolor="white")
         self.status_var.set(f"Saved figure: {path}")
 
     def save_predictions_csv(self) -> None:

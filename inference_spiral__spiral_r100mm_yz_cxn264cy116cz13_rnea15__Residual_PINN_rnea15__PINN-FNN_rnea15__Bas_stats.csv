@@ -1,0 +1,4 @@
+Label,Model_Run_ID,Trajectory,RMSE_Pooled,MAE_Mean,R2_Overall,NRMSE_Mean
+rnea15: Residual PINN,ResidualCorrectionFNN_ep339_rmse0.10979_frac0.05_lr3e-4_wd0.05_do0.2_bs1024_hl128-256-128_alphareg0.1_20260428_1749,spiral: spiral_r100mm_yz_cxn264cy116cz136_trapezoidal_ctrlmax_fbmax_001.json,0.10075650164572496,0.055889230221509933,0.921534070048153,0.11697782576084137
+rnea15: PINN-FNN,PhysicsRegularizedFNN_ep1177_rmse0.11609_frac0.02_lr3e-4_wd0.05_do0.2_bs1024_hl128-256-128_pw0.1_20260428_1810,spiral: spiral_r100mm_yz_cxn264cy116cz136_trapezoidal_ctrlmax_fbmax_001.json,0.10317094865088901,0.059609949588775635,0.9177284246929571,0.1322256326675415
+rnea15: Baseline FNN,BlackBoxFNN_ep721_rmse0.12606_frac0.02_lr3e-4_wd0.05_do0.2_bs1024_hl128-256-128_20260428_1946,spiral: spiral_r100mm_yz_cxn264cy116cz136_trapezoidal_ctrlmax_fbmax_001.json,0.11319909246646749,0.06884320080280304,0.9009576684380912,0.14789935946464539

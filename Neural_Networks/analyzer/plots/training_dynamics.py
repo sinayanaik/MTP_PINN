@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from ..io.records import arch_short_label, best_per_type
-from ..style import type_color_map
+from ..style import panel_label, type_color_map
 from ._common import save_fig
 
 
@@ -59,17 +59,17 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
         # Per-subplot legend at top-right
         if handles_ax:
             ax.legend(handles=handles_ax,
-                      loc="upper right", fontsize=10, framealpha=0.92,
+                      loc="upper right", fontsize=14, framealpha=0.92,
                       edgecolor="lightgray")
 
         letter = panel_letters[idx] if idx < len(panel_letters) else str(idx)
-        ax.set_title(f"({letter}) {arch_short_label(mtype)}", fontsize=14, fontweight="bold")
+        ax.set_title(f"{arch_short_label(mtype)}", fontsize=14, fontweight="bold")
         ax.set_xlabel("Epoch", fontsize=13, fontweight="bold")
         ax.set_ylabel("MSE Loss", fontsize=13, fontweight="bold")
         ax.grid(True, alpha=0.3)
-        # Panel letter label at bottom-left
-        ax.text(0.02, 0.03, f"({letter})", transform=ax.transAxes,
-                fontsize=13, fontweight="bold", va="bottom", ha="left")
+        
+        # Standardized panel label at bottom middle
+        panel_label(ax, letter, fontsize=15)
 
     finite_losses = [v for v in all_losses if np.isfinite(v)]
     if finite_losses:

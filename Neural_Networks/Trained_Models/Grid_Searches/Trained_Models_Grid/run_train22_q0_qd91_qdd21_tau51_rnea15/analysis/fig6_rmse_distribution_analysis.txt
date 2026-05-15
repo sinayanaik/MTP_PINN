@@ -1,0 +1,9 @@
+The plot provides a statistical overview by displaying a combined scatter and box plot that illustrates the distribution of Test Average RMSE (N·m) across all individual runs within the hyperparameter grid search for the three architectures.
+
+Black-Box: The distribution of the 12 runs is tightly clustered around a visibly higher error mean. The best performing run, annotated at 0.1003 N·m, serves as the lower bound for this group. The entire cluster is positioned significantly higher on the y-axis (indicating higher error) compared to the distributions of the other architectures.
+
+Physics-Reg: The distribution representing 72 runs shows a slightly broader spread but is clearly and completely shifted lower on the y-axis than the Black-Box model's distribution. The best run is annotated at 0.0923 N·m. The interquartile range of this distribution sits well below the best performance of the Black-Box model.
+
+Residual-Corr: The distribution of its 60 runs is clustered even lower, showcasing the best overall performance distribution. The best run is annotated at an impressive 0.0903 N·m. Notably, almost the entirety of the Residual-Corr distribution is situated below the distributions of both the Physics-Reg and Black-Box models.
+
+Conclusion: This distributional perspective provides compelling statistical evidence that the superiority of the physics-informed models is not merely the result of discovering a single, isolated "lucky" hyperparameter configuration. Instead, it demonstrates an inherent, structural advantage of the architectures themselves. The Residual-Corr architecture consistently yields lower test errors across a wide and diverse variety of hyperparameter settings compared to both Physics-Reg and Black-Box models. This confirms its exceptional robustness, reliability, and suitability for learning complex inverse dynamics.

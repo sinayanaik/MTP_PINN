@@ -1,0 +1,4 @@
+Label,Model_Run_ID,Trajectory,RMSE_Pooled,MAE_Mean,R2_Overall,NRMSE_Mean
+Physics - Residual,ResidualCorrectionFNN_ep339_rmse0.10979_frac0.05_lr3e-4_wd0.05_do0.2_bs1024_hl128-256-128_alphareg0.1_20260428_1749,sine_wave: sine_wave_r100mm_yz_cx236cyn65cz189_ruckig_ctrlmax_fbmax_001.json,0.06482493776054163,0.04272634908556938,0.9469528938299807,0.1049431785941124
+Physics - Regularized,PhysicsRegularizedFNN_ep1778_rmse0.11225_frac0.05_lr3e-4_wd0.05_do0.2_bs1024_hl128-256-128_pw2_20260428_2004,sine_wave: sine_wave_r100mm_yz_cx236cyn65cz189_ruckig_ctrlmax_fbmax_001.json,0.06551660948632768,0.04277836158871651,0.9458148463121919,0.104616180062294
+BlackBox FNN,BlackBoxFNN_ep721_rmse0.12606_frac0.02_lr3e-4_wd0.05_do0.2_bs1024_hl128-256-128_20260428_1946,sine_wave: sine_wave_r100mm_yz_cx236cyn65cz189_ruckig_ctrlmax_fbmax_001.json,0.08261924683337214,0.05958867073059082,0.9138332041837467,0.14346608519554138

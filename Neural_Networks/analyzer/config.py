@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 _NN_ROOT = Path(__file__).resolve().parent.parent
-_GRID_ROOT = _NN_ROOT / "Trained_Models_Grid"
+_GRID_ROOT = _NN_ROOT / "Trained_Models" / "Grid_Searches"
 DEFAULT_MODELS_DIR = str(_GRID_ROOT)
 
 N_JOINTS = 5

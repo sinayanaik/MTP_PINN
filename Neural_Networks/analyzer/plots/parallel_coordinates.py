@@ -98,4 +98,4 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
             fontsize=10,
         )
 
-    save_fig(fig, output_dir / "fig5_parallel_coordinates.png")
+    save_fig(fig, output_dir / "fig5_parallel_coordinates.pdf")

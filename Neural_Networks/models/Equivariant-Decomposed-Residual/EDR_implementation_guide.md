@@ -1,9 +1,5 @@
 # Implementing EDR for Your Robot — Complete Guide
 
-Good instinct. EDR is exactly right when your physics model is *structurally correct but slightly off* on each component. Your RNEA+Friction is close — EDR will learn small corrections that preserve the physics structure.
-
-Let me build this up from first principles, adapted specifically to your hardware.
-
 ---
 
 ## Part 1 — The Core Idea, Stated Simply
@@ -27,7 +23,7 @@ This is categorically different from "RNEA + MLP residual" because each correcti
 
 ---
 
-## Part 2 — The Four Structural Properties (Why They Matter)
+## Part 2 — The Four Structural Properties 
 
 Each term in the dynamics has a specific mathematical property. Your corrections must preserve them.
 

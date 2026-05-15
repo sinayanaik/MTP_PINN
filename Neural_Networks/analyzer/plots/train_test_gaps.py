@@ -74,4 +74,4 @@ def plot(groups: dict[str, list[dict[str, Any]]], output_dir: Path, **_: Any) ->
     panel_label(ax1, "b")
 
     fig.tight_layout()
-    save_fig(fig, output_dir / "fig16_train_test_generalization_gap.png")
+    save_fig(fig, output_dir / "fig16_train_test_generalization_gap.pdf")

@@ -1,0 +1,9 @@
+The figure illustrates a critical "Model Data Efficiency Comparison" by plotting the Test RMSE against various Training Data Fractions (represented on a logarithmic scale: 2%, 5%, 10%, 25%, 50%, and 100%) for the three architectures. The solid lines represent the mean performance, while shaded regions indicate variance across different hyperparameter runs.
+
+Black-Box: The purely data-driven model exhibits the highest error across all data regimes. Crucially, its performance degrades precipitously when data is severely constrained (e.g., at 2% and 5% fractions), demonstrating very poor data efficiency. It requires the full 100% dataset to reach its best performance, which still remains inferior to the regularized models.
+
+Physics-Reg: This architecture demonstrates significantly better data efficiency. Its performance remains relatively robust and flat from 5% to 100% data, only showing a notable degradation when reduced to a mere 2% of the training set. It consistently outperforms the Black-Box model regardless of data availability.
+
+Residual-Corr: The Residual-Corr architecture consistently achieves the lowest error across all data fractions. Remarkably, its data efficiency is exceptional; it achieves outstanding performance utilizing only 5% or 10% of the training data. In a striking comparison, the Residual-Corr model trained on just 5% of the data achieves a lower Test RMSE (~0.091 N·m) than the Black-Box model trained on the entire 100% dataset (~0.101 N·m).
+
+Conclusion: The plot provides compelling evidence that physics-informed architectures—most notably the Residual-Corr model—are exceptionally data-efficient. By leveraging physical inductive biases, these models can achieve superior generalization and robust performance using only a small fraction of the available training data, dramatically outperforming data-hungry, purely data-driven approaches.
