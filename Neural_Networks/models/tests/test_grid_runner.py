@@ -36,8 +36,8 @@ def test_detailed_trial_counts():
     by_arch: dict[str, int] = {}
     for t in trials:
         by_arch[t["arch"]] = by_arch.get(t["arch"], 0) + 1
-    assert by_arch == {"fnn": 60, "physreg": 96, "edr": 288}
-    assert len(trials) == 444
+    assert by_arch == {"fnn": 60, "physreg": 48, "edr": 96}
+    assert len(trials) == 204
 
 
 def test_edr_drops_proven_bad_widths():
@@ -125,6 +125,91 @@ def test_flush_results_csv_roundtrip(tmp_path):
     body = csv_path.read_text()
     assert "64-64" in body
     assert "[" not in body  # no list repr leaked into the CSV
+
+
+# ── A3: dataeff run mode ────────────────────────────────────────────────────
+
+def _trials_for(grid_map):
+    saved_grid, saved_arch = GR._ARCH_GRID, GR.ARCH
+    try:
+        GR._ARCH_GRID = dict(grid_map)
+        GR.ARCH = "all"
+        return GR._build_trials()
+    finally:
+        GR._ARCH_GRID, GR.ARCH = saved_grid, saved_arch
+
+
+def test_dataeff_mode_shape_and_base_config():
+    trials = _trials_for(GR._ARCH_GRID_DATAEFF)
+    assert len(trials) == 30
+    by_arch: dict[str, int] = {}
+    for t in trials:
+        by_arch[t["arch"]] = by_arch.get(t["arch"], 0) + 1
+    assert by_arch == {"fnn": 10, "physreg": 10, "edr": 10}
+
+    fracs = {round(t["hp"]["data_train_fraction"], 4) for t in trials}
+    assert fracs == {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0}
+
+    # Each dataeff trial = the arch's FIXED_HP_* best config, differing ONLY
+    # in data_train_fraction (+ data_train_seed derived from seed).
+    for t in trials:
+        base = dict(GR._FIXED_HP_BY_ARCH[t["arch"]])
+        hp = dict(t["hp"])
+        for k in ("data_train_fraction", "data_train_seed", "seed"):
+            hp.pop(k, None)
+            base.pop(k, None)
+        # EDR injects trig-stat keys (_q_*) the same way run_edr.py does;
+        # ignore injected/private keys for the equality check.
+        hp = {k: v for k, v in hp.items() if not k.startswith("_")}
+        base = {k: v for k, v in base.items() if not k.startswith("_")}
+        assert hp == base, (t["arch"], {k: (hp.get(k), base.get(k))
+                                        for k in set(hp) ^ set(base)})
+
+
+def test_detailed_still_full_data():
+    trials = _trials_for(GR._ARCH_GRID_DETAILED)
+    assert len(trials) == 204
+    assert all(t["hp"]["data_train_fraction"] == 1.0 for t in trials)
+
+
+def test_select_run_mode_accepts_dataeff_env(monkeypatch):
+    import logging
+    monkeypatch.setenv("MTP_GRID_MODE", "data-efficiency")
+    assert GR._select_run_mode(logging.getLogger("t")) == "dataeff"
+    monkeypatch.setenv("MTP_GRID_MODE", "dataeff")
+    assert GR._select_run_mode(logging.getLogger("t")) == "dataeff"
+
+
+# ── A1: measured per-worker RAM ⇒ min(VRAM,CPU,RAM) pool, RAM-safe ──────────
+
+def test_compute_pool_size_ram_bound_and_safe(monkeypatch):
+    import psutil
+    monkeypatch.delenv("MTP_GRID_POOL_SIZE", raising=False)
+    monkeypatch.delenv("MTP_GRID_WORKER_RAM_GB", raising=False)
+    monkeypatch.delenv("MTP_GRID_CPU_OVERSUB", raising=False)
+    monkeypatch.setattr(GR, "_measure_worker_rss_gb", lambda: 1.34)
+    monkeypatch.setattr(GR, "_query_free_ram_gb", lambda: 177.0)
+    monkeypatch.setattr(GR, "_query_total_vram_gb", lambda: 160.0)
+    monkeypatch.setattr(psutil, "cpu_count", lambda logical=False: 48)
+
+    ps = GR._compute_pool_size(True, 2)
+    n_vram = int(160.0 / 0.6)                     # 266
+    n_cpu = int(max(2, 48 - 2) * 2 * 2.0)         # 184
+    n_ram = int((177.0 - 16.0) / 1.34)            # 120
+    assert ps == min(n_vram, n_cpu, n_ram) == n_ram
+    # Never exceeds the RAM safety budget.
+    assert ps * 1.34 <= (177.0 - 16.0) + 1e-6
+    # Explicit override still wins outright.
+    monkeypatch.setenv("MTP_GRID_POOL_SIZE", "150")
+    assert GR._compute_pool_size(True, 2) == 150
+    # CPU-only ⇒ sequential.
+    assert GR._compute_pool_size(False, 1) == 1
+
+
+def test_measure_worker_rss_gb_bounded():
+    """Never raises and returns a value in the sane clamp band."""
+    v = GR._measure_worker_rss_gb()
+    assert isinstance(v, float) and 0.6 <= v <= 4.0
 
 
 if __name__ == "__main__":

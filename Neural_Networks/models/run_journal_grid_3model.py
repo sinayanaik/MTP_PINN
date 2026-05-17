@@ -16,8 +16,9 @@ Two run modes (chosen at startup via prompt, or env MTP_GRID_MODE):
   * quick    — 1 run per model (the fixed best config), full epochs.
                End-to-end pipeline sanity check with real numbers.
   * detailed — comprehensive per-architecture HP sweep at 100% data
-               (FNN/PhysReg ~120 each; EDR ~432 — a deep search of the
-               structured model's capacity / Occam / curriculum knobs).
+               (FNN 60; PhysReg 48; EDR 96 — total 204; decisive-axis
+               search of each model's capacity / Occam / curriculum knobs).
+  * dataeff  — best config per arch × data-fraction curve (30 trials).
 Both train on 100% data; data-efficiency (train-fraction) curves are a
 separate study run later on the winning config.  EDR trig (sin/cos) physics
 features are enabled here (q stats injected from the dataset metadata).
@@ -163,7 +164,10 @@ _FIXED_HP_FNN_BASE: dict[str, Any] = {
     "warm_restart_eta_min":    3e-6,
     "grad_clip_norm":          5.0,
     "feature_noise_std":       0.02,
-    "epochs":                  300,    # 20 whole restart cycles (300/15)
+    # User directive (2026-05-17): long-horizon sweep — 1000 epochs ≈ 66
+    # restart cycles (1000/15); early-stop still ends runs that genuinely
+    # converge, this just removes the budget ceiling.
+    "epochs":                  1000,
     "min_delta":               1e-5,   # let slow-but-real gains reset patience
     "early_stopping":          True,
     "early_stop_metric":       "val_rmse",
@@ -179,22 +183,22 @@ _FIXED_HP_FNN_BASE: dict[str, Any] = {
 # inflation: patience must exceed one cycle so a post-restart improvement can
 # register before stopping; early-stop still fires once successive restarts
 # stop yielding gains (genuine convergence, not idle wandering).
-FIXED_HP_FNN = {**_FIXED_HP_FNN_BASE, "patience": 60}
+FIXED_HP_FNN = {**_FIXED_HP_FNN_BASE, "patience": 200}
 
 # PhysReg = same backbone + the physics-consistency penalty (its defining HP).
 FIXED_HP_PHYSREG = {
     **_FIXED_HP_FNN_BASE,
-    "patience":                60,
+    "patience":                200,
     "physics_weight":          0.5,
     "physics_warmup_fraction": 0.05,
     "phi_lr_ratio":            0.1,
 }
 
 FIXED_HP_EDR: dict[str, Any] = {
-    # 300 epochs ≈ 20 warm-restart cycles (T_0=15); EDR converges well within
-    # this.  1090 was carried over from a different dataset and just wasted
-    # hundreds of post-convergence cycles.
-    "epochs":                  300,
+    # User directive (2026-05-17): 1000 epochs ≈ 66 warm-restart cycles
+    # (T_0=15) for the long-horizon sweep.  Early-stop (patience below) still
+    # ends genuinely-converged runs; this only lifts the budget ceiling.
+    "epochs":                  1000,
     "batch_size":              256,
     "learning_rate":           3e-4,
     "weight_decay":            2e-3,
@@ -209,16 +213,15 @@ FIXED_HP_EDR: dict[str, Any] = {
     # the adaptive phase-2 detector reads model.val_rmse_history regardless of
     # this metric (edr_strategy.py — _should_transition_to_phase2).
     "early_stop_metric":       "val_rmse",
-    # Anti-overfit early-stop (2026-05-17, evidence-tied).  3-seed test:
-    # seeds 2/42 peaked val @ep22-24 with train≈val (gap 0.009) → best TEST
-    # (0.090); seed 1 ran 229 ep (patience 60 let it crawl val down to
-    # ep169 while train collapsed 0.072 and TEST *worsened* to 0.094, gap
-    # 0.015).  The long tail is pure val-set overfitting that does NOT
-    # transfer.  Patience 60→25 stops every seed in the well-generalising
-    # train≈val regime → lower, far more stable test (variance shrinks; the
-    # seed-1 regression is removed).  min_delta loosened 1e-5→2e-4 so
-    # cosmetic <0.0002 val wiggles don't keep a stale run alive.
-    "patience":                25,
+    # User directive (2026-05-17): patience 200 for the long-horizon sweep
+    # (overrides the prior anti-overfit patience=25).  CAVEAT (kept for the
+    # record): a 3-seed test showed EDR with long patience crawls val down
+    # via pure val-set overfitting that does NOT transfer — seed 1 ran 229
+    # ep, train collapsed to 0.072 while TEST *worsened* to 0.094.  With
+    # patience=200 the EMA-by-val checkpoint (ema_decay=0.9, below) is the
+    # safety net: it tracks a flatter, lower-variance solution and wins
+    # exactly when the raw best is an over-fit spike.  Rank on TEST, not val.
+    "patience":                200,
     "min_delta":               2e-4,
     "grad_clip_norm":          1.0,
     "feature_noise_std":       0.02,
@@ -303,7 +306,7 @@ _FIXED_HP_BY_ARCH: dict[str, dict[str, Any]] = {
 #              numbers, not a science result.
 #
 #   detailed — comprehensive per-architecture HP sweep at 100% data
-#              (FNN 60; PhysReg 96; EDR 288 — total 444).  Searches the
+#              (FNN 60; PhysReg 48; EDR 96 — total 204).  Searches the
 #              knobs that actually shape each architecture's capacity /
 #              regularisation / defining hyperparameters.
 #              Data-efficiency (train-fraction) curves are a SEPARATE study
@@ -355,13 +358,15 @@ GRID_PHYSREG_DETAILED: dict[str, list] = {
         [128, 256, 128], [256, 512, 256], [512, 512, 512], [256, 256],
     ],                                              # 4  capacity
     "dropout":                 [0.1, 0.3],          # 2  regularisation (trimmed)
-    "weight_decay":            [1e-4, 5e-3],        # 2  L2
+    # weight_decay axis dropped (2026-05-17 trim): L2 is the least-separating
+    # PhysReg knob vs capacity/dropout/physics_weight — it stays fixed at the
+    # FIXED_HP_PHYSREG value (5e-3) for every trial.
     # physics_weight extended into the strong-penalty regime (added 2.0,
     # 2026-05-17) so the sweep probes whether harder physics-consistency
     # enforcement helps or over-constrains the black-box backbone.
     "physics_weight":          [0.05, 0.1, 0.25, 0.5, 1.0, 2.0],  # 6  defining HP
     "seed":                    [42],
-}  # 4·2·2·6 = 96
+}  # 4·2·6 = 48
 
 # EDR (structured: four δ-nets + two-phase curriculum) — δ-net capacity,
 # the Occam correction-magnitude penalty (its defining HP), correction
@@ -378,13 +383,28 @@ GRID_EDR_DETAILED: dict[str, list] = {
     ],                                              # 4  δ-net capacity (decisive)
     "lambda_correction_reg":
         [2e-3, 5e-3, 1e-2, 2e-2, 5e-2, 1e-1],       # 6  Occam strength (key EDR HP)
-    "correction_dropout":     [0.05, 0.10, 0.20],   # 3  δ-net regularisation
+    "correction_dropout":     [0.05, 0.20],         # 2  δ-net reg (mid 0.10 dropped)
     "use_friction_qdd":       [False, True],        # 2  friction conditioning
-    "weight_decay":           [1e-3, 2e-3],         # 2  L2
+    # weight_decay axis dropped (2026-05-17 trim): 1e-3 vs 2e-3 is the weakest
+    # EDR knob (width & λ_correction_reg dominate) — stays fixed at the
+    # FIXED_HP_EDR value (2e-3) for every trial.
     "seed":                   [42],
     # lr fixed at the proven 3e-4 (in FIXED_HP_EDR).  To go even deeper add
-    # "learning_rate": [3e-4, 1e-3]  → doubles to 576.
-}  # 4·6·3·2·2 = 288  (moderate-trim EDR-specific search)
+    # "learning_rate": [3e-4, 1e-3]  → doubles to 192.
+}  # 4·6·2·2 = 96  (decisive-axes EDR-specific search)
+
+# ── DATAEFF: lightweight data-efficiency curve (separate study) ─────────────
+# Each arch runs its proven FIXED_HP_* best config (NOT the DETAILED sweep)
+# while sweeping ONLY the training-data fraction.  data_train_fraction
+# subsamples the TRAIN split deterministically (via data_train_seed, set from
+# `seed` in _build_trials); val/test stay full & identical (loader.py).  This
+# is the "how much data does each architecture need" curve — deliberately
+# kept off the 204-trial DETAILED grid (which stays at frac=1.0).
+_DATAEFF_FRACTIONS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+GRID_FNN_DATAEFF:     dict[str, list] = {"data_train_fraction": _DATAEFF_FRACTIONS, "seed": [42]}
+GRID_PHYSREG_DATAEFF: dict[str, list] = {"data_train_fraction": _DATAEFF_FRACTIONS, "seed": [42]}
+GRID_EDR_DATAEFF:     dict[str, list] = {"data_train_fraction": _DATAEFF_FRACTIONS, "seed": [42]}
+# 10·1 per arch × 3 archs = 30 trials
 
 # Default = quick; main() overrides _ARCH_GRID after mode selection.
 GRID_FNN:     dict[str, list] = GRID_FNN_QUICK
@@ -396,6 +416,9 @@ _ARCH_GRID_QUICK: dict[str, dict[str, list]] = {
 }
 _ARCH_GRID_DETAILED: dict[str, dict[str, list]] = {
     "fnn": GRID_FNN_DETAILED, "physreg": GRID_PHYSREG_DETAILED, "edr": GRID_EDR_DETAILED,
+}
+_ARCH_GRID_DATAEFF: dict[str, dict[str, list]] = {
+    "fnn": GRID_FNN_DATAEFF, "physreg": GRID_PHYSREG_DATAEFF, "edr": GRID_EDR_DATAEFF,
 }
 
 _ARCH_META: dict[str, tuple[str, str, str]] = {
@@ -802,30 +825,130 @@ def _measure_cuda_ctx_gb() -> float:
         return 0.35
 
 
-def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
-    """Derive an upper bound on concurrent workers from hardware alone.
+def _measure_worker_rss_gb() -> float:
+    """Measure a realistic per-worker resident-set size via a child subprocess.
 
-    With multiple GPUs, workers on different GPUs execute independently on
-    separate hardware.  The CPU budget therefore scales with n_gpus: each GPU
-    gets its own share of ``(cpu_phys - 2)`` workers, and the total pool is
-    their sum.  Live-admission still enforces per-trial VRAM fit.
+    A pool worker's RAM footprint is dominated by the one-time ``import torch``
+    plus the pipeline/strategy stack and a CUDA context — not the tiny per-trial
+    tensors.  Rather than guess this (a fixed conservative constant makes the
+    auto pool *undershoot* the safe maximum and leaves the box under-utilised),
+    we spawn one representative worker-like process, let it do exactly the
+    imports + CUDA-context creation a real worker does, and read its RSS.  The
+    RAM-ceiling in ``_compute_pool_size`` then reflects reality, so the no-env
+    ``python3 …`` run self-sizes to the true safe max.  Falls back to a sane
+    1.6 GB if anything goes wrong (never raises).
+    """
+    import subprocess
+    import sys
+    from pathlib import Path as _P
+
+    repo_root = str(_P(__file__).resolve().parents[2])
+    edr_dir = str(_P(__file__).resolve().parent / "Equivariant-Decomposed-Residual")
+    script = (
+        "import sys, psutil\n"
+        f"sys.path[:0] = [{repo_root!r}, {edr_dir!r}]\n"
+        "try:\n"
+        "    import torch\n"
+        "    if torch.cuda.is_available():\n"
+        "        _x = torch.zeros(1, device='cuda:0'); del _x\n"
+        "except Exception:\n"
+        "    pass\n"
+        "try:\n"
+        "    import Neural_Networks.models.shared.pipeline  # noqa: F401\n"
+        "    import Neural_Networks.models.shared.strategies  # noqa: F401\n"
+        "except Exception:\n"
+        "    pass\n"
+        "print(psutil.Process().memory_info().rss / 1e9)\n"
+    )
+    try:
+        out = subprocess.check_output(
+            [sys.executable, "-c", script], timeout=120, text=True,
+            cwd=repo_root,
+        ).strip()
+        val = float(out.splitlines()[-1])
+        # Clamp to a sane band; outside it the measurement is untrustworthy.
+        return val if 0.6 <= val <= 4.0 else 1.6
+    except Exception:
+        return 1.6
+
+
+def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
+    """Derive an upper bound on concurrent workers from live hardware.
+
+    pool_size = min(VRAM ceiling, CPU ceiling, RAM ceiling), the binding one
+    wins.  For this grid the trials are *tiny* MLPs (~0.25 GB VRAM each), so
+    the A100s sit nearly idle and the real limiter is CPU + per-worker process
+    RSS (the torch import is ≈1.3-1.6 GB/worker).  We therefore:
+
+      • allow CPU oversubscription (these trials block on GPU sync / dataloader
+        a large fraction of each step, so > 1 worker/core raises throughput);
+      • add a hard RAM ceiling so a big pool can never OOM-crash the box —
+        this is what makes "use max resources" safe.
+
+    Tunables (env): ``MTP_GRID_POOL_SIZE`` forces an exact size (highest
+    priority); ``MTP_GRID_CPU_OVERSUB`` (default 2.0) scales the CPU budget;
+    ``MTP_GRID_WORKER_RAM_GB`` overrides the per-worker RSS estimate (default
+    is *measured* live via ``_measure_worker_rss_gb`` so the no-env run
+    self-sizes to the true safe max — no fixed-guess undershoot).
     """
     import psutil
+    _plog = logging.getLogger(__name__)
     if not cuda_available:
         return 1                                             # CPU ⇒ sequential
-    cpu_phys = psutil.cpu_count(logical=False) or 2
-    vram_total = _query_total_vram_gb()
-    n_vram = max(1, int(vram_total / 0.8))                  # VRAM-based ceiling
-    # CPU budget per GPU: leave 2 cores for OS/main/drain, then allocate
-    # remaining cores equally across GPUs.  Each GPU contributes its share to
-    # the total pool.  On single-GPU this is identical to the old formula.
-    n_cpu_per_gpu = max(2, cpu_phys - 2)
-    n_cpu = n_cpu_per_gpu * max(1, n_gpus)
-    # Optional override: ``MTP_GRID_POOL_SIZE=N`` forces N regardless of heuristics.
+
+    # Explicit override wins outright.
     override = os.environ.get("MTP_GRID_POOL_SIZE", "").strip()
     if override.isdigit() and int(override) >= 1:
+        _plog.info("pool_size=%s forced via MTP_GRID_POOL_SIZE", override)
         return int(override)
-    return min(n_vram, n_cpu)
+
+    cpu_phys = psutil.cpu_count(logical=False) or 2
+    n_gpus = max(1, n_gpus)
+
+    # VRAM ceiling — deliberately loose (0.6 GB/worker ≫ measured ~0.33);
+    # never the binding constraint for these tiny trials, just a backstop.
+    vram_total = _query_total_vram_gb()
+    n_vram = max(1, int(vram_total / 0.6))
+
+    # CPU ceiling — leave 2 cores for OS/main/drain, share the rest across
+    # GPUs, then oversubscribe (tiny trials are mostly GPU/IO-bound).
+    try:
+        oversub = float(os.environ.get("MTP_GRID_CPU_OVERSUB", "2.0"))
+    except ValueError:
+        oversub = 2.0
+    oversub = max(1.0, oversub)
+    n_cpu_per_gpu = max(2, cpu_phys - 2)
+    n_cpu = int(n_cpu_per_gpu * n_gpus * oversub)
+
+    # RAM ceiling — the real "don't crash the system" guard.  Size the pool so
+    # the total worker RSS stays clear of available RAM with a safety margin.
+    # Default per-worker RSS is MEASURED (not a fixed guess) so the auto pool
+    # reflects this box and doesn't leave RAM on the table.
+    _env_ram = os.environ.get("MTP_GRID_WORKER_RAM_GB", "").strip()
+    if _env_ram:
+        try:
+            per_worker_ram = float(_env_ram)
+            _ram_src = "env"
+        except ValueError:
+            per_worker_ram, _ram_src = _measure_worker_rss_gb(), "measured"
+    else:
+        per_worker_ram, _ram_src = _measure_worker_rss_gb(), "measured"
+    per_worker_ram = max(0.5, per_worker_ram)
+    free_ram = _query_free_ram_gb()
+    ram_safety_gb = 16.0
+    n_ram = max(1, int((free_ram - ram_safety_gb) / per_worker_ram))
+
+    pool_size = max(1, min(n_vram, n_cpu, n_ram))
+    _bound = min(
+        (("VRAM", n_vram), ("CPU", n_cpu), ("RAM", n_ram)), key=lambda kv: kv[1]
+    )[0]
+    _plog.info(
+        "pool_size=%d  (ceilings: VRAM=%d  CPU=%d[oversub=%.1f]  "
+        "RAM=%d[%s rss=%.2fGB, free=%.0fGB-%.0f safety]  → bound by %s)",
+        pool_size, n_vram, n_cpu, oversub, n_ram, _ram_src,
+        per_worker_ram, free_ram, ram_safety_gb, _bound,
+    )
+    return pool_size
 
 
 def _compute_threads_per_worker(pool_size: int) -> int:
@@ -1596,7 +1719,7 @@ def _flush_results_csv(results: list[_Result], out_root: str) -> None:
 
     Factored out of ``_write_grid_summary`` so the admission loop can call it
     after *every* completed trial — a crash / OOM-kill / power loss at trial N
-    of a 444-trial grid then still leaves a complete CSV of the N-1 finished
+    of a long grid then still leaves a complete CSV of the N-1 finished
     trials instead of nothing.  Cheap (a few hundred rows) and idempotent.
     """
     import csv
@@ -1996,7 +2119,7 @@ def _run_parallel_dynamic(
             _set_counts()
             # Incremental persistence: after every completed trial the CSV on
             # disk reflects all finished trials, so a crash/OOM/power loss at
-            # trial N of a 444-trial grid keeps N-1 instead of losing all.
+            # trial N of a long grid keeps N-1 instead of losing all.
             # A write failure here must never kill the grid.
             try:
                 _flush_results_csv(_all_so_far, DATASET_OUT_ROOT)
@@ -2153,7 +2276,7 @@ def _run_parallel_dynamic(
                     "STARVATION: pool idle with %d trial(s) still pending and no "
                     "progress for %.0fs — aborting grid; %d completed result(s) "
                     "preserved.",
-                    len(pending), STARVATION_TIMEOUT_SEC, len(in_flight_map),
+                    len(pending), STARVATION_TIMEOUT_SEC, state.completed,
                 )
                 break
 
@@ -2199,26 +2322,35 @@ def _run_parallel_dynamic(
 # ============================================================================
 
 def _select_run_mode(log: logging.Logger) -> str:
-    """Return 'quick' or 'detailed'.
+    """Return 'quick', 'detailed', or 'dataeff'.
 
     Priority: env ``MTP_GRID_MODE`` → interactive prompt (TTY only) →
     default 'quick' (safe for background / non-interactive runs).
     """
+    _ALIASES = {
+        "quick": "quick", "detailed": "detailed",
+        "dataeff": "dataeff", "data-efficiency": "dataeff", "frac": "dataeff",
+    }
     env = os.environ.get("MTP_GRID_MODE", "").strip().lower()
-    if env in ("quick", "detailed"):
-        log.info("Run mode from MTP_GRID_MODE=%s", env)
-        return env
+    if env in _ALIASES:
+        mode = _ALIASES[env]
+        log.info("Run mode from MTP_GRID_MODE=%s", mode)
+        return mode
     if env:
-        log.warning("Ignoring invalid MTP_GRID_MODE=%r (use 'quick' or 'detailed').", env)
+        log.warning(
+            "Ignoring invalid MTP_GRID_MODE=%r (use 'quick', 'detailed', or 'dataeff').",
+            env,
+        )
 
     n_quick = sum(len(_cartesian(_ARCH_GRID_QUICK[a])) for a in _ARCH_META)
     n_det   = sum(len(_cartesian(_ARCH_GRID_DETAILED[a])) for a in _ARCH_META)
+    n_de    = sum(len(_cartesian(_ARCH_GRID_DATAEFF[a])) for a in _ARCH_META)
 
     if not sys.stdin.isatty():
         log.warning(
             "Non-interactive stdin — defaulting to QUICK (%d trials). "
-            "Set MTP_GRID_MODE=detailed to run the full sweep (%d trials).",
-            n_quick, n_det,
+            "Set MTP_GRID_MODE=detailed (%d) or dataeff (%d) for the other sweeps.",
+            n_quick, n_det, n_de,
         )
         return "quick"
 
@@ -2229,15 +2361,17 @@ def _select_run_mode(log: logging.Logger) -> str:
         f"    [1] quick     — {n_quick} trials "
         f"(1 per model, full epochs; pipeline sanity check)\n"
         f"    [2] detailed  — {n_det} trials "
-        f"(FNN/PhysReg ~120, EDR ~432 HP configs at 100% data)\n"
+        f"(per-arch HP sweep at 100% data)\n"
+        f"    [3] dataeff   — {n_de} trials "
+        f"(best config/arch × data-fraction curve)\n"
         "============================================================\n"
-        "  Enter 1 or 2 (default 1): "
+        "  Enter 1, 2 or 3 (default 1): "
     )
     try:
         choice = input(prompt).strip()
     except EOFError:
         choice = ""
-    mode = "detailed" if choice == "2" else "quick"
+    mode = {"2": "detailed", "3": "dataeff"}.get(choice, "quick")
     log.info("Run mode selected: %s", mode)
     return mode
 
@@ -2255,9 +2389,11 @@ def main() -> None:
 
     global _ARCH_GRID
     mode = _select_run_mode(log)
-    _ARCH_GRID = dict(
-        _ARCH_GRID_DETAILED if mode == "detailed" else _ARCH_GRID_QUICK
-    )
+    _ARCH_GRID = dict({
+        "detailed": _ARCH_GRID_DETAILED,
+        "dataeff":  _ARCH_GRID_DATAEFF,
+        "quick":    _ARCH_GRID_QUICK,
+    }.get(mode, _ARCH_GRID_QUICK))
 
     trials      = _build_trials()
     total       = len(trials)
@@ -2274,7 +2410,8 @@ def main() -> None:
     log.info("  OUTPUT     : %s", DATASET_OUT_ROOT)
     log.info("  SKIP_EXIST : %s  (pre-dispatch)", SKIP_EXISTING)
     log.info("  STRATEGY   : standard published strategy per arch (no augmentations)")
-    log.info("  pool_size  : min(floor(vram_total/0.8), n_gpus*(cpu_phys-2))")
+    log.info("  pool_size  : min(VRAM, CPU×oversub, RAM) ceilings  "
+             "(env: MTP_GRID_POOL_SIZE / _CPU_OVERSUB / _WORKER_RAM_GB)")
     log.info("=" * 72)
 
     if DRY_RUN:

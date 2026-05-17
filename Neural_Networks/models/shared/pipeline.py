@@ -281,6 +281,7 @@ def run_training(
             "not be comparable to val_rmse."
         )
     stopped_early = False
+    diverged = False          # set if a non-finite train/val quantity appears
     t0 = time.time()
 
     # Per-component correction-magnitude history (optional; populated when the
@@ -374,6 +375,23 @@ def run_training(
         history["train_rmse"].append(train_rmse_phys)
         history["val_rmse"].append(_val_rmse_phys)
         history["train_loss_obj"].append(train_loss_obj)
+
+        # ── Non-finite guard (covers FNN/PhysReg/EDR — single chokepoint) ──
+        # If the objective or the held-out val metric goes NaN/Inf the run has
+        # diverged: every later epoch's `improved = nan < best-δ` is False, so
+        # without this the patience counter would silently climb the full
+        # budget (×1000 epochs ×444 trials) producing a poisoned model with no
+        # clear cause.  Break immediately; the post-loop handler decides
+        # fail-loud (no good epoch) vs keep-best (late divergence).
+        if not (math.isfinite(train_loss_obj) and math.isfinite(_val_rmse_phys)):
+            _bad = "train_loss_obj" if not math.isfinite(train_loss_obj) else "val_rmse"
+            log.error(
+                "Non-finite %s at epoch %d (train_loss_obj=%r, val_rmse=%r) — "
+                "training diverged; aborting this run.",
+                _bad, epoch, train_loss_obj, _val_rmse_phys,
+            )
+            diverged = True
+            break
 
         # Duck-typed hook: if the model supports it, let it record the latest
         # physical-units val_rmse. Used by EDR's adaptive phase-2 plateau detector.
@@ -486,9 +504,23 @@ def run_training(
             stopped_early = True
             break
 
+    if diverged and best_state is None:
+        # No finite improving epoch was ever recorded — there is no usable
+        # model.  Fail loud: the grid runner's _run_one_trial try/except logs
+        # this to _errors/trial_errors.log and surfaces a clear FAIL instead
+        # of silently returning a poisoned checkpoint.
+        raise RuntimeError(
+            f"training diverged: non-finite loss/metric at epoch {epoch}; "
+            f"no finite checkpoint was ever recorded"
+        )
+    # If diverged AFTER a finite best_state exists (late divergence), fall
+    # through: the existing best/EMA checkpoint is sound — treat exactly like
+    # an early stop.
+
     if (
         seg_ep > 0
         and (not stopped_early)
+        and (not diverged)
         and epoch_end < epochs
     ):
         _sg = os.path.dirname(os.path.abspath(seg_path))
