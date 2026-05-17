@@ -179,16 +179,18 @@ _FIXED_HP_FNN_BASE: dict[str, Any] = {
     "snapshot_every":          0,
 }
 
-# patience=60 = 4 restart cycles (T_0=15), identical to EDR.  NOT artificial
+# patience=50 ≈ 3.3 restart cycles (T_0=15), identical to EDR.  NOT artificial
 # inflation: patience must exceed one cycle so a post-restart improvement can
 # register before stopping; early-stop still fires once successive restarts
-# stop yielding gains (genuine convergence, not idle wandering).
-FIXED_HP_FNN = {**_FIXED_HP_FNN_BASE, "patience": 200}
+# stop yielding gains (genuine convergence, not idle wandering).  Tightened
+# 200→50 (2026-05-17): the 200-epoch tail rarely improved and dominated wall
+# time on the long-horizon (1000-epoch) sweep.
+FIXED_HP_FNN = {**_FIXED_HP_FNN_BASE, "patience": 50}
 
 # PhysReg = same backbone + the physics-consistency penalty (its defining HP).
 FIXED_HP_PHYSREG = {
     **_FIXED_HP_FNN_BASE,
-    "patience":                200,
+    "patience":                50,
     "physics_weight":          0.5,
     "physics_warmup_fraction": 0.05,
     "phi_lr_ratio":            0.1,
@@ -213,15 +215,16 @@ FIXED_HP_EDR: dict[str, Any] = {
     # the adaptive phase-2 detector reads model.val_rmse_history regardless of
     # this metric (edr_strategy.py — _should_transition_to_phase2).
     "early_stop_metric":       "val_rmse",
-    # User directive (2026-05-17): patience 200 for the long-horizon sweep
-    # (overrides the prior anti-overfit patience=25).  CAVEAT (kept for the
-    # record): a 3-seed test showed EDR with long patience crawls val down
-    # via pure val-set overfitting that does NOT transfer — seed 1 ran 229
-    # ep, train collapsed to 0.072 while TEST *worsened* to 0.094.  With
-    # patience=200 the EMA-by-val checkpoint (ema_decay=0.9, below) is the
-    # safety net: it tracks a flatter, lower-variance solution and wins
-    # exactly when the raw best is an over-fit spike.  Rank on TEST, not val.
-    "patience":                200,
+    # User directive (2026-05-17): patience 50 for the long-horizon sweep
+    # (tightened 200→50 — the 200-epoch tail rarely improved and dominated
+    # wall time; overrides the prior anti-overfit patience=25).  CAVEAT (kept
+    # for the record): a 3-seed test showed EDR with long patience crawls val
+    # down via pure val-set overfitting that does NOT transfer — seed 1 ran
+    # 229 ep, train collapsed to 0.072 while TEST *worsened* to 0.094.  The
+    # EMA-by-val checkpoint (ema_decay=0.9, below) is the safety net: it
+    # tracks a flatter, lower-variance solution and wins exactly when the raw
+    # best is an over-fit spike.  Rank on TEST, not val.
+    "patience":                50,
     "min_delta":               2e-4,
     "grad_clip_norm":          1.0,
     "feature_noise_std":       0.02,
@@ -877,16 +880,19 @@ def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
 
     pool_size = min(VRAM ceiling, CPU ceiling, RAM ceiling), the binding one
     wins.  For this grid the trials are *tiny* MLPs (~0.25 GB VRAM each), so
-    the A100s sit nearly idle and the real limiter is CPU + per-worker process
-    RSS (the torch import is ≈1.3-1.6 GB/worker).  We therefore:
+    the A100s sit nearly idle and the throughput limiter is **CPU cores**
+    (each step is dominated by the Python loop / dataloader / host↔device
+    copies, not GPU compute).  CPU is the binding ceiling; therefore:
 
-      • allow CPU oversubscription (these trials block on GPU sync / dataloader
-        a large fraction of each step, so > 1 worker/core raises throughput);
-      • add a hard RAM ceiling so a big pool can never OOM-crash the box —
-        this is what makes "use max resources" safe.
+      • the CPU budget is the physical core count (shared across GPUs — cores
+        are NOT per-GPU), discounted for the 2-thread/worker floor, with
+        oversubscription DEFAULTING OFF (1.0).  Oversubscribing tiny CPU-bound
+        trials thrashes the scheduler and slows every run — measured the hard
+        way: pool=100 on a 48-core box ran 0/204 trials in 6h40m;
+      • a hard RAM ceiling so a big pool can never OOM-crash or swap the box.
 
     Tunables (env): ``MTP_GRID_POOL_SIZE`` forces an exact size (highest
-    priority); ``MTP_GRID_CPU_OVERSUB`` (default 2.0) scales the CPU budget;
+    priority); ``MTP_GRID_CPU_OVERSUB`` (default 1.0) scales the CPU budget;
     ``MTP_GRID_WORKER_RAM_GB`` overrides the per-worker RSS estimate (default
     is *measured* live via ``_measure_worker_rss_gb`` so the no-env run
     self-sizes to the true safe max — no fixed-guess undershoot).
@@ -910,15 +916,18 @@ def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
     vram_total = _query_total_vram_gb()
     n_vram = max(1, int(vram_total / 0.6))
 
-    # CPU ceiling — leave 2 cores for OS/main/drain, share the rest across
-    # GPUs, then oversubscribe (tiny trials are mostly GPU/IO-bound).
+    # CPU ceiling — the real throughput limiter.  Leave 2 cores for
+    # OS/main/drain.  Cores are SHARED across GPUs (not per-GPU), so there is
+    # no `* n_gpus` here.  _compute_threads_per_worker floors at 2 threads/
+    # worker, so total torch threads ≈ pool*2 — halve the usable cores so the
+    # pool keeps total threads ≈ core count (not 2x oversubscribed).  oversub
+    # defaults to 1.0: oversubscribing these CPU-bound trials slows every run.
     try:
-        oversub = float(os.environ.get("MTP_GRID_CPU_OVERSUB", "2.0"))
+        oversub = float(os.environ.get("MTP_GRID_CPU_OVERSUB", "1.0"))
     except ValueError:
-        oversub = 2.0
+        oversub = 1.0
     oversub = max(1.0, oversub)
-    n_cpu_per_gpu = max(2, cpu_phys - 2)
-    n_cpu = int(n_cpu_per_gpu * n_gpus * oversub)
+    n_cpu = max(1, int(((cpu_phys - 2) // 2) * oversub))
 
     # RAM ceiling — the real "don't crash the system" guard.  Size the pool so
     # the total worker RSS stays clear of available RAM with a safety margin.
@@ -935,7 +944,10 @@ def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
         per_worker_ram, _ram_src = _measure_worker_rss_gb(), "measured"
     per_worker_ram = max(0.5, per_worker_ram)
     free_ram = _query_free_ram_gb()
-    ram_safety_gb = 16.0
+    # 32 GB margin (was 16): measured per-worker RSS undershoots steady state
+    # (RSS grows post-import — CUDA context, caching allocator, dataset
+    # tensors, autograd graph), so a tight margin gets eaten into swap.
+    ram_safety_gb = 32.0
     n_ram = max(1, int((free_ram - ram_safety_gb) / per_worker_ram))
 
     pool_size = max(1, min(n_vram, n_cpu, n_ram))

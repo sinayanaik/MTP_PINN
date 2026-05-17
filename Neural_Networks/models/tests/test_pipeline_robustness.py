@@ -1,5 +1,5 @@
 """B1 non-finite guard: a NaN/Inf loss must abort the run FAST and LOUD —
-never silently burn the (now 200-epoch) patience budget poisoning a model.
+never silently burn the (50-epoch) patience budget poisoning a model.
 
 Two real cases, run through the actual pipeline on a tiny data subsample:
   • NaN from epoch 1  → no finite checkpoint → RuntimeError within ~1 epoch

@@ -180,9 +180,9 @@ def test_select_run_mode_accepts_dataeff_env(monkeypatch):
     assert GR._select_run_mode(logging.getLogger("t")) == "dataeff"
 
 
-# ── A1: measured per-worker RAM ⇒ min(VRAM,CPU,RAM) pool, RAM-safe ──────────
+# ── A1: CPU is the binding ceiling (cores shared across GPUs, no oversub) ────
 
-def test_compute_pool_size_ram_bound_and_safe(monkeypatch):
+def test_compute_pool_size_cpu_bound_and_safe(monkeypatch):
     import psutil
     monkeypatch.delenv("MTP_GRID_POOL_SIZE", raising=False)
     monkeypatch.delenv("MTP_GRID_WORKER_RAM_GB", raising=False)
@@ -194,11 +194,17 @@ def test_compute_pool_size_ram_bound_and_safe(monkeypatch):
 
     ps = GR._compute_pool_size(True, 2)
     n_vram = int(160.0 / 0.6)                     # 266
-    n_cpu = int(max(2, 48 - 2) * 2 * 2.0)         # 184
-    n_ram = int((177.0 - 16.0) / 1.34)            # 120
-    assert ps == min(n_vram, n_cpu, n_ram) == n_ram
+    n_cpu = int(((48 - 2) // 2) * 1.0)            # 23 — shared, no *n_gpus, oversub off
+    n_ram = int((177.0 - 32.0) / 1.34)            # 108 (32 GB safety margin)
+    assert ps == min(n_vram, n_cpu, n_ram) == n_cpu
+    # CPU ceiling is independent of GPU count (cores are shared, not per-GPU).
+    assert GR._compute_pool_size(True, 1) == ps
     # Never exceeds the RAM safety budget.
-    assert ps * 1.34 <= (177.0 - 16.0) + 1e-6
+    assert ps * 1.34 <= (177.0 - 32.0) + 1e-6
+    # Oversubscription is opt-in via env and scales the CPU budget.
+    monkeypatch.setenv("MTP_GRID_CPU_OVERSUB", "2.0")
+    assert GR._compute_pool_size(True, 2) == int(((48 - 2) // 2) * 2.0)  # 46
+    monkeypatch.delenv("MTP_GRID_CPU_OVERSUB", raising=False)
     # Explicit override still wins outright.
     monkeypatch.setenv("MTP_GRID_POOL_SIZE", "150")
     assert GR._compute_pool_size(True, 2) == 150
