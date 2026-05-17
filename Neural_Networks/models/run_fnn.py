@@ -21,11 +21,11 @@ _NN_ROOT = Path(__file__).resolve().parent.parent
 # ------------------------------------------------------------------
 TRAIN_DATA_RUN_DIR = str(
     _NN_ROOT / "train_data"
-    / "run_0419_1338_qraw_d25p3i_ddL_mraw_a1_R_70v15t15_f1p0t1p0_f6a3df"
+    / "run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837"
 )
 
-MODELS_DIR = str(_NN_ROOT / "Trained_Models" / "FNN")
-REGISTRY_FILE = str(_NN_ROOT / "Trained_Models" / "models_registry.yaml")
+MODELS_DIR = str(_NN_ROOT / "Trained_Models" / "Journal_Comparison" / "FNN")
+REGISTRY_FILE = str(_NN_ROOT / "Trained_Models" / "Journal_Comparison" / "models_registry.yaml")
 
 HP: dict[str, Any] = {
     "epochs": 1000,

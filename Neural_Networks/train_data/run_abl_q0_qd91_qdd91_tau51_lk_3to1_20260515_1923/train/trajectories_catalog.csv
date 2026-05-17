@@ -1,0 +1,45 @@
+source_file,geometry_type,radius_mm,planner,ctrl_hz,fb_hz,duration_sec,n_samples,ee_rms_err_mm,start_idx,end_idx_exclusive
+circle_r70mm_xz_cx215cy35cz355_ruckig_ctrlmax_fbmax_001.json,circle,0.0,Ruckig,302.905,302.899,9.8074,2923,16.023,0,2923
+circle_r140mm_yz_cxn164cyn130cz255_ruckig_ctrlmax_fbmax_001.json,circle,0.0,Ruckig,303.013,303.024,10.4232,3098,9.6695,2923,6021
+circle_r135mm_az118el16_cxn204cy205cz265_cubic_poly_ctrlmax_fb240hz_001.json,circle,0.0,Cubic Poly,1108.11,245.921,10.7717,2537,27.4541,6021,8558
+circle_r75mm_az-45el0_cxn159cy220cz320_ruckig_ctrlmax_fbmax_001.json,circle,0.0,Ruckig,305.15,305.148,9.62279,2865,18.4632,8558,11423
+circle_r65mm_yz_cx200cyn75cz355_ruckig_ctrlmax_fbmax_001.json,circle,0.0,Ruckig,304.236,304.236,7.67681,2287,9.17577,11423,13710
+circle_r70mm_az30el0_cx226cy95cz340_quintic_poly_ctrlmax_fbmax_001.json,circle,0.0,Quintic Poly,305.598,305.597,13.793,4125,14.8811,13710,17835
+ellipse_r50mm_xz_cxn214cy205cz240_ruckig_ctrlmax_fbmax_001.json,ellipse,0.0,Ruckig,304.106,304.115,6.25859,1863,14.5183,17835,19698
+ellipse_r50mm_xz_cxn274cy205cz240_ruckig_ctrlmax_fbmax_001.json,ellipse,0.0,Ruckig,303.934,303.962,6.38514,1907,19.8627,19698,21605
+ellipse_r135mm_az118el16_cxn204cy205cz265_cubic_poly_ctrlmax_fb240hz_001.json,ellipse,0.0,Cubic Poly,1107.22,245.901,10.13,2385,24.0539,21605,23990
+ellipse_r75mm_xz_cxn94cyn105cz365_ruckig_ctrlmax_fbmax_001.json,ellipse,0.0,Ruckig,303.656,303.658,10.4678,3115,5.57379,23990,27105
+ellipse_r70mm_az30el0_cx176cy75cz225_quintic_poly_ctrlmax_fbmax_001.json,ellipse,0.0,Quintic Poly,304.528,304.527,12.373,3704,10.8103,27105,30809
+ellipse_r70mm_xz_cx215cy35cz355_ruckig_ctrlmax_fbmax_002.json,ellipse,0.0,Ruckig,304.866,304.872,8.8138,2628,15.5508,30809,33437
+ellipse_r140mm_yz_cxn164cyn130cz255_ruckig_ctrlmax_fbmax_001.json,ellipse,0.0,Ruckig,304.22,304.218,9.59838,2860,9.46927,33437,36297
+ellipse_r65mm_xz_cx66cyn265cz275_quintic_poly_ctrlmax_fbmax_001.json,ellipse,0.0,Quintic Poly,304.366,304.366,7.93715,2361,17.9138,36297,38658
+helix_r66mm_xz_cxn94cyn105cz372_ruckig_ctrlmax_fbmax_001.json,helix,0.0,Ruckig,302.789,302.787,28.1781,8380,5.65571,38658,47038
+helix_r66mm_xz_cxn214cy205cz247_ruckig_ctrlmax_fbmax_001.json,helix,0.0,Ruckig,303.339,303.342,11.9386,3555,16.0981,47038,50593
+helix_r119mm_az118el16_cxn202cy202cz277_cubic_poly_ctrlmax_fb240hz_001.json,helix,0.0,Cubic Poly,1147.53,242.541,19.54,4599,21.1606,50593,55192
+lissajous_r156mm_az-149el29_cxn209cyn160cz255_quintic_poly_ctrlmax_fb240hz_001.json,lissajous,0.0,Quintic Poly,1150.44,243.472,60.9267,14332,13.9916,55192,69524
+lissajous_r84mm_xz_cxn94cyn105cz365_ruckig_ctrlmax_fbmax_001.json,lissajous,0.0,Ruckig,300.879,300.883,23.1181,6876,7.01489,69524,76400
+lissajous_r151mm_az118el16_cxn204cy205cz265_trapezoidal_ctrlmax_fb240hz_001.json,lissajous,0.0,Trapezoidal,1124.79,243.738,21.7182,5110,20.5499,76400,81510
+lissajous_r78mm_az30el0_cx226cy95cz340_quintic_poly_ctrlmax_fbmax_001.json,lissajous,0.0,Quintic Poly,305.624,305.623,22.8656,6839,14.7156,81510,88349
+parabola_r87mm_az-45el0_cxn159cy220cz351_ruckig_ctrlmax_fbmax_001.json,parabola,0.0,Ruckig,302.901,302.912,3.89087,1157,12.4876,88349,89506
+parabola_r81mm_az30el0_cx226cy95cz369_quintic_poly_ctrlmax_fbmax_001.json,parabola,0.0,Quintic Poly,305.769,305.77,5.83594,1749,21.1677,89506,91255
+parabola_r75mm_xz_cx66cyn265cz302_quintic_poly_ctrlmax_fbmax_001.json,parabola,0.0,Quintic Poly,304.472,304.469,8.70695,2591,12.8097,91255,93846
+parabola_r81mm_xz_cx215cy35cz359_trapezoidal_ctrlmax_fbmax_001.json,parabola,0.0,Trapezoidal,303.803,303.804,5.74689,1714,9.68249,93846,95560
+rectangle_r134mm_az-45el0_cxn159cy220cz320_quintic_poly_ctrlmax_fbmax_001.json,rectangle,0.0,Quintic Poly,304.21,304.216,19.4325,5777,16.2157,95560,101337
+rectangle_r163mm_az-150el0_cxn164cyn130cz285_ruckig_ctrlmax_fbmax_001.json,rectangle,0.0,Ruckig,303.619,303.616,8.86103,2641,13.398,101337,103978
+rectangle_r82mm_yz_cx215cy35cz330_trapezoidal_ctrlmax_fbmax_001.json,rectangle,0.0,Trapezoidal,303.718,303.716,7.4017,2205,9.59403,103978,106183
+regular_polygon_r75mm_xz_cxn214cy205cz240_ruckig_ctrlmax_fbmax_001.json,regular_polygon,0.0,Ruckig,304.506,304.504,10.654,3172,14.7368,106183,109355
+sine_wave_r75mm_xz_cxn214cy205cz243_ruckig_ctrlmax_fbmax_001.json,sine_wave,0.0,Ruckig,303.846,303.848,4.69564,1397,19.1879,109355,110752
+sine_wave_r140mm_az-149el29_cxn206cyn159cz260_ruckig_ctrlmax_fb240hz_001.json,sine_wave,0.0,Ruckig,1152.76,242.347,7.23246,1703,14.5793,110752,112455
+sine_wave_r65mm_xz_cx66cyn265cz278_quintic_poly_ctrlmax_fbmax_001.json,sine_wave,0.0,Quintic Poly,304.934,304.931,10.0733,3008,14.605,112455,115463
+sine_wave_r75mm_az-45el0_cxn159cy220cz323_ruckig_ctrlmax_fbmax_001.json,sine_wave,0.0,Ruckig,302.566,302.561,5.84725,1741,12.7742,115463,117204
+spiral_r140mm_az-150el0_cxn164cyn130cz273_ruckig_ctrlmax_fbmax_001.json,spiral,0.0,Ruckig,303.755,303.754,18.7197,5575,10.8275,117204,122779
+spiral_r64mm_xz_cx63cyn265cz281_quintic_poly_ctrlmax_fbmax_001.json,spiral,0.0,Quintic Poly,302.755,302.755,18.3008,5440,16.3536,122779,128219
+spiral_r75mm_az-45el0_cxn159cy221cz313_ruckig_ctrlmax_fbmax_001.json,spiral,0.0,Ruckig,303.833,303.833,17.1831,5116,14.1641,128219,133335
+spiral_r140mm_az-149el29_cxn215cyn162cz244_ruckig_ctrlmax_fb240hz_001.json,spiral,0.0,Ruckig,1118.04,245.937,17.4755,4114,15.4827,133335,137449
+spiral_r70mm_xz_cx215cy35cz324_trapezoidal_ctrlmax_fbmax_001.json,spiral,0.0,Trapezoidal,304.834,304.831,20.613,6138,10.392,137449,143587
+square_r92mm_az-45el0_cxn159cy220cz320_quintic_poly_ctrlmax_fbmax_001.json,square,0.0,Quintic Poly,304.973,304.981,17.839,5316,14.6377,143587,148903
+square_r99mm_yz_cx215cy35cz330_trapezoidal_ctrlmax_fbmax_001.json,square,0.0,Trapezoidal,304.19,304.191,9.16916,2735,10.7527,148903,151638
+triangle_r100mm_yz_cxn264cy115cz145_ruckig_ctrlmax_fbmax_001.json,triangle,0.0,Ruckig,305.064,305.063,5.87805,1763,20.4444,151638,153401
+triangle_r75mm_xz_cxn94cyn105cz365_ruckig_ctrlmax_fbmax_001.json,triangle,0.0,Ruckig,302.686,302.684,9.73241,2897,5.73999,153401,156298
+triangle_r75mm_xz_cxn214cy205cz240_ruckig_ctrlmax_fbmax_001.json,triangle,0.0,Ruckig,302.902,302.904,9.37472,2790,13.281,156298,159088
+triangle_r115mm_az-45el0_cxn159cy220cz320_quintic_poly_ctrlmax_fbmax_001.json,triangle,0.0,Quintic Poly,303.952,303.949,18.6953,5566,18.1373,159088,164654

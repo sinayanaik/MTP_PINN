@@ -130,6 +130,12 @@ class EDRModel(nn.Module):
         correction_dropout: float = 0.0,
         q_mean:           Sequence[float] | None = None,
         q_std:            Sequence[float] | None = None,
+        use_friction_qdd: bool = False,
+        use_phys_cond:    bool = False,
+        coriolis_matrix_form: bool = True,
+        friction_form:    str = "mlp",
+        inertia_psd:      bool = False,
+        spectral_norm:    bool = False,
     ) -> None:
         super().__init__()
         if n_joints < 1:
@@ -155,15 +161,45 @@ class EDRModel(nn.Module):
             self.register_buffer("q_std", torch.ones(n_joints))
             self._has_trig_features = False
 
+        # Physics-conditioned residual: thread the analytic decomposition
+        # (τ_g/τ_M/τ_C/τ_f) into the δ-nets component-targeted.  Adds n inputs
+        # per network (the relevant decomposition slice).  See
+        # ``build_correction_inputs``.
+        self._use_phys_cond = bool(use_phys_cond)
+        _pc_extra = self.n_joints if self._use_phys_cond else 0
+        # Coriolis correction structure: B(q,q̇)·q̇ matrix form (correct,
+        # cross-joint) vs legacy element-wise q̇⊙MLP.  See CoriolisCorrection.
+        self._coriolis_matrix_form = bool(coriolis_matrix_form)
+        # Friction correction structure: "mlp" (legacy) or "stribeck"
+        # (structured Coulomb+Stribeck+viscous).  See FrictionCorrection.
+        self._friction_form = str(friction_form)
+        # δM = L Lᵀ (symmetric + PSD) when True; unconstrained-symmetric when
+        # False (default — can also reduce over-estimated nominal inertia).
+        self._inertia_psd = bool(inertia_psd)
+        # Spectral-norm (Lipschitz cap) on δ-net HIDDEN layers — principled
+        # generalisation regulariser; structural guarantees & near-zero init
+        # are preserved (final layer is never spectral-normed).
+        self._spectral_norm = bool(spectral_norm)
+
         # Velocity-product dimensionality (upper-triangular entries of q̇⊗q̇).
         # These encode Christoffel-symbol structure τ_C,i = Σ_jk Γ_ijk(q)·q̇_j·q̇_k.
         _vel_prod_dim = self.n_joints * (self.n_joints + 1) // 2
-        # Gravity input dim: n_joints (plain) or 3*n_joints (q + sin + cos).
-        _gravity_in_dim = self.n_joints * 3 if self._has_trig_features else self.n_joints
-        # Coriolis input dim: [q, qd, vel_prod] or [q, sin(q), cos(q), qd, vel_prod].
+        # Gravity input dim: n_joints (plain) or 3*n_joints (q + sin + cos),
+        # plus τ_g (n) when physics-conditioned.
+        _gravity_in_dim = (
+            (self.n_joints * 3 if self._has_trig_features else self.n_joints)
+            + _pc_extra
+        )
+        # Inertia input dim: gravity config dependence + τ_M (n) when phys-cond.
+        _inertia_in_dim = (
+            (self.n_joints * 3 if self._has_trig_features else self.n_joints)
+            + _pc_extra
+        )
+        # Coriolis input dim: [q, qd, vel_prod] (+ trig) + τ_C (n) when phys-cond.
         _coriolis_in_dim = (
             (self.n_joints * 4 if self._has_trig_features else self.n_joints * 2)
             + _vel_prod_dim
+            + _pc_extra
         )
         # Cached index pairs for extracting upper-triangular q̇⊗q̇ entries.
         # These are private implementation details; external callers should use
@@ -172,16 +208,26 @@ class EDRModel(nn.Module):
         self.register_buffer("_vprod_i", _up_i, persistent=False)
         self.register_buffer("_vprod_j", _up_j, persistent=False)
 
+        # Whether friction correction conditions on |q̈| as well as |q̇|.
+        self._use_friction_qdd = bool(use_friction_qdd)
+
         # Store configuration for checkpointing / analysis tools.
         self.hparams: dict = {
             "n_joints":        self.n_joints,
             "gravity_hidden":  list(gravity_hidden),
             "inertia_hidden":  list(inertia_hidden),
+            "inertia_in_dim":  _inertia_in_dim,
             "coriolis_hidden": list(coriolis_hidden),
             "friction_hidden": list(friction_hidden),
             "activation":      activation,
             "correction_dropout": correction_dropout,
-            "use_trig_features": self._has_trig_features,
+            "use_trig_features":  self._has_trig_features,
+            "use_friction_qdd":   self._use_friction_qdd,
+            "use_phys_cond":      self._use_phys_cond,
+            "coriolis_matrix_form": self._coriolis_matrix_form,
+            "friction_form":      self._friction_form,
+            "inertia_psd":        self._inertia_psd,
+            "spectral_norm":      self._spectral_norm,
         }
 
         # ── Four structurally-constrained correction networks ──────────────
@@ -191,12 +237,16 @@ class EDRModel(nn.Module):
             hidden_sizes=gravity_hidden,
             activation=activation,
             dropout=correction_dropout,
+            spectral_norm=self._spectral_norm,
         )
         self.inertia_net  = InertiaCorrection(
             n_joints=self.n_joints,
+            in_dim=_inertia_in_dim,
             hidden_sizes=inertia_hidden,
             activation=activation,
             dropout=correction_dropout,
+            psd=self._inertia_psd,
+            spectral_norm=self._spectral_norm,
         )
         self.coriolis_net = CoriolisCorrection(
             n_joints=self.n_joints,
@@ -204,12 +254,18 @@ class EDRModel(nn.Module):
             hidden_sizes=coriolis_hidden,
             activation=activation,
             dropout=correction_dropout,
+            matrix_form=self._coriolis_matrix_form,
+            spectral_norm=self._spectral_norm,
         )
         self.friction_net = FrictionCorrection(
             n_joints=self.n_joints,
             hidden_sizes=friction_hidden,
             activation=activation,
             dropout=correction_dropout,
+            use_qdd=self._use_friction_qdd,
+            use_phys_cond=self._use_phys_cond,
+            friction_form=self._friction_form,
+            spectral_norm=self._spectral_norm,
         )
 
         # Curriculum phase tracker (1 or 2).  Updated by set_phase().
@@ -249,11 +305,25 @@ class EDRModel(nn.Module):
         self,
         q: torch.Tensor,
         qd: torch.Tensor,
+        physics: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Build all feature tensors consumed by the correction networks.
 
         Single source of truth for the feature contract between EDRModel and
         external code (e.g. the training loop and passivity-loss helper).
+
+        Physics-conditioned residual (``use_phys_cond``)
+        -----------------------------------------------
+        When the model was constructed with ``use_phys_cond=True`` *and* a
+        ``physics`` tensor is supplied, the analytic Pinocchio decomposition is
+        threaded into each δ-net **component-targeted** (δg sees τ_g, δM sees
+        τ_M, δC sees τ_C, δτ_f sees |τ_f|).  This closes the informational gap
+        with the PhysReg baseline (which ingests the full decomposition) while
+        preserving the decomposed inductive bias — strictly more structured
+        than a flat concat.  When ``use_phys_cond=False`` and ``physics=None``
+        (passivity helper, model-level tests) the legacy q/q̇-only contract is
+        returned unchanged.  When ``use_phys_cond=True`` a physics tensor is
+        **required** (a None raises — see B2 guard below).
 
         Parameters
         ----------
@@ -261,29 +331,70 @@ class EDRModel(nn.Module):
             Normalised joint positions, shape (B, n_joints).
         qd:
             Normalised joint velocities, shape (B, n_joints).
+        physics:
+            Optional normalised decomposition [τ_g|τ_M|τ_C|τ_f], shape
+            (B, 4·n_joints).  Used only when ``use_phys_cond`` is enabled.
 
         Returns
         -------
         dict with keys:
             ``gravity_input``   : feature tensor for self.gravity_net.
+            ``inertia_input``   : feature tensor for self.inertia_net
+                                  (== ``gravity_input`` unless phys-conditioned).
             ``coriolis_input``  : feature tensor for self.coriolis_net.
             ``velocity_products``: upper-triangular entries of q̇⊗q̇, shape (B, n(n+1)/2).
             ``q_raw``           : reconstructed raw joint angles if trig features
                                   are enabled, else None.
         """
+        # ── Guards at the source (B2) ────────────────────────────────────
+        # Catch shape mistakes here (the vel-product fancy-indexing would
+        # otherwise silently mis-broadcast or crash deep in a δ-net).
+        n = self.n_joints
+        if q.shape[-1] != n or qd.shape[-1] != n:
+            raise ValueError(
+                f"[EDRModel.build_correction_inputs] q/qd last dim must be "
+                f"n_joints={n}, got q={tuple(q.shape)}, qd={tuple(qd.shape)}"
+            )
+        if self._use_phys_cond and physics is None:
+            # Kill the latent trap at the root: under phys-conditioning the
+            # δ-nets were built expecting the appended component slices, so a
+            # physics=None call would feed wrong-dim inputs.  Fail loudly
+            # here rather than crashing deep in a correction net (this also
+            # makes the passivity-helper incompatibility explicit at source).
+            raise ValueError(
+                "[EDRModel.build_correction_inputs] use_phys_cond=True but "
+                "physics=None — the δ-net inputs require the decomposition "
+                "slices. Pass the physics tensor (or build the model with "
+                "use_phys_cond=False for the legacy q/q̇-only contract)."
+            )
         vel_prod = qd[:, self._vprod_i] * qd[:, self._vprod_j]
         if self._has_trig_features:
             q_raw = q * self.q_std + self.q_mean
             sin_q = torch.sin(q_raw)
             cos_q = torch.cos(q_raw)
-            gravity_input = torch.cat([q, sin_q, cos_q], dim=-1)
-            coriolis_input = torch.cat([q, sin_q, cos_q, qd, vel_prod], dim=-1)
+            gravity_base = torch.cat([q, sin_q, cos_q], dim=-1)
+            coriolis_base = torch.cat([q, sin_q, cos_q, qd, vel_prod], dim=-1)
         else:
             q_raw = None
-            gravity_input = q
-            coriolis_input = torch.cat([q, qd, vel_prod], dim=-1)
+            gravity_base = q
+            coriolis_base = torch.cat([q, qd, vel_prod], dim=-1)
+        # δM(q) shares the gravity configuration dependence (function of q only).
+        inertia_base = gravity_base
+
+        if self._use_phys_cond and physics is not None:
+            tau_g = physics[:, _PHYS_G_START: _PHYS_G_END]
+            tau_M = physics[:, _PHYS_M_START: _PHYS_M_END]
+            tau_C = physics[:, _PHYS_C_START: _PHYS_C_END]
+            gravity_input  = torch.cat([gravity_base,  tau_g], dim=-1)
+            inertia_input  = torch.cat([inertia_base,  tau_M], dim=-1)
+            coriolis_input = torch.cat([coriolis_base, tau_C], dim=-1)
+        else:
+            gravity_input  = gravity_base
+            inertia_input  = inertia_base
+            coriolis_input = coriolis_base
         return {
             "gravity_input":      gravity_input,
+            "inertia_input":      inertia_input,
             "coriolis_input":     coriolis_input,
             "velocity_products":  vel_prod,
             "q_raw":              q_raw,
@@ -360,35 +471,27 @@ class EDRModel(nn.Module):
     # Forward pass
     # -----------------------------------------------------------------------
 
-    def forward(
+    def compute_corrections(
         self,
         features: torch.Tensor,
         physics:  torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Predict joint torques from kinematic state and nominal physics.
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """SINGLE SOURCE OF TRUTH for the EDR computation.
 
-        Parameters
-        ----------
-        features:
-            Normalised kinematic state, shape (B, 3·n_joints).
-            Column order: [q (n) | q̇ (n) | q̈ (n)].
-        physics:
-            Normalised decomposed RNEA + friction components, shape (B, 4·n_joints).
-            Column order: [τ_g (n) | τ_M (n) | τ_C (n) | τ_f (n)].
-            Must not be None — EDR requires physics components.
+        Validates inputs, builds the correction-network inputs, computes the
+        four structured δ-terms, and assembles τ̂.  Both :meth:`forward` and
+        the EDR training loop call **this** method, so the trained loss and
+        the eval forward provably compute the *same* function (no drift
+        between two hand-mirrored code paths — the prior failure mode).
 
         Returns
         -------
-        torch.Tensor
-            Predicted torques τ̂, shape (B, n_joints), in normalised units.
-
-        Raises
-        ------
-        ValueError
-            If ``physics`` is None, or if any input fails shape/dtype/finiteness
-            checks.
-        RuntimeError
-            If the assembled output contains non-finite values (internal error).
+        (tau_hat, deltas)
+            ``tau_hat``: predicted torques (B, n_joints), normalised units.
+            ``deltas``: dict with the raw correction tensors the training
+            loop needs for the regularisation loss / telemetry —
+            ``delta_g``, ``delta_M`` (B,n,n matrix), ``delta_M_qdd``,
+            ``delta_C_qd``, ``delta_tau_f``.
         """
         # ── Input validation ────────────────────────────────────────────────
         if physics is None:
@@ -451,13 +554,21 @@ class EDRModel(nn.Module):
         tau_f = physics[:, _PHYS_F_START: _PHYS_F_END]      # (B, n)
 
         # ── Build all correction-network inputs via the single-source helper ──
-        inputs = self.build_correction_inputs(q, qd)
+        inputs = self.build_correction_inputs(q, qd, physics)
 
         # ── Compute structured corrections ───────────────────────────────────
+        # δM is computed as the full (B,n,n) matrix ONCE here, then applied to
+        # q̈.  Both the torque contribution (bmm) and the Frobenius reg loss
+        # (training loop) use this same matrix — no second forward, no drift.
         delta_g     = self.gravity_net(inputs["gravity_input"])          # (B, n)
-        delta_M_qdd = self.inertia_net(q, qdd)                            # (B, n)
+        delta_M     = self.inertia_net.compute_delta_M(inputs["inertia_input"])  # (B,n,n)
+        delta_M_qdd = torch.bmm(delta_M, qdd.unsqueeze(-1)).squeeze(-1)   # (B, n)
         delta_C_qd  = self.coriolis_net(inputs["coriolis_input"], qd)    # (B, n)
-        delta_tau_f = self.friction_net(qd)                               # (B, n)
+        delta_tau_f = self.friction_net(
+            qd,
+            qdd if self._use_friction_qdd else None,
+            tau_f=tau_f if self._use_phys_cond else None,
+        )                                                                # (B, n)
 
         # ── Assemble corrected prediction ─────────────────────────────────
         # τ̂ = (τ_g + δg) + (τ_M + δM·q̈) + (τ_C + δC·q̇) + (τ_f + δτ_f)
@@ -476,6 +587,27 @@ class EDRModel(nn.Module):
                 "This is an internal error — please file a bug report."
             )
 
+        deltas = {
+            "delta_g":     delta_g,
+            "delta_M":     delta_M,        # (B, n, n) — for Frobenius reg loss
+            "delta_M_qdd": delta_M_qdd,
+            "delta_C_qd":  delta_C_qd,
+            "delta_tau_f": delta_tau_f,
+        }
+        return tau_hat, deltas
+
+    def forward(
+        self,
+        features: torch.Tensor,
+        physics:  torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Predict joint torques τ̂ (B, n_joints), normalised units.
+
+        Thin wrapper over :meth:`compute_corrections` (the single source of
+        truth) — returns only τ̂.  ``physics`` must not be None: EDR
+        decomposes corrections per physics component.
+        """
+        tau_hat, _ = self.compute_corrections(features, physics)
         return tau_hat
 
     # -----------------------------------------------------------------------

@@ -35,8 +35,17 @@ def split_scalar(
 
 
 def rmse_scalar(rec: dict[str, Any], split: str) -> float:
-    """Average RMSE across all joints (rmse_mean), falling back to rmse_pooled."""
-    v = split_scalar(rec, split, "rmse_mean")
+    """Canonical headline RMSE for a split.
+
+    Prefers ``rmse_traj_macro`` — the trajectory-macro estimator that is now
+    identical in definition to the live per-epoch ``val_rmse`` and the
+    early-stopping/return headline (see ``pipeline.run_training``).  Falls back
+    to ``rmse_mean`` then ``rmse_pooled`` for older runs whose metadata predates
+    the ``rmse_traj_macro`` key, so historical records still rank.
+    """
+    v = split_scalar(rec, split, "rmse_traj_macro")
+    if not (v == v and np.isfinite(v)):
+        v = split_scalar(rec, split, "rmse_mean")
     if not (v == v and np.isfinite(v)):
         v = split_scalar(rec, split, "rmse_pooled")
     return v

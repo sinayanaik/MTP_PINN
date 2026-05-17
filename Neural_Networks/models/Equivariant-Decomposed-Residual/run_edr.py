@@ -50,11 +50,11 @@ _NN_ROOT = _REPO_ROOT / "Neural_Networks"
 
 TRAIN_DATA_RUN_DIR: str = str(
     _NN_ROOT / "train_data"
-    / "run_train22_q0_qd91_qdd21_tau51_rnea15"
+    / "run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837"
 )
 
-MODELS_DIR:    str = str(_NN_ROOT / "Trained_Models" / "EDR")
-REGISTRY_FILE: str = str(_NN_ROOT / "Trained_Models" / "models_registry.yaml")
+MODELS_DIR:    str = str(_NN_ROOT / "Trained_Models" / "Journal_Comparison" / "EDR")
+REGISTRY_FILE: str = str(_NN_ROOT / "Trained_Models" / "Journal_Comparison" / "models_registry.yaml")
 
 # ---------------------------------------------------------------------------
 # Hyperparameters
@@ -62,62 +62,47 @@ REGISTRY_FILE: str = str(_NN_ROOT / "Trained_Models" / "models_registry.yaml")
 # ---------------------------------------------------------------------------
 HP: dict[str, Any] = {
     # ── Training schedule ──────────────────────────────────────────────────
-    # Cosine-annealing warm restarts.  LR cycles every T_0 epochs; each
-    # restart gives the optimiser a fresh push into a new basin while the
-    # regularisation hyperparameters below keep train and val loss descending
-    # together throughout the recorded history (no post-peak overfitting).
-    "epochs":              1090,           # ≈ 6 cycles × T_0=15; early-stop
-                                        # typically fires around epoch 55-70.
+    "epochs":              1090,
     "batch_size":          256,
     "learning_rate":       3e-4,
-    "weight_decay":        2e-3,         # Stronger L2 → both losses descend slowly in lockstep.
+    "weight_decay":        2e-3,
     "optimizer":           "adamw",
     "lr_scheduler":        "cosine_warm_restarts",
-    "warm_restart_T_0":    15,           # Cycle length in epochs.
-    "warm_restart_T_mult": 1,            # Fixed cycle length (no doubling).
-    "warm_restart_eta_min": 3e-6,        # ≈ lr × 0.01 — deeper LR trough per cycle.
+    "warm_restart_T_0":    15,
+    "warm_restart_T_mult": 1,
+    "warm_restart_eta_min": 3e-6,
     "early_stopping":      True,
-    "early_stop_metric":   "val_rmse",
-    "patience":            250,           # Stop soon after the val plateau.
-    "min_delta":           2e-5,         # Require meaningful improvement.
+    "early_stop_metric":   "val_loss",    # val_loss tracks training objective; val_rmse has dist-shift.
+    "patience":            120,           # Allow ~150 epochs total (same as old best).
+    "min_delta":           1e-5,          # val_loss scale is much smaller; use tight threshold.
     "grad_clip_norm":      1.0,
-    "feature_noise_std":   0.02,         # 2× augmentation: slows train-loss descent
-                                        # to match val-loss descent in the late regime.
+    "feature_noise_std":   0.02,
     "print_every":         2,
     "seed":                42,
     "data_train_fraction": 1.0,
     "data_train_seed":     0,
     "stride":              1,
     "snapshot_every":      0,
-    "torch_compile":       False,   # Do not enable — incompatible with Jacobian.
+    "torch_compile":       False,
     "torch_compile_mode":  "default",
     # ── EDR network architecture ───────────────────────────────────────────
     "activation":          "silu",
-    "gravity_hidden":      [32, 32],
-    "inertia_hidden":      [32, 32],
-    "coriolis_hidden":     [32, 32],
-    "friction_hidden":     [16, 16],
-    "correction_dropout":  0.25,         # Stronger dropout on correction MLPs.
+    "gravity_hidden":      [64, 64],      # 2× old capacity; keeps generalisation.
+    "inertia_hidden":      [64, 64],
+    "coriolis_hidden":     [64, 64],
+    "friction_hidden":     [32, 32],
+    "correction_dropout":  0.15,
     # ── EDR curriculum (adaptive phase-2 transition) ──────────────────────
-    # Phase 1: gravity + friction only. Phase 2: all four corrections.
-    # Transition is triggered by plateau detection on val_rmse: when recent
-    # improvement falls below ``phase2_plateau_threshold`` over a
-    # ``phase2_plateau_window`` of epochs, phase 2 begins.  Set
-    # ``phase2_start_epoch`` to an int to override with a manual schedule.
     "phase2_start_epoch":     None,
     "phase2_plateau_window":  5,
     "phase2_plateau_threshold": 5e-3,
     "phase2_min_epoch":       3,
-    "phase2_max_epoch":       250,
+    "phase2_max_epoch":       25,         # Force phase-2 early; strong reg keeps corrections small.
     # ── EDR loss weights ──────────────────────────────────────────────────
-    "lambda_correction_reg":  5e-2,
-    "correction_reg_inertia_normalize": False,
-    # Passivity loss (expensive Jacobian) — disabled by default.
+    "lambda_correction_reg":  5e-2,       # Strong regularisation — same as old best model.
+    "correction_reg_inertia_normalize": True,
     "enable_passivity_loss":  False,
     "lambda_passivity":       1e-2,
-    # Learning-rate multiplier for the inertia/Coriolis param group.  1.0 =
-    # full LR when unfrozen; Adam's adaptive denominator naturally yields
-    # conservative initial steps when momentum buffers are cold.
     "frozen_lr_ratio":        1.0,
 }
 

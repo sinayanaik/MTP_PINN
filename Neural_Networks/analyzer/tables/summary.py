@@ -22,8 +22,8 @@ def print_summary_table(groups: dict[str, list[dict[str, Any]]]) -> None:
                 "run_id": rec.get("run_id", "unknown"),
                 "epochs": epochs,
                 "early": "Y" if stopped else "N",
-                "test_rmse":    split_scalar(rec, "test", "rmse_pooled"),
-                "val_rmse":     split_scalar(rec, "val",  "rmse_pooled"),
+                "test_rmse":    split_scalar(rec, "test", "rmse_traj_macro", "rmse_pooled"),
+                "val_rmse":     split_scalar(rec, "val",  "rmse_traj_macro", "rmse_pooled"),
                 "test_r2":      split_scalar(rec, "test", "r2_overall"),
                 "val_r2":       split_scalar(rec, "val",  "r2_overall"),
                 "test_mae":     split_scalar(rec, "test", "mae_mean"),
@@ -72,8 +72,8 @@ def print_summary_table(groups: dict[str, list[dict[str, Any]]]) -> None:
 
     print("=== Best per model type (ranked by test RMSE, N.m) ===")
     for mtype in sorted(groups.keys()):
-        best = min(groups[mtype], key=lambda r: split_scalar(r, "test", "rmse_pooled"))
-        bp  = split_scalar(best, "test", "rmse_pooled")
+        best = min(groups[mtype], key=lambda r: split_scalar(r, "test", "rmse_traj_macro", "rmse_pooled"))
+        bp  = split_scalar(best, "test", "rmse_traj_macro", "rmse_pooled")
         r2  = split_scalar(best, "test", "r2_overall")
         mae = split_scalar(best, "test", "mae_mean")
         print(

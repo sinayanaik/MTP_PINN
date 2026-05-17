@@ -274,7 +274,7 @@ def _sorted_records(
 ) -> list[dict[str, Any]]:
     """All records sorted by test_rmse_pooled ascending (best first)."""
     all_recs = [r for recs in groups.values() for r in recs]
-    all_recs.sort(key=lambda r: _split_scalar(r, "test", "rmse_pooled"))
+    all_recs.sort(key=lambda r: _split_scalar(r, "test", "rmse_traj_macro", "rmse_pooled"))
     return all_recs
 
 
@@ -285,9 +285,9 @@ def _best_per_type(
     Returned list is sorted best → worst by test RMSE."""
     bests: list[dict[str, Any]] = []
     for recs in groups.values():
-        best = min(recs, key=lambda r: _split_scalar(r, "test", "rmse_pooled"))
+        best = min(recs, key=lambda r: _split_scalar(r, "test", "rmse_traj_macro", "rmse_pooled"))
         bests.append(best)
-    bests.sort(key=lambda r: _split_scalar(r, "test", "rmse_pooled"))
+    bests.sort(key=lambda r: _split_scalar(r, "test", "rmse_traj_macro", "rmse_pooled"))
     return bests
 
 
@@ -351,8 +351,8 @@ def print_summary_table(groups: dict[str, list[dict[str, Any]]]) -> None:
                 "epochs": epochs,
                 "early": "Y" if stopped else "N",
                 # ── correct split metrics ──────────────────────────────────
-                "test_rmse":    _split_scalar(rec, "test", "rmse_pooled"),
-                "val_rmse":     _split_scalar(rec, "val",  "rmse_pooled"),
+                "test_rmse":    _split_scalar(rec, "test", "rmse_traj_macro", "rmse_pooled"),
+                "val_rmse":     _split_scalar(rec, "val",  "rmse_traj_macro", "rmse_pooled"),
                 "test_r2":      _split_scalar(rec, "test", "r2_overall"),
                 "val_r2":       _split_scalar(rec, "val",  "r2_overall"),
                 "test_mae":     _split_scalar(rec, "test", "mae_mean"),
@@ -403,8 +403,8 @@ def print_summary_table(groups: dict[str, list[dict[str, Any]]]) -> None:
 
     print("=== Best per model type (ranked by test RMSE, N·m) ===")
     for mtype in sorted(groups.keys()):
-        best = min(groups[mtype], key=lambda r: _split_scalar(r, "test", "rmse_pooled"))
-        bp  = _split_scalar(best, "test", "rmse_pooled")
+        best = min(groups[mtype], key=lambda r: _split_scalar(r, "test", "rmse_traj_macro", "rmse_pooled"))
+        bp  = _split_scalar(best, "test", "rmse_traj_macro", "rmse_pooled")
         r2  = _split_scalar(best, "test", "r2_overall")
         mae = _split_scalar(best, "test", "mae_mean")
         print(
@@ -472,8 +472,8 @@ def plot_training_dynamics(
         if best_ep > 0:
             ax.axvline(best_ep, color="red", lw=1.0, ls=":", alpha=0.75, label=f"best ep={best_ep}")
 
-        tr_nm = _split_scalar(rec, "test", "rmse_pooled")
-        vl_nm = _split_scalar(rec, "val",  "rmse_pooled")
+        tr_nm = _split_scalar(rec, "test", "rmse_traj_macro", "rmse_pooled")
+        vl_nm = _split_scalar(rec, "val",  "rmse_traj_macro", "rmse_pooled")
         r2_t  = _split_scalar(rec, "test", "r2_overall")
         subtitle = (
             f"test RMSE={tr_nm:.4f} N·m  val RMSE={vl_nm:.4f} N·m\ntest R²={r2_t:.4f}" if tr_nm == tr_nm else ""
@@ -519,8 +519,8 @@ def plot_rmse_comparison(
     bar_colors = [type_colors.get(r.get("model_type", "?"), "steelblue") for r in all_recs]
     labels = [_model_label(r) for r in all_recs]
 
-    val_rmse  = [_split_scalar(r, "val",  "rmse_pooled") for r in all_recs]
-    test_rmse = [_split_scalar(r, "test", "rmse_pooled") for r in all_recs]
+    val_rmse  = [_split_scalar(r, "val",  "rmse_traj_macro", "rmse_pooled") for r in all_recs]
+    test_rmse = [_split_scalar(r, "test", "rmse_traj_macro", "rmse_pooled") for r in all_recs]
     delta     = [t - v if (t == t and v == v) else float("nan")
                  for t, v in zip(test_rmse, val_rmse)]
     val_r2    = [_split_scalar(r, "val",  "r2_overall") for r in all_recs]
@@ -886,9 +886,9 @@ def plot_r2_vs_rmse_scatter(
         for rec in ([best_map[mtype]] if mtype in best_map else []):
             lbl = _model_label(rec)
 
-            vr  = _split_scalar(rec, "val",  "rmse_pooled")
+            vr  = _split_scalar(rec, "val",  "rmse_traj_macro", "rmse_pooled")
             vr2 = _split_scalar(rec, "val",  "r2_overall")
-            tr  = _split_scalar(rec, "test", "rmse_pooled")
+            tr  = _split_scalar(rec, "test", "rmse_traj_macro", "rmse_pooled")
             tr2 = _split_scalar(rec, "test", "r2_overall")
 
             if vr == vr and vr2 == vr2:
@@ -903,7 +903,7 @@ def plot_r2_vs_rmse_scatter(
                             fontsize=10, color=c, fontweight="bold")
 
     best_recs_fig6 = _best_per_type(groups)
-    all_test_rmse = [_split_scalar(r, "test", "rmse_pooled") for r in best_recs_fig6]
+    all_test_rmse = [_split_scalar(r, "test", "rmse_traj_macro", "rmse_pooled") for r in best_recs_fig6]
     all_test_r2   = [_split_scalar(r, "test", "r2_overall")  for r in best_recs_fig6]
     valid_r  = [v for v in all_test_rmse if v == v]
     valid_r2 = [v for v in all_test_r2  if v == v]
@@ -1037,7 +1037,7 @@ def plot_edr_physics_corrections(
         logger.info("No EDR correction history found — skipping Fig 8.")
         return
     # Use only the best EDR model for a clean, readable figure
-    best_edr = min(edr_with_history, key=lambda r: _split_scalar(r, "test", "rmse_pooled"))
+    best_edr = min(edr_with_history, key=lambda r: _split_scalar(r, "test", "rmse_traj_macro", "rmse_pooled"))
     edr_with_data = [best_edr]
 
     corr_cols = [

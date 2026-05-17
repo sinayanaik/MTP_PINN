@@ -97,9 +97,11 @@ DEFAULT_EXHAUSTIVE_RESIDUAL = {
 
 RUN_ID_KEYS_PLAIN: list[tuple[str, str]] = [
     ("data_train_fraction", "frac"),
+    ("data_train_seed", "seed"),
     ("learning_rate", "lr"),
     ("weight_decay", "wd"),
     ("dropout", "do"),
+    ("feature_noise_std", "fn"),
     ("batch_size", "bs"),
     ("hidden_layers", "hl"),
 ]

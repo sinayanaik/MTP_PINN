@@ -65,6 +65,7 @@ def _build_correction_mlp(
     out_dim:      int,
     activation:   str = "tanh",
     dropout:      float = 0.0,
+    spectral_norm: bool = False,
 ) -> nn.Sequential:
     """Build a small MLP whose **final layer is zero-initialised**.
 
@@ -128,10 +129,19 @@ def _build_correction_mlp(
     Act = _ACTIVATION_MAP[activation]
     layers: list[nn.Module] = []
     prev = in_dim
+    # Spectral normalisation bounds each hidden layer's Lipschitz constant,
+    # so the learned correction cannot fit high-frequency residual noise —
+    # a principled generalisation regulariser (math robustness), no data
+    # change.  Applied to HIDDEN layers only: the final layer keeps its
+    # near-zero init untouched so the τ̂=τ_phys-at-init guarantee and all
+    # structural constructions (symmetry / oddness / vanishing — which are
+    # architectural, not weight-norm dependent) are preserved exactly.
     for h in hidden_sizes:
         lin = nn.Linear(prev, h)
         nn.init.xavier_normal_(lin.weight)
         nn.init.zeros_(lin.bias)
+        if spectral_norm:
+            lin = nn.utils.parametrizations.spectral_norm(lin)
         layers += [lin, Act()]
         if dropout > 0.0:
             layers.append(nn.Dropout(dropout))
@@ -267,12 +277,14 @@ class GravityCorrection(nn.Module):
         hidden_sizes: Sequence[int] = (32, 32),
         activation:   str = "tanh",
         dropout:      float = 0.0,
+        spectral_norm: bool = False,
     ) -> None:
         super().__init__()
         if n_joints < 1:
             raise ValueError(f"n_joints must be ≥ 1, got {n_joints}")
         self.n_joints = int(n_joints)
         self.in_dim = int(in_dim if in_dim is not None else n_joints)
+        self._spectral_norm = bool(spectral_norm)
         self.hparams = {
             "n_joints":     self.n_joints,
             "in_dim":       self.in_dim,
@@ -286,6 +298,7 @@ class GravityCorrection(nn.Module):
             out_dim=self.n_joints,
             activation=activation,
             dropout=dropout,
+            spectral_norm=self._spectral_norm,
         )
 
     def forward(self, q_input: torch.Tensor) -> torch.Tensor:
@@ -354,13 +367,26 @@ class InertiaCorrection(nn.Module):
         hidden_sizes: Sequence[int] = (32, 32),
         activation:   str = "tanh",
         dropout:      float = 0.0,
+        in_dim:       int | None = None,
+        psd:          bool = False,
+        spectral_norm: bool = False,
     ) -> None:
         super().__init__()
         if n_joints < 1:
             raise ValueError(f"n_joints must be ≥ 1, got {n_joints}")
         self.n_joints = int(n_joints)
+        # Allow caller to supply trig-augmented features [q, sin(q), cos(q)].
+        # Default: plain joint positions (in_dim == n_joints).
+        self.in_dim = int(in_dim) if in_dim is not None else self.n_joints
+        self._spectral_norm = bool(spectral_norm)
         # Number of independent entries in an n×n lower-triangular matrix.
         self.n_tri = self.n_joints * (self.n_joints + 1) // 2
+        # PSD mode: interpret the n_tri MLP outputs as a lower-triangular L and
+        # set δM = L Lᵀ (symmetric AND positive-semidefinite by construction).
+        # Default OFF: an unconstrained-symmetric δM can also *reduce* an
+        # over-estimated nominal inertia, which a PSD-only δM cannot — so PSD
+        # is offered as a physically-stricter ablation, not forced.
+        self._psd = bool(psd)
         # Pre-compute lower-triangular row/column indices for fast scatter.
         rows, cols = torch.tril_indices(self.n_joints, self.n_joints)
         # Register as buffers so they are moved to the correct device with the module.
@@ -368,21 +394,24 @@ class InertiaCorrection(nn.Module):
         self.register_buffer("_tri_cols", cols, persistent=False)
         self.hparams = {
             "n_joints":     self.n_joints,
+            "in_dim":       self.in_dim,
             "hidden_sizes": list(hidden_sizes),
             "activation":   activation,
             "dropout":      float(dropout),
+            "psd":          self._psd,
         }
         # The MLP outputs n_tri numbers for each sample.
         self.net = _build_correction_mlp(
-            in_dim=self.n_joints,
+            in_dim=self.in_dim,
             hidden_sizes=hidden_sizes,
             out_dim=self.n_tri,
             activation=activation,
             dropout=dropout,
+            spectral_norm=self._spectral_norm,
         )
 
-    def _q_to_delta_M(self, q: torch.Tensor) -> torch.Tensor:
-        """Map joint positions to the symmetric inertia correction matrix.
+    def _features_to_delta_M(self, q_features: torch.Tensor) -> torch.Tensor:
+        """Map configuration features to the symmetric inertia correction matrix.
 
         The MLP produces n*(n+1)/2 free parameters representing the independent
         entries of a symmetric matrix.  These are scattered directly into both
@@ -391,20 +420,32 @@ class InertiaCorrection(nn.Module):
 
         Parameters
         ----------
-        q:
-            Joint positions, shape (B, n_joints).
+        q_features:
+            Configuration features, shape (B, in_dim).  When trig features are
+            enabled this is [q, sin(q_raw), cos(q_raw)] (3·n_joints wide);
+            otherwise it is plain normalised q (n_joints wide).
 
         Returns
         -------
         delta_M:
             Symmetric correction matrices, shape (B, n_joints, n_joints).
         """
-        B = q.shape[0]
-        tri_entries = self.net(q)   # (B, n_tri)
+        B = q_features.shape[0]
+        tri_entries = self.net(q_features)   # (B, n_tri)
+        if self._psd:
+            # Build lower-triangular L from the n_tri entries, δM = L Lᵀ.
+            # Symmetric AND PSD by construction; near-zero init preserved
+            # (entries ≈ 0 ⇒ L ≈ 0 ⇒ L Lᵀ ≈ 0).
+            L = torch.zeros(
+                B, self.n_joints, self.n_joints,
+                dtype=q_features.dtype, device=q_features.device,
+            )
+            L[:, self._tri_rows, self._tri_cols] = tri_entries
+            return torch.bmm(L, L.transpose(1, 2))
         delta_M = torch.zeros(
             B, self.n_joints, self.n_joints,
-            dtype=q.dtype,
-            device=q.device,
+            dtype=q_features.dtype,
+            device=q_features.device,
         )
         # Scatter into both symmetric positions.  Diagonal (rows==cols) gets
         # written twice with the same value — a no-op for correctness.
@@ -412,13 +453,15 @@ class InertiaCorrection(nn.Module):
         delta_M[:, self._tri_cols, self._tri_rows] = tri_entries
         return delta_M
 
-    def forward(self, q: torch.Tensor, qdd: torch.Tensor) -> torch.Tensor:
+    def forward(self, q_features: torch.Tensor, qdd: torch.Tensor) -> torch.Tensor:
         """Compute inertia correction contribution  δM(q) @ q̈.
 
         Parameters
         ----------
-        q:
-            Joint positions, shape (B, n_joints).
+        q_features:
+            Configuration features, shape (B, in_dim).  Plain normalised q or
+            trig-augmented [q, sin(q_raw), cos(q_raw)] depending on how the
+            model was constructed.
         qdd:
             Joint accelerations, shape (B, n_joints).
 
@@ -427,34 +470,32 @@ class InertiaCorrection(nn.Module):
         torch.Tensor
             δM(q) @ q̈, shape (B, n_joints).
         """
-        _assert_tensor(q,   "q   [InertiaCorrection]",   self.n_joints)
         _assert_tensor(qdd, "qdd [InertiaCorrection]", self.n_joints)
-        if q.shape[0] != qdd.shape[0]:
+        if q_features.shape[0] != qdd.shape[0]:
             raise ValueError(
-                f"[InertiaCorrection] Batch size mismatch: q has {q.shape[0]} rows, "
-                f"qdd has {qdd.shape[0]} rows."
+                f"[InertiaCorrection] Batch size mismatch: q_features has "
+                f"{q_features.shape[0]} rows, qdd has {qdd.shape[0]} rows."
             )
-        delta_M = self._q_to_delta_M(q)          # (B, n, n)
+        delta_M = self._features_to_delta_M(q_features)  # (B, n, n)
         # (B, n, n) @ (B, n, 1) → (B, n, 1) → squeeze to (B, n).
         delta_M_qdd = torch.bmm(delta_M, qdd.unsqueeze(-1)).squeeze(-1)
         _assert_output_finite(delta_M_qdd, "delta_M_qdd")
         return delta_M_qdd
 
-    def compute_delta_M(self, q: torch.Tensor) -> torch.Tensor:
+    def compute_delta_M(self, q_features: torch.Tensor) -> torch.Tensor:
         """Expose the correction matrix itself (useful for tests and analysis).
 
         Parameters
         ----------
-        q:
-            Joint positions, shape (B, n_joints).
+        q_features:
+            Configuration features, shape (B, in_dim).
 
         Returns
         -------
         torch.Tensor
             δM(q), shape (B, n_joints, n_joints).
         """
-        _assert_tensor(q, "q [InertiaCorrection.compute_delta_M]", self.n_joints)
-        return self._q_to_delta_M(q)
+        return self._features_to_delta_M(q_features)
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -469,21 +510,28 @@ class CoriolisCorrection(nn.Module):
 
     Mathematical form
     -----------------
-    The Coriolis torque C(q, q̇)q̇ vanishes identically when q̇ = 0.  The
-    correction must share this property.
+    The Coriolis torque C(q, q̇)q̇ vanishes identically when the *full*
+    velocity vector q̇ = 0.  The correction must share this property.
 
-    We use an element-wise velocity product construction:
+    Matrix form (``matrix_form=True``, canonical, Phase-2 revamp):
+
+        δC(q,q̇)·q̇ = B(q,q̇) @ q̇,   B ∈ ℝ^{n×n} from the MLP.
+
+    The MLP emits n² entries reshaped to B(q,q̇); the contribution is the
+    matrix-vector product B·q̇.  It vanishes **iff the full q̇ vector is
+    zero** (B · 0 = 0 for any B) — the physically-correct property — while
+    allowing genuine cross-joint coupling: joint i's Coriolis correction can
+    be non-zero when q̇_i = 0 as long as some other joint moves.
+
+    Legacy element-wise form (``matrix_form=False``, kept for ablation):
 
         δC(q,q̇)·q̇ = q̇ ⊙ MLP_C(features)
 
-    The MLP input can optionally be augmented with physics-informed features
-    (sin/cos of raw joint angles).  Trigonometric features capture
-    configuration-dependent coupling that appears in the true Christoffel
-    symbols via rotation matrices.
+    This wrongly forces joint i's correction to vanish whenever q̇_i = 0,
+    even if other joints move — strictly less expressive and not physical.
 
-    Because the output is multiplied element-wise by q̇, it vanishes exactly
-    when q̇ = 0.  The MLP receives full per-joint velocity information (not
-    a lossy scalar norm).
+    The MLP input can optionally be augmented with physics-informed features
+    (sin/cos of raw joint angles, τ_C when phys-conditioned).
 
     Parameters
     ----------
@@ -496,6 +544,9 @@ class CoriolisCorrection(nn.Module):
         Hidden layer widths.
     activation:
         Nonlinearity name.
+    matrix_form:
+        If True (default), use the correct B(q,q̇)·q̇ matrix construction.
+        If False, use the legacy per-joint element-wise q̇ ⊙ MLP form.
     """
 
     def __init__(
@@ -505,25 +556,39 @@ class CoriolisCorrection(nn.Module):
         hidden_sizes: Sequence[int] = (32, 32),
         activation:   str = "tanh",
         dropout:      float = 0.0,
+        matrix_form:  bool = True,
+        spectral_norm: bool = False,
     ) -> None:
         super().__init__()
         if n_joints < 1:
             raise ValueError(f"n_joints must be ≥ 1, got {n_joints}")
         self.n_joints = int(n_joints)
         self.in_dim = int(in_dim if in_dim is not None else n_joints * 2)
+        self._spectral_norm = bool(spectral_norm)
+        # matrix_form=True  → δC·q̇ = B(q,q̇)·q̇ (cross-joint, vector-vanishing).
+        # matrix_form=False → element-wise q̇⊙MLP (per-joint vanishing).  Both
+        # are first-class, explicitly recorded in hparams below; the choice is
+        # data-dependent (on this dataset the element-wise form generalised
+        # *better*), so neither is "wrong" — no runtime warning, just the
+        # explicit hparam so a config is never silently misread.
+        self._matrix_form = bool(matrix_form)
+        # Matrix form emits n² entries (full B); legacy emits n (per-joint scale).
+        _out_dim = self.n_joints * self.n_joints if self._matrix_form else self.n_joints
         self.hparams = {
             "n_joints":     self.n_joints,
             "in_dim":       self.in_dim,
             "hidden_sizes": list(hidden_sizes),
             "activation":   activation,
             "dropout":      float(dropout),
+            "matrix_form":  self._matrix_form,
         }
         self.net = _build_correction_mlp(
             in_dim=self.in_dim,
             hidden_sizes=hidden_sizes,
-            out_dim=self.n_joints,
+            out_dim=_out_dim,
             activation=activation,
             dropout=dropout,
+            spectral_norm=self._spectral_norm,
         )
 
     def forward(self, features: torch.Tensor, qd: torch.Tensor) -> torch.Tensor:
@@ -535,13 +600,13 @@ class CoriolisCorrection(nn.Module):
             Input features, shape (B, in_dim).  Typically [q, qd] (2n) or
             [q, sin(q_raw), cos(q_raw), qd] (4n).
         qd:
-            Joint velocities, shape (B, n_joints).  Used for the element-wise
-            multiplication that enforces vanishing at q̇ = 0.
+            Joint velocities, shape (B, n_joints).  The matrix-vector (or
+            element-wise) product with q̇ enforces vanishing at q̇ = 0.
 
         Returns
         -------
         torch.Tensor
-            δC·q̇, shape (B, n_joints).  Exactly zero when q̇ = 0.
+            δC·q̇, shape (B, n_joints).  Exactly zero when the full q̇ = 0.
         """
         _assert_tensor(features, "features [CoriolisCorrection]", self.in_dim)
         _assert_tensor(qd, "qd [CoriolisCorrection]", self.n_joints)
@@ -550,10 +615,16 @@ class CoriolisCorrection(nn.Module):
                 f"[CoriolisCorrection] Batch size mismatch: features has "
                 f"{features.shape[0]} rows, qd has {qd.shape[0]} rows."
             )
-        mlp_out = self.net(features)                              # (B, n_joints)
-
-        # Element-wise multiply by q̇ ensures output vanishes at q̇ = 0.
-        delta_C_qd = qd * mlp_out                                # (B, n_joints)
+        if self._matrix_form:
+            # B(q,q̇) ∈ (B, n, n);  δC·q̇ = B @ q̇ ∈ (B, n).
+            # Vanishes iff the full q̇ vector is zero (B · 0 = 0 ∀ B);
+            # allows cross-joint coupling (joint i non-zero when q̇_i = 0).
+            B_mat = self.net(features).view(-1, self.n_joints, self.n_joints)
+            delta_C_qd = torch.bmm(B_mat, qd.unsqueeze(-1)).squeeze(-1)
+        else:
+            # Legacy: element-wise multiply by q̇ (per-joint vanishing).
+            mlp_out = self.net(features)                          # (B, n_joints)
+            delta_C_qd = qd * mlp_out                             # (B, n_joints)
 
         _assert_output_finite(delta_C_qd, "delta_C_qd")
         return delta_C_qd
@@ -605,33 +676,82 @@ class FrictionCorrection(nn.Module):
         hidden_sizes: Sequence[int] = (16, 16),
         activation:   str = "tanh",
         dropout:      float = 0.0,
+        use_qdd:      bool = False,
+        use_phys_cond: bool = False,
+        friction_form: str = "mlp",
+        spectral_norm: bool = False,
     ) -> None:
         super().__init__()
         if n_joints < 1:
             raise ValueError(f"n_joints must be ≥ 1, got {n_joints}")
         self.n_joints = int(n_joints)
+        self._spectral_norm = bool(spectral_norm)
+        # friction_form:
+        #   "mlp"      — legacy: δτ_f = q̇ ⊙ h_φ(|q̇|[,…])  (even h, odd product).
+        #   "stribeck" — structured Coulomb+Stribeck+viscous:
+        #       δτ_f = sgn_s(q̇) ⊙ [F_c + F_s·exp(−(|q̇|/v_s)²)] + F_v·q̇
+        #     where sgn_s(q̇)=q̇/√(q̇²+ε) is exactly odd, the bracket is even,
+        #     and F_v·q̇ is odd ⇒ δτ_f stays exactly odd.  Captures the
+        #     Coulomb offset / Stribeck dip the pure-MLP form cannot express
+        #     (targets the friction-dominated, low-R² joints).
+        if friction_form not in ("mlp", "stribeck"):
+            raise ValueError(
+                f"[FrictionCorrection] friction_form must be 'mlp' or "
+                f"'stribeck', got {friction_form!r}"
+            )
+        self._friction_form = friction_form
+        # When use_qdd=True, MLP receives [|q̇|, |q̈|] (2×n_joints) so the
+        # correction can condition on acceleration magnitude — capturing
+        # stiction, speed-transition dynamics, and load-dependent friction.
+        self._use_qdd = bool(use_qdd)
+        # When use_phys_cond=True, the analytic friction torque τ_f is threaded
+        # in as |τ_f| (an *even* function of q̇, since τ_f is odd in q̇).
+        # h_φ(|q̇|[,|q̈|][,|τ_f|]) therefore stays even ⇒ q̇ ⊙ h_φ stays exactly
+        # odd: the odd-symmetry guarantee is preserved by construction.
+        self._use_phys_cond = bool(use_phys_cond)
+        _in_dim = self.n_joints * (
+            1 + int(self._use_qdd) + int(self._use_phys_cond)
+        )
         self.hparams = {
             "n_joints":     self.n_joints,
             "hidden_sizes": list(hidden_sizes),
             "activation":   activation,
             "dropout":      float(dropout),
+            "use_qdd":      self._use_qdd,
+            "use_phys_cond": self._use_phys_cond,
+            "friction_form": self._friction_form,
         }
-        # MLP: |q̇| ∈ ℝ^n → per-joint even scale h_φ ∈ ℝ^n.
+        # "mlp": n outputs (even scale h_φ).  "stribeck": 4n outputs
+        # (F_c, F_s, raw_vs, F_v per joint).
+        _out_dim = self.n_joints if self._friction_form == "mlp" else 4 * self.n_joints
         self.net = _build_correction_mlp(
-            in_dim=self.n_joints,
+            in_dim=_in_dim,
             hidden_sizes=hidden_sizes,
-            out_dim=self.n_joints,
+            out_dim=_out_dim,
             activation=activation,
             dropout=dropout,
+            spectral_norm=self._spectral_norm,
         )
 
-    def forward(self, qd: torch.Tensor) -> torch.Tensor:
-        """Compute friction correction  δτ_f(q̇) = q̇ ⊙ h_φ(|q̇|).
+    def forward(
+        self,
+        qd: torch.Tensor,
+        qdd: torch.Tensor | None = None,
+        tau_f: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute friction correction  δτ_f(q̇) = q̇ ⊙ h_φ(|q̇| [, |q̈|] [, |τ_f|]).
 
         Parameters
         ----------
         qd:
             Joint velocities, shape (B, n_joints).
+        qdd:
+            Joint accelerations, shape (B, n_joints).  Required when
+            ``use_qdd=True`` was set at construction time; otherwise ignored.
+        tau_f:
+            Analytic friction torque, shape (B, n_joints).  Required when
+            ``use_phys_cond=True`` was set at construction time; otherwise
+            ignored.  Fed in as |τ_f| (even ⇒ odd-symmetry preserved).
 
         Returns
         -------
@@ -639,15 +759,52 @@ class FrictionCorrection(nn.Module):
             δτ_f, shape (B, n_joints).  Satisfies δτ_f(−q̇) = −δτ_f(q̇) exactly.
         """
         _assert_tensor(qd, "qd [FrictionCorrection]", self.n_joints)
-        # Smooth even function of q̇: sqrt(q̇² + ε) ≈ |q̇|, but differentiable
-        # at q̇ = 0.  Its derivative d/dq̇ sqrt(q̇² + ε) = q̇/sqrt(q̇² + ε) → 0
-        # smoothly as q̇ → 0, matching the Stribeck-curve behaviour of real
-        # friction near stick-slip transitions.
+        # Smooth even function of q̇: sqrt(q̇² + ε) ≈ |q̇|, differentiable at 0.
         abs_qd = torch.sqrt(qd * qd + _FRICTION_ABS_EPS)   # (B, n_joints)
-        # MLP produces an even (non-negative-input) scale.
-        h = self.net(abs_qd)                                # (B, n_joints)
-        # Odd product: q̇ × h(|q̇|) — odd because q̇ is odd and h is even.
-        delta_tau_f = qd * h                                # (B, n_joints)
+        parts = [abs_qd]
+        if self._use_qdd:
+            if qdd is None:
+                raise ValueError(
+                    "[FrictionCorrection] use_qdd=True but qdd was not provided."
+                )
+            parts.append(torch.sqrt(qdd * qdd + _FRICTION_ABS_EPS))
+        if self._use_phys_cond:
+            if tau_f is None:
+                raise ValueError(
+                    "[FrictionCorrection] use_phys_cond=True but tau_f was not "
+                    "provided.  Pass the analytic friction torque so the "
+                    "physics-conditioned (still odd) correction can be formed."
+                )
+            _assert_tensor(tau_f, "tau_f [FrictionCorrection]", self.n_joints)
+            # |τ_f| is even in q̇ (τ_f is odd) ⇒ keeps h_φ even.
+            parts.append(torch.sqrt(tau_f * tau_f + _FRICTION_ABS_EPS))
+        mlp_in = parts[0] if len(parts) == 1 else torch.cat(parts, dim=-1)
+        out = self.net(mlp_in)
+
+        if self._friction_form == "mlp":
+            # out is an even (non-negative-input) scale h_φ ∈ (B, n).
+            # Odd product: q̇ × h — odd because q̇ is odd and h is even.
+            delta_tau_f = qd * out                              # (B, n_joints)
+        else:
+            # Structured Coulomb + Stribeck + viscous.
+            n = self.n_joints
+            F_c    = out[:, 0:n]
+            F_s    = out[:, n:2*n]
+            raw_vs = out[:, 2*n:3*n]
+            F_v    = out[:, 3*n:4*n]
+            # v_s > 0 always (softplus); +eps guarantees no div-by-zero even
+            # at the near-zero init (raw_vs≈0 ⇒ v_s≈0.693).  Clamp raw_vs
+            # ≥ -5 (B5 defensive): a pathological very-negative raw_vs would
+            # drive v_s→1e-3 and (|q̇|/v_s)² → huge; exp(−huge)→0 is finite
+            # but the clamp keeps the Stribeck scale numerically sane and
+            # gradients well-conditioned.
+            v_s = nn.functional.softplus(raw_vs.clamp(min=-5.0)) + 1e-3
+            # sgn_s(q̇) = q̇/√(q̇²+ε): smooth, exactly odd, |·|→1 away from 0.
+            sgn_s = qd / abs_qd
+            # Even bracket (function of |q̇| and params only):
+            stribeck = F_c + F_s * torch.exp(-(abs_qd / v_s) ** 2)
+            # odd ⊙ even  +  odd  ⇒ exactly odd in q̇.
+            delta_tau_f = sgn_s * stribeck + F_v * qd
         _assert_output_finite(delta_tau_f, "delta_tau_f")
         return delta_tau_f
 

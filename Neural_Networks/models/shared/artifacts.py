@@ -169,8 +169,10 @@ def update_registry(
                 "avg_pearson_mean": metrics.get("pearson_r_mean"),
                 "per_joint_rmse": metrics.get("rmse"),
                 "per_joint_r2": metrics.get("r2"),
+                "avg_rmse_traj_macro": metrics.get("rmse_traj_macro"),
                 "test_rmse_mean": (test_metrics or metrics).get("rmse_mean"),
                 "test_rmse_pooled": (test_metrics or metrics).get("rmse_pooled"),
+                "test_rmse_traj_macro": (test_metrics or metrics).get("rmse_traj_macro"),
                 "test_r2_overall": (test_metrics or metrics).get("r2_overall"),
                 "test_nrmse_mean": (test_metrics or metrics).get("nrmse_mean"),
                 "test_mse_mean": (test_metrics or metrics).get("mse_mean"),
@@ -178,6 +180,7 @@ def update_registry(
         }
         if val_metrics is not None:
             entry["val_metrics"] = {
+                "rmse_traj_macro": val_metrics.get("rmse_traj_macro"),
                 "rmse_pooled": val_metrics.get("rmse_pooled"),
                 "rmse_mean": val_metrics.get("rmse_mean"),
                 "r2_overall": val_metrics.get("r2_overall"),
@@ -187,6 +190,7 @@ def update_registry(
             }
         if test_metrics is not None:
             entry["test_metrics"] = {
+                "rmse_traj_macro": test_metrics.get("rmse_traj_macro"),
                 "rmse_pooled": test_metrics.get("rmse_pooled"),
                 "rmse_mean": test_metrics.get("rmse_mean"),
                 "r2_overall": test_metrics.get("r2_overall"),

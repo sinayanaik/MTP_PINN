@@ -21,7 +21,9 @@ def export_summary_markdown(
     lines: list[str] = [
         "# Grid search — best run per architecture",
         "",
-        "Best = minimum **test** `rmse_pooled` within each `model_type`.",
+        "Best = minimum **test** `rmse_traj_macro` (trajectory-macro RMSE, "
+        "the headline estimator; falls back to `rmse_pooled` for older runs) "
+        "within each `model_type`.",
         "",
         "| Architecture | test RMSE (N·m) | test R2 overall | test MAE | run id |",
         "|-------------|-----------------|----------------|----------|--------|",
@@ -29,7 +31,7 @@ def export_summary_markdown(
     for r in best_list:
         mtype = r.get("model_type", "?")
         run_id = str(r.get("run_id", ""))[:80]
-        trmse = split_scalar(r, "test", "rmse_pooled")
+        trmse = split_scalar(r, "test", "rmse_traj_macro", "rmse_pooled")
         tr2   = split_scalar(r, "test", "r2_overall")
         mae   = split_scalar(r, "test", "mae_mean")
         lines.append(
@@ -42,7 +44,7 @@ def export_summary_markdown(
         rmses: list[float] = []
         r2s: list[float] = []
         for r in recs:
-            a = split_scalar(r, "test", "rmse_pooled")
+            a = split_scalar(r, "test", "rmse_traj_macro", "rmse_pooled")
             b = split_scalar(r, "test", "r2_overall")
             if a == a and np.isfinite(a):
                 rmses.append(a)

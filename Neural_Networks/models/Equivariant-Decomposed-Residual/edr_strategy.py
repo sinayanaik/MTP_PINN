@@ -81,7 +81,29 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Joint weights — EDR uses custom weights to focus on bottlenecks
 # ---------------------------------------------------------------------------
-_JOINT_WEIGHTS: list[float] = [1.0, 3.0, 1.2, 0.7, 2.5]
+_JOINT_WEIGHTS: list[float] = [1.0, 1.0, 1.0, 1.0, 1.0]
+
+
+def _resolve_joint_weights(hp: dict[str, Any], device) -> torch.Tensor:
+    """Per-joint training-loss weights, mean-normalised to 1.
+
+    EDR previously used uniform weights, but the per-joint TEST error is
+    highly non-uniform (joint 2 ≈ 4× joint 4 on this dataset; joint 5 has the
+    worst R²).  Up-weighting the hard joints in the *training* loss directly
+    lowers the equal-weight trajectory-macro headline (which averages joints
+    uniformly).  Mean-normalisation keeps the overall loss scale — hence the
+    data↔reg balance and effective LR — unchanged vs uniform weighting.
+
+    ``joint_loss_weights`` HP: list[float] (raw, any positive scale) or None
+    (⇒ uniform, exact back-compat).
+    """
+    raw = hp.get("joint_loss_weights", None)
+    if raw is None:
+        raw = _JOINT_WEIGHTS
+    w = torch.tensor([float(x) for x in raw], dtype=torch.float32, device=device)
+    if (w <= 0).any():
+        raise ValueError(f"[EDR] joint_loss_weights must be all > 0, got {list(raw)}")
+    return w * (w.numel() / w.sum())   # mean-normalised → mean(w)=1
 
 
 # ===========================================================================
@@ -127,9 +149,25 @@ DEFAULT_EXHAUSTIVE_EDR: dict[str, Any] = {
     "phase2_plateau_threshold": 5e-3,   # Relative improvement threshold (0.5%).
     "phase2_min_epoch":       3,        # Never trigger before this epoch (noise at start).
     "phase2_max_epoch":       25,       # Safety fallback: force transition no later than this.
-    "lambda_correction_reg":  5e-3,      # Correction magnitude regularisation weight.
+    "lambda_correction_reg":  5e-3,      # Scalar fallback (used when the dict below is absent).
+    # Phase 5: per-component correction-reg (capacity-aware).  None ⇒ use the
+    # scalar above for all four (exact back-compat).  A dict {g,M,C,f} lets
+    # the O(n²) matrix δM/δC be penalised far harder than the O(n) δg/δf.
+    "lambda_correction_reg_per_component": None,
+    "lambda_correction_decay": "none",   # "none" | "cosine"
+    "lambda_correction_decay_min_ratio": 0.3,
+    # Per-joint training-loss weights (None ⇒ uniform, exact back-compat).
+    # Mean-normalised internally; up-weight the hard joints (2/5/3 here).
+    "joint_loss_weights":     None,
     "correction_reg_inertia_normalize": True,  # Scale ||δM||_F² by 1/n² vs vector terms.
     "correction_dropout":     0.08,      # Dropout after hidden activations (0 = off).
+    "use_friction_qdd":       False,     # Feed |q̈| to friction MLP (backward compat default).
+    "use_phys_cond":          True,      # Phase 1: thread analytic decomposition into δ-nets.
+    "coriolis_matrix_form":   True,      # Phase 2: δC = B(q,q̇)·q̇ (correct, cross-joint).
+    "friction_form":          "stribeck",  # Phase 4: Coulomb+Stribeck+viscous (vs "mlp").
+    "inertia_psd":            False,     # A2: δM=LLᵀ (PSD) when True; else unconstrained-symmetric.
+    "ema_decay":              0.0,       # Per-epoch weight-EMA (0 = off). >0 ⇒ EMA-vs-raw val selection.
+    "spectral_norm":          False,     # Lipschitz-constrain δ-net hidden layers (math robustness).
     "enable_passivity_loss":  False,     # Passivity (Ṁ−2C skew-symmetry) loss.
     "lambda_passivity":       1e-2,      # Passivity loss weight (if enabled).
     "frozen_lr_ratio":        0.7,       # LR multiplier for inertia/Coriolis group (phase 1 and 2).
@@ -216,11 +254,35 @@ def _should_transition_to_phase2(
 # Hyperparameter keys to embed in the run ID string.
 RUN_ID_KEYS_EDR: list[tuple[str, str]] = [
     ("data_train_fraction",  "frac"),
+    ("data_train_seed",      "seed"),
     ("learning_rate",        "lr"),
     ("weight_decay",         "wd"),
     ("batch_size",           "bs"),
     ("phase2_start_epoch",   "ph2"),
     ("lambda_correction_reg","creg"),
+    # Sweep disambiguators — without these, distinct width/dropout/friction
+    # configs collide in the run-dir name and SKIP_EXISTING wrongly skips them.
+    ("gravity_hidden",       "w"),
+    ("correction_dropout",   "cdo"),
+    ("use_friction_qdd",     "fqdd"),
+    ("use_phys_cond",        "pc"),
+    ("coriolis_matrix_form", "cmf"),
+    ("lambda_correction_decay", "lcd"),
+    ("joint_loss_weights",   "jw"),
+    ("friction_form",        "ff"),
+    ("inertia_psd",          "psd"),
+    # B4: distinct phase-2 schedules / frozen-LR previously aliased in the
+    # run-dir name (SKIP_EXISTING itself is safe — it diffs the full hp — but
+    # the dir name was ambiguous for analysis).  All scalars; _fmt_hp_value
+    # handles them.  (Dict HP lambda_correction_reg_per_component is kept OUT
+    # of RUN_ID on purpose — its identity is covered by the full-hp compare.)
+    ("phase2_min_epoch",        "p2min"),
+    ("phase2_max_epoch",        "p2max"),
+    ("phase2_plateau_window",   "p2w"),
+    ("phase2_plateau_threshold","p2t"),
+    ("frozen_lr_ratio",         "flr"),
+    ("ema_decay",               "ema"),
+    ("spectral_norm",           "sn"),
 ]
 
 
@@ -302,23 +364,109 @@ def _correction_reg_loss(
 
     Returns
     -------
-    torch.Tensor
-        Scalar regularisation loss.
+    dict[str, torch.Tensor]
+        Per-component scalar penalties with keys ``g``, ``M``, ``C``, ``f``.
+        The caller applies per-component λ weights and sums.  (Per-component
+        is essential: the matrix δM and δC carry O(n²) effective capacity and
+        memorise under a single weak global λ — they need far stronger
+        penalties than the O(n) δg / δτ_f vectors.)
     """
     inertia_frob = (delta_M ** 2).sum(dim=(-2, -1)).mean()
     if normalize_inertia_frob:
         inertia_frob = inertia_frob / float(max(1, int(n_joints)))
-    return (
-        (delta_g    ** 2).mean()
-        + inertia_frob
-        + (delta_C_qd ** 2).mean()
-        + (delta_tau_f ** 2).mean()
-    )
+    return {
+        "g": (delta_g     ** 2).mean(),
+        "M": inertia_frob,
+        "C": (delta_C_qd  ** 2).mean(),
+        "f": (delta_tau_f ** 2).mean(),
+    }
+
+
+def _resolve_component_lambdas(
+    hp: dict[str, Any], epoch: int, total_epochs: int
+) -> dict[str, float]:
+    """Resolve per-component correction-reg weights for this epoch.
+
+    Precedence: ``lambda_correction_reg_per_component`` (dict with keys
+    g/M/C/f) overrides the scalar ``lambda_correction_reg`` fallback (applied
+    to all four — exact back-compat when the dict is absent).
+
+    Optional epoch schedule via ``lambda_correction_decay``:
+      • ``"none"``   (default) — constant λ.
+      • ``"cosine"`` — λ scaled from 1.0 → ``lambda_correction_decay_min_ratio``
+        over training (strong Occam early to suppress the post-unfreeze
+        memorisation spike, relaxed late once the base is fit).
+    """
+    scalar = float(hp.get("lambda_correction_reg", 1e-3))
+    per = hp.get("lambda_correction_reg_per_component", None)
+    if isinstance(per, dict):
+        lam = {k: float(per.get(k, scalar)) for k in ("g", "M", "C", "f")}
+    else:
+        lam = {k: scalar for k in ("g", "M", "C", "f")}
+
+    decay = str(hp.get("lambda_correction_decay", "none")).lower()
+    if decay == "cosine" and total_epochs > 1:
+        min_ratio = float(hp.get("lambda_correction_decay_min_ratio", 0.3))
+        progress = min(1.0, max(0.0, (epoch - 1) / float(total_epochs - 1)))
+        factor = min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+        lam = {k: v * factor for k, v in lam.items()}
+    return lam
 
 
 # ===========================================================================
 # Model factory
 # ===========================================================================
+
+def _validate_edr_hp(hp: dict[str, Any]) -> None:
+    """Fail-fast validation of EDR hyperparameters (B3).
+
+    Catches typos / out-of-range values at model-construction time with a
+    clear message, instead of a confusing downstream crash or a silent
+    wrong-behaviour default.
+    """
+    ff = str(hp.get("friction_form", "mlp"))
+    if ff not in ("mlp", "stribeck"):
+        raise ValueError(
+            f"[EDR] friction_form must be 'mlp' or 'stribeck', got {ff!r}"
+        )
+    lcd = str(hp.get("lambda_correction_decay", "none")).lower()
+    if lcd not in ("none", "cosine"):
+        raise ValueError(
+            f"[EDR] lambda_correction_decay must be 'none' or 'cosine', got {lcd!r}"
+        )
+    per = hp.get("lambda_correction_reg_per_component", None)
+    if per is not None:
+        if not isinstance(per, dict):
+            raise ValueError(
+                "[EDR] lambda_correction_reg_per_component must be a dict "
+                f"with keys ⊆ {{g,M,C,f}} or None, got {type(per).__name__}"
+            )
+        bad = set(per) - {"g", "M", "C", "f"}
+        if bad:
+            raise ValueError(
+                f"[EDR] lambda_correction_reg_per_component has unknown keys "
+                f"{sorted(bad)}; allowed: g, M, C, f"
+            )
+        for k, v in per.items():
+            if float(v) < 0.0:
+                raise ValueError(
+                    f"[EDR] lambda_correction_reg_per_component[{k!r}] must be "
+                    f"≥ 0, got {v!r}"
+                )
+    jw = hp.get("joint_loss_weights", None)
+    if jw is not None and any(float(x) <= 0.0 for x in jw):
+        raise ValueError(
+            f"[EDR] joint_loss_weights must be all > 0, got {list(jw)}"
+        )
+    _ed = float(hp.get("ema_decay", 0.0) or 0.0)
+    if not 0.0 <= _ed < 1.0:
+        raise ValueError(f"[EDR] ema_decay must be in [0, 1), got {_ed!r}")
+    for _k in ("use_phys_cond", "coriolis_matrix_form", "inertia_psd",
+               "use_friction_qdd", "spectral_norm"):
+        _v = hp.get(_k, False)
+        if not isinstance(_v, (bool,)) and _v not in (0, 1, True, False):
+            raise ValueError(f"[EDR] {_k} must be boolean, got {_v!r}")
+
 
 def _make_model_edr(device: torch.device, hp: dict[str, Any]) -> EDRModel:
     """Construct an EDRModel from hyperparameter dict.
@@ -341,6 +489,9 @@ def _make_model_edr(device: torch.device, hp: dict[str, Any]) -> EDRModel:
     ValueError
         Propagated from EDRModel if any hyperparameter is invalid.
     """
+    # ── Fail-fast HP validation (B3) ──────────────────────────────────────
+    _validate_edr_hp(hp)
+
     _cd = hp.get("correction_dropout", hp.get("dropout", 0.0))
     correction_dropout = float(_cd or 0.0)
     if not 0.0 <= correction_dropout < 1.0:
@@ -361,6 +512,12 @@ def _make_model_edr(device: torch.device, hp: dict[str, Any]) -> EDRModel:
         correction_dropout=correction_dropout,
         q_mean=_q_mean,
         q_std=_q_std,
+        use_friction_qdd=bool(hp.get("use_friction_qdd", False)),
+        use_phys_cond=bool(hp.get("use_phys_cond", False)),
+        coriolis_matrix_form=bool(hp.get("coriolis_matrix_form", True)),
+        friction_form=str(hp.get("friction_form", "mlp")),
+        inertia_psd=bool(hp.get("inertia_psd", False)),
+        spectral_norm=bool(hp.get("spectral_norm", False)),
     )
     return model.to(device)
 
@@ -498,16 +655,28 @@ def _train_epoch_edr(
     model.train()
 
     # ── Hyperparameter extraction ─────────────────────────────────────────
-    _jw         = torch.tensor(_JOINT_WEIGHTS, device=device)
+    _jw         = _resolve_joint_weights(hp, device)
     _grad_clip  = float(hp.get("grad_clip_norm",          1.0))
     _noise_std  = float(hp.get("feature_noise_std", 0.0) or 0.0)
-    _lambda_reg = float(hp.get("lambda_correction_reg",  1e-3))
+    _total_epochs = int(hp.get("epochs", 1000))
+    # Per-component correction-reg weights for THIS epoch (capacity-aware:
+    # the O(n²) matrix δM/δC need far stronger penalties than the O(n) δg/δf,
+    # else the added architectural capacity memorises — observed directly in
+    # the Phase-2 run: train→0.064 while val stalled at 0.082).
+    _comp_lam = _resolve_component_lambdas(hp, epoch, _total_epochs)
     _norm_inertia_frob = bool(hp.get("correction_reg_inertia_normalize", True))
     _use_pass   = bool(hp.get("enable_passivity_loss",   False))
     _lambda_pass= float(hp.get("lambda_passivity",       1e-2))
-
-    std_meta = torch.from_numpy(loader.dataset.std_tau).to(device)
-    mean_meta = torch.from_numpy(loader.dataset.mean_tau).to(device)
+    if _use_pass and getattr(model, "_use_phys_cond", False):
+        # The passivity helper rebuilds correction inputs without a physics
+        # tensor; under phys-conditioning the δC input dim would mismatch.
+        # Threading physics through the autograd-Jacobian subsample is out of
+        # scope here — fail loudly rather than silently corrupting the loss.
+        raise ValueError(
+            "[EDR] enable_passivity_loss is incompatible with use_phys_cond "
+            "(the passivity helper has no physics tensor to thread). Disable "
+            "one of them."
+        )
 
     total_loss  = 0.0
     total_l_data = 0.0
@@ -535,40 +704,27 @@ def _train_epoch_edr(
         if _noise_std > 0.0:
             features = features + torch.randn_like(features) * _noise_std
 
-        # ── Correction terms (needed for reg loss) ───────────────────────
-        # We compute corrections explicitly here rather than calling model.forward()
-        # so that we can inspect individual δ-terms for the regularisation loss
-        # without a second forward pass.
+        # ── SINGLE SOURCE OF TRUTH ───────────────────────────────────────
+        # compute_corrections is the EXACT function EDRModel.forward uses, so
+        # the trained loss and the eval forward are provably identical (the
+        # prior dual-path drift risk is structurally eliminated).  It returns
+        # the per-component δ tensors needed for the regularisation loss, so
+        # there is still no second forward pass.
         n = model.n_joints
         q   = features[:, 0:n]
         qd  = features[:, n:2*n]
         qdd = features[:, 2*n:3*n]
 
-        tau_g = physics[:, 0:n]
-        tau_M = physics[:, n:2*n]
-        tau_C = physics[:, 2*n:3*n]
-        tau_f = physics[:, 3*n:4*n]
-
-        # Build correction-network inputs via the model's single-source helper.
-        inputs = model.build_correction_inputs(q, qd)
-        delta_g      = model.gravity_net(inputs["gravity_input"])
-        # Compute δM as the full (B, n, n) matrix for Frobenius-norm regularisation,
-        # then apply it to q̈ for the torque contribution.  One forward pass, two uses.
-        delta_M      = model.inertia_net.compute_delta_M(q)             # (B, n, n)
-        delta_M_qdd  = torch.bmm(delta_M, qdd.unsqueeze(-1)).squeeze(-1) # (B, n)
-        delta_C_qd   = model.coriolis_net(inputs["coriolis_input"], qd)
-        delta_tau_f  = model.friction_net(qd)
-
-        tau_hat = (
-            (tau_g + delta_g)
-            + (tau_M + delta_M_qdd)
-            + (tau_C + delta_C_qd)
-            + (tau_f + delta_tau_f)
-        )
+        tau_hat, _d = model.compute_corrections(features, physics)
+        delta_g     = _d["delta_g"]
+        delta_M     = _d["delta_M"]        # (B, n, n) — Frobenius reg
+        delta_C_qd  = _d["delta_C_qd"]
+        delta_tau_f = _d["delta_tau_f"]
 
         # ── Loss assembly ────────────────────────────────────────────────
-        l_data = _weighted_mse_loss(tau_hat, target, _jw, mean=mean_meta, std=std_meta)
-        l_corr = _correction_reg_loss(
+        # tau_hat and target are already in normalised space — no re-normalisation.
+        l_data = _weighted_mse_loss(tau_hat, target, _jw)
+        _reg = _correction_reg_loss(
             delta_g,
             delta_M,
             delta_C_qd,
@@ -576,7 +732,14 @@ def _train_epoch_edr(
             n_joints=n,
             normalize_inertia_frob=_norm_inertia_frob,
         )
-        loss   = l_data + _lambda_reg * l_corr
+        # Capacity-aware: each component carries its own λ this epoch.
+        l_corr = (
+            _comp_lam["g"] * _reg["g"]
+            + _comp_lam["M"] * _reg["M"]
+            + _comp_lam["C"] * _reg["C"]
+            + _comp_lam["f"] * _reg["f"]
+        )
+        loss   = l_data + l_corr
 
         l_pass = None
         if _use_pass:
@@ -615,12 +778,13 @@ def _train_epoch_edr(
             )
             total_mag_C_qd += float(delta_C_qd.detach().abs().mean().item())
             total_mag_f    += float(delta_tau_f.detach().abs().mean().item())
+        # No manual ``del`` of the batch locals: they are rebound every
+        # iteration and freed by normal scope/GC.  The previous explicit
+        # tuple-del was fragile — any renamed/added/removed local silently
+        # broke it (it referenced names that no longer exist after the
+        # single-source refactor).  Drop it entirely (B5).
         if l_pass is not None:
             del l_pass
-        del (
-            features, target, physics, loss, tau_hat, d, l_data, l_corr, delta_g, delta_M,
-            delta_M_qdd, delta_C_qd, delta_tau_f, q, qd, qdd, tau_g, tau_M, tau_C, tau_f, inputs,
-        )
 
     mean_l_data = total_l_data / n_batches
     mean_l_corr = total_l_corr / n_batches
@@ -683,9 +847,6 @@ def _eval_epoch_edr(
     all_pred:   list[np.ndarray] = []
     all_target: list[np.ndarray] = []
     _jw = torch.tensor(_JOINT_WEIGHTS, device=device)
-    
-    std_meta = torch.from_numpy(loader.dataset.std_tau).to(device)
-    mean_meta = torch.from_numpy(loader.dataset.mean_tau).to(device)
 
     with torch.no_grad():
         for features, target, physics in loader:
@@ -694,7 +855,8 @@ def _eval_epoch_edr(
             physics  = physics.to(device,  non_blocking=True)
 
             tau_hat = model(features, physics)
-            loss    = _weighted_mse_loss(tau_hat, target, _jw, mean=mean_meta, std=std_meta)
+            # tau_hat and target are already normalised — no re-normalisation.
+            loss    = _weighted_mse_loss(tau_hat, target, _jw)
             total_loss += loss.item()
 
             p    = tau_hat.cpu().numpy()
@@ -834,6 +996,17 @@ def _edr_physics_sched_metadata(hp: dict[str, Any]) -> dict[str, Any]:
         "correction_dropout":     float(_cd or 0.0),
         "enable_passivity_loss":  bool(hp.get("enable_passivity_loss", False)),
         "lambda_passivity":       float(hp.get("lambda_passivity",      1e-2)),
+        "use_phys_cond":          bool(hp.get("use_phys_cond", False)),
+        "coriolis_matrix_form":   bool(hp.get("coriolis_matrix_form", True)),
+        "lambda_correction_reg_per_component":
+            hp.get("lambda_correction_reg_per_component", None),
+        "lambda_correction_decay":
+            str(hp.get("lambda_correction_decay", "none")),
+        "joint_loss_weights":     hp.get("joint_loss_weights", None),
+        "friction_form":          str(hp.get("friction_form", "mlp")),
+        "inertia_psd":            bool(hp.get("inertia_psd", False)),
+        "spectral_norm":          bool(hp.get("spectral_norm", False)),
+        "ema_decay":              float(hp.get("ema_decay", 0.0) or 0.0),
     }
 
 

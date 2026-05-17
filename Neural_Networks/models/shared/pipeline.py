@@ -87,8 +87,16 @@ def run_training(
     *,
     log: logging.Logger | None = None,
     progress_callback: Callable[[int, int, float, int, int], None] | None = None,
-) -> int:
-    """Train one model; return 0 on success, 1 on invalid dataset.
+) -> float | None:
+    """Train one model.
+
+    Returns the held-out test ``rmse_traj_macro`` (N·m) on full completion —
+    the trajectory-macro RMSE, identical in definition to the live per-epoch
+    ``val_rmse`` and the early-stopping criterion (so val and test are the
+    same estimator and are directly comparable),
+    ``float('nan')`` on a successful-but-incomplete segment (resumable HPC
+    mode), and ``None`` on failure (invalid dataset / unrecoverable resume
+    state).  Callers treat ``None`` as failure and any float as success.
 
     Args:
         progress_callback: optional callable invoked after every epoch with
@@ -103,7 +111,7 @@ def run_training(
             "Edit RUN_DIR in %s.",
             job.run_help,
         )
-        return 1
+        return None
 
     import psutil
 
@@ -206,6 +214,27 @@ def run_training(
         else 0
     )
     _early_metric = str(hp.get("early_stop_metric", "val_rmse")).strip().lower()
+
+    # ── EMA (exponential moving average of weights) ───────────────────────
+    # Per-epoch weight EMA.  The best-by-raw-val checkpoint sits on a noisy
+    # val curve and tends to be an over-fit point (observed directly: a long
+    # run kept crawling val down while TEST worsened).  An EMA of the weights
+    # is a flatter, lower-variance solution that generalises better, with no
+    # data or architecture change.  ema_decay<=0 (or absent) ⇒ fully OFF,
+    # exact back-compat.  The EMA model is evaluated on val each epoch and
+    # the best EMA-by-val state competes with the raw best at the end.
+    _ema_decay = float(hp.get("ema_decay", 0.0) or 0.0)
+    if not 0.0 <= _ema_decay < 1.0:
+        raise ValueError(f"ema_decay must be in [0, 1), got {_ema_decay!r}")
+    _ema_on = _ema_decay > 0.0
+    _ema_state: dict | None = None
+    _best_ema_state: dict | None = None
+    _best_ema_val = math.inf
+    _best_ema_epoch = 0
+    if _ema_on:
+        _ema_state = {
+            k: v.detach().clone() for k, v in model.state_dict().items()
+        }
     if _early_metric not in ("val_rmse", "val_loss"):
         _early_metric = "val_rmse"
     best_val_loss_track = math.inf
@@ -231,6 +260,26 @@ def run_training(
     _val_trajectories: list[dict] = (
         loaders["val"].dataset.metadata.get("split", {}).get("stats", {}).get("val", {}).get("trajectories", [])
     )
+    _test_trajectories: list[dict] = (
+        loaders["test"].dataset.metadata.get("split", {}).get("stats", {}).get("test", {}).get("trajectories", [])
+    )
+    # The headline RMSE (live val_rmse, early-stop, final val/test) is the
+    # trajectory-macro estimator: per-joint RMSE within each trajectory,
+    # averaged over joints, then averaged over trajectories.  If the split
+    # metadata carries no trajectory boundaries ``macro_rmse_numpy`` silently
+    # collapses to a single pooled slice — a different (and the previously
+    # buggy) estimator — so fail loudly rather than degrade quietly.
+    if not _val_trajectories:
+        log.warning(
+            "val split metadata has no trajectory boundaries — val_rmse will "
+            "collapse to a single pooled slice (NOT trajectory-macro)."
+        )
+    if not _test_trajectories:
+        log.warning(
+            "test split metadata has no trajectory boundaries — test_rmse will "
+            "collapse to a single pooled slice (NOT trajectory-macro) and will "
+            "not be comparable to val_rmse."
+        )
     stopped_early = False
     t0 = time.time()
 
@@ -248,7 +297,7 @@ def run_training(
         st = load_training_state(resume_path, str(device))
         if int(st.get("schema", 0) or 0) < int(TRAINING_STATE_SCHEMA):
             log.error("Unrecognised training state schema in %s", resume_path)
-            return 1
+            return None
         model.load_state_dict(st["model_state"])
         optimizer.load_state_dict(st["optimizer_state"])
         if scheduler is not None and st.get("scheduler_state") is not None:
@@ -278,7 +327,7 @@ def run_training(
         start_epoch = int(st.get("next_epoch", 1))
         if start_epoch < 1 or start_epoch > epochs:
             log.error("Invalid resume next_epoch %s (target epochs=%d)", st.get("next_epoch"), epochs)
-            return 1
+            return None
         log.info("Resuming training from %s at epoch %d (target %d).", resume_path, start_epoch, epochs)
 
     if seg_ep > 0:
@@ -287,7 +336,7 @@ def run_training(
         epoch_end = epochs
     if start_epoch > epoch_end:
         log.error("No epochs to run: start=%d  end=%d (segment_epochs=%d)", start_epoch, epoch_end, seg_ep)
-        return 1
+        return None
 
     for epoch in range(start_epoch, epoch_end + 1):
         _tm: TrainEpochMetrics = job.strategy.train_epoch(
@@ -297,10 +346,16 @@ def run_training(
         train_loss_obj = _tm.loss_total
         train_loss_data = _tm.loss_data_unw
         # Convert per-joint SSE in normalised target space to a physical-units
-        # macro RMSE — the per-joint MSE is multiplied by std_tau[j]² *before*
-        # the sqrt, then averaged across joints.  This matches the
-        # ``macro_rmse_numpy`` convention used for val/test (per-joint RMSE,
-        # mean over joints) and yields a value directly comparable to val_rmse.
+        # RMSE — per-joint MSE × std_tau[j]² *before* the sqrt, then averaged
+        # across joints.  NOTE: this is a *pooled* per-joint estimate over all
+        # train samples (running SSE), NOT the trajectory-macro estimator used
+        # for the canonical val_rmse/test_rmse.  A true trajectory-macro train
+        # RMSE would need an extra non-shuffled full-train eval pass each epoch
+        # (the train loader shuffles and weights change mid-epoch).  This curve
+        # is DIAGNOSTIC ONLY (history plot/CSV) — never used for ranking,
+        # model selection, early-stopping, or the returned headline — so it is
+        # an accepted, documented asymmetry: read it as a rough guide against
+        # the val_rmse curve, expecting a small concavity (Jensen) offset.
         _sse_j = np.asarray(_tm.sse_per_joint, dtype=np.float64)
         _n_train = max(1, int(_tm.n_samples))
         _train_rmse_phys_per_joint = np.sqrt(_sse_j / _n_train) * _tau_std_train
@@ -349,6 +404,37 @@ def run_training(
             patience_counter = 0
         else:
             patience_counter += 1
+
+        # ── EMA weight update + val eval (no data/architecture change) ────
+        if _ema_on:
+            with torch.no_grad():
+                _msd = model.state_dict()
+                for _k, _v in _ema_state.items():
+                    _src = _msd[_k].detach()
+                    if _v.dtype.is_floating_point:
+                        _v.mul_(_ema_decay).add_(_src.to(_v.device),
+                                                 alpha=1.0 - _ema_decay)
+                    else:
+                        _v.copy_(_src)            # int buffers: just track
+            # Evaluate the EMA weights on val; restore live weights after.
+            _live_sd = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            model.load_state_dict(_ema_state)
+            _e_loss, _e_pred, _e_tgt = job.strategy.eval_epoch(
+                model, loaders["val"], device
+            )
+            model.load_state_dict(_live_sd)
+            _ema_val_rmse = macro_rmse_numpy(
+                _e_pred * _tau_std_val + _tau_mean_val,
+                _e_tgt * _tau_std_val + _tau_mean_val,
+                _val_trajectories,
+            )
+            history.setdefault("ema_val_rmse", []).append(_ema_val_rmse)
+            if _ema_val_rmse < (_best_ema_val - _min_delta):
+                _best_ema_val = _ema_val_rmse
+                _best_ema_state = {
+                    k: v.detach().cpu().clone() for k, v in _ema_state.items()
+                }
+                _best_ema_epoch = int(epoch)
         if _snapshot_every > 0 and epoch % _snapshot_every == 0 and best_state is not None:
             log.debug(
                 "snapshot epoch=%d  best_epoch=%d  val_rmse_phys=%.5f",
@@ -432,10 +518,31 @@ def run_training(
             "Re-run with resume_from= that path to continue.",
             seg_path, epoch_end + 1, epochs,
         )
-        return 0
+        return float("nan")
 
     final_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
     final_epoch_trained = len(history["train_loss"])
+
+    # EMA vs raw-best selection: take whichever has the lower held-out-val
+    # trajectory-macro RMSE.  EMA wins when the raw best was an over-fit
+    # spike on the noisy val curve (the seed-1 failure mode).
+    _selected = "raw-best-by-val"
+    if _ema_on and _best_ema_state is not None and _best_ema_val < best_val_rmse:
+        best_state = _best_ema_state
+        best_epoch_num = _best_ema_epoch
+        log.info(
+            "EMA selected: ema_val_rmse=%.5f < raw best_val_rmse=%.5f "
+            "(decay=%.4g, ema_best_epoch=%d) — using EMA weights.",
+            _best_ema_val, best_val_rmse, _ema_decay, _best_ema_epoch,
+        )
+        best_val_rmse = _best_ema_val
+        _selected = "ema"
+    elif _ema_on:
+        log.info(
+            "EMA not selected: best ema_val_rmse=%.5f ≥ raw best_val_rmse=%.5f "
+            "— keeping raw best.",
+            _best_ema_val, best_val_rmse,
+        )
     if best_state is not None:
         model.load_state_dict(best_state)
 
@@ -457,8 +564,56 @@ def run_training(
     avg_metrics["_n_val"] = int(len(_val_pred_phys))
     avg_metrics["_n_test"] = int(len(test_pred_phys))
 
+    # ── Canonical trajectory-macro RMSE (the single headline estimator) ──────
+    # Identical definition to the live per-epoch ``val_rmse`` (line ~321) and
+    # the early-stopping criterion: per-joint RMSE within each trajectory,
+    # mean over joints, then mean over trajectories.  ``compute_metrics``
+    # above is kept only for the rich per-joint diagnostics (r²/mae/nrmse/
+    # pooled) — its ``rmse_macro_mean`` pools over all samples and is NOT the
+    # same estimator as the live val_rmse (per-trajectory sqrt-then-mean +
+    # equal-per-trajectory weighting vs pooled sqrt + equal-per-sample
+    # weighting; the two diverge, sign data-dependent).  Reporting test with
+    # the pooled estimator while val used the macro one was the apparent
+    # val/test gap.
+    val_rmse_macro = macro_rmse_numpy(_val_pred_phys, _val_tgt_phys, _val_trajectories)
+    test_rmse_macro = macro_rmse_numpy(test_pred_phys, test_target_phys, _test_trajectories)
+    val_metrics_final["rmse_traj_macro"] = float(val_rmse_macro)
+    test_metrics["rmse_traj_macro"] = float(test_rmse_macro)
+    # Combined val+test: reuse the same estimator by concatenating the two
+    # trajectory lists with the test indices offset past the val rows.
+    _n_val_rows = int(len(_val_pred_phys))
+    _combined_trajs = list(_val_trajectories) + [
+        {
+            **t,
+            "start_idx": int(t["start_idx"]) + _n_val_rows,
+            "end_idx_exclusive": int(t["end_idx_exclusive"]) + _n_val_rows,
+        }
+        for t in _test_trajectories
+    ]
+    avg_metrics["rmse_traj_macro"] = float(
+        macro_rmse_numpy(_eval_pred, _eval_target, _combined_trajs)
+    )
+
+    # Internal-consistency check: identical weights (best_state) + identical
+    # val data (shuffle=False) + deterministic eval() + identical metric must
+    # reproduce the tracked best_val_rmse.  A mismatch means this fix (or the
+    # checkpoint path) has regressed — surface it loudly.
+    if best_state is not None and math.isfinite(best_val_rmse):
+        _d = abs(val_rmse_macro - best_val_rmse)
+        if _d > 1e-4:
+            log.warning(
+                "val_rmse_macro=%.6f != tracked best_val_rmse=%.6f (Δ=%.2e) — "
+                "metric/checkpoint inconsistency",
+                val_rmse_macro, best_val_rmse, _d,
+            )
+
     epochs_trained = len(history["train_loss"])
-    rmse_val = float(avg_metrics["rmse_pooled"])
+    # Headline metric = trajectory-macro test RMSE — the SAME estimator as the
+    # live val_rmse and the early-stopping criterion, so val and test are now
+    # directly comparable.  Both ``rmse_macro_mean`` (pooled per-joint) and
+    # ``rmse_pooled`` remain persisted in test_metrics for diagnostics; we
+    # rank/return/name by the trajectory-macro value.
+    rmse_val = float(test_rmse_macro)
     run_id = build_run_id(
         job.model_type,
         epochs_trained=epochs_trained,
@@ -627,8 +782,47 @@ def run_training(
         num_val_samples=len(loaders["val"].dataset),
         num_test_samples=len(loaders["test"].dataset),
     )
-    log.info("Saved to %s  rmse_pooled=%.5f", save_dir, avg_metrics["rmse_pooled"])
-    return 0
+    log.info(
+        "Saved to %s  test_rmse_traj_macro=%.5f  "
+        "(pooled-per-joint=%.5f  rmse_pooled=%.5f)",
+        save_dir, test_rmse_macro,
+        test_metrics["rmse_macro_mean"], test_metrics["rmse_pooled"],
+    )
+
+    # ── End-of-training summary (explicit, single block) ──────────────────
+    # epoch ran / best epoch / test rmse / val rmse @best / train rmse @best,
+    # all on the canonical trajectory-macro metric so val and test compare
+    # like-for-like.  The gap (val@best vs test) is the true generalisation
+    # gap; a large train↔val@best gap flags overfitting before the best epoch.
+    _bi = best_epoch_num - 1
+    _train_rmse_at_best = (
+        history["train_rmse"][_bi]
+        if 0 <= _bi < len(history["train_rmse"]) else float("nan")
+    )
+    # Selected model's val (EMA-best or raw-best) — best_val_rmse holds it.
+    _val_rmse_at_best = best_val_rmse
+    log.info(
+        "════════ TRAINING SUMMARY [%s] ════════\n"
+        "  epochs ran      : %d / %d%s\n"
+        "  model selected   : %s\n"
+        "  best epoch       : %d\n"
+        "  test  rmse (N·m) : %.5f   (trajectory-macro)\n"
+        "  val   rmse @best : %.5f\n"
+        "  train rmse @best : %.5f\n"
+        "  gen. gap (test−val@best): %+.5f   |  overfit gap (val−train @best): %+.5f\n"
+        "═══════════════════════════════════════",
+        job.model_type,
+        epochs_trained, epochs,
+        " (early-stopped)" if stopped_early else "",
+        _selected,
+        best_epoch_num,
+        test_rmse_macro,
+        _val_rmse_at_best,
+        _train_rmse_at_best,
+        test_rmse_macro - _val_rmse_at_best,
+        _val_rmse_at_best - _train_rmse_at_best,
+    )
+    return float(test_rmse_macro)
 
 
 def main_cli(job: TrainJob, *, log_name: str = "training") -> None:
@@ -636,7 +830,8 @@ def main_cli(job: TrainJob, *, log_name: str = "training") -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     log = logging.getLogger(log_name)
     try:
-        sys.exit(run_training(job, log=log))
+        _rc = run_training(job, log=log)
+        sys.exit(1 if _rc is None else 0)
     except KeyboardInterrupt:
         print("\nAborted.", file=sys.stderr)
         sys.exit(130)

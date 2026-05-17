@@ -94,5 +94,83 @@ class TestMetricsNumeric(unittest.TestCase):
         self.assertTrue(np.isfinite(m["r2_overall"]))
 
 
+class TestTrajectoryMacroCanonical(unittest.TestCase):
+    """Lock the canonical trajectory-macro estimator.
+
+    This is the metric used for the live per-epoch ``val_rmse``, early
+    stopping, and the returned/ranked headline test RMSE.  It must NOT equal
+    the pooled-per-joint ``rmse_macro_mean`` when trajectories are
+    heterogeneous.  The two diverge because (a) per-trajectory sqrt-then-mean
+    vs pooled sqrt and (b) equal-per-trajectory weighting vs equal-per-sample
+    weighting; the *sign* of the gap is data-dependent (a short, hard
+    trajectory is upweighted by macro, a long easy one downweighted).  Mixing
+    the two — live val_rmse using macro, reported test using pooled — was the
+    original spurious val/test gap.
+    """
+
+    @staticmethod
+    def _ref_traj_macro(pred, target, trajs):
+        """Independent reference: mean over trajectories of
+        (mean over joints of per-joint within-trajectory RMSE)."""
+        vals = []
+        for t in trajs:
+            s, e = t["start_idx"], t["end_idx_exclusive"]
+            d = pred[s:e] - target[s:e]
+            vals.append(float(np.sqrt((d**2).mean(axis=0)).mean()))
+        return float(np.mean(vals))
+
+    def test_traj_macro_differs_from_pooled_when_heterogeneous(self):
+        from Neural_Networks.models.shared.metrics_numpy import (
+            compute_metrics as real_compute_metrics,
+            macro_rmse_numpy,
+        )
+
+        rng = np.random.default_rng(7)
+        # 3 trajectories, unequal lengths, very different error magnitudes.
+        t0 = rng.normal(0.0, 0.01, size=(40, 2))   # easy, long
+        t1 = rng.normal(0.0, 0.50, size=(8, 2))    # hard, short
+        t2 = rng.normal(0.0, 0.05, size=(20, 2))   # medium
+        err = np.concatenate([t0, t1, t2], axis=0)
+        target = rng.normal(0.0, 1.0, size=err.shape)
+        pred = target + err
+        trajs = [
+            {"start_idx": 0,  "end_idx_exclusive": 40},
+            {"start_idx": 40, "end_idx_exclusive": 48},
+            {"start_idx": 48, "end_idx_exclusive": 68},
+        ]
+        got = macro_rmse_numpy(pred, target, trajs)
+        ref = self._ref_traj_macro(pred, target, trajs)
+        self.assertAlmostEqual(got, ref, places=9)
+
+        pooled_per_joint = real_compute_metrics(pred, target)["rmse_macro_mean"]
+        # The two estimators must genuinely diverge here (sign is
+        # data-dependent — the point is they are NOT interchangeable).
+        self.assertGreater(abs(got - pooled_per_joint), 1e-3)
+
+    def test_traj_macro_converges_on_single_trajectory(self):
+        from Neural_Networks.models.shared.metrics_numpy import (
+            compute_metrics as real_compute_metrics,
+            macro_rmse_numpy,
+        )
+
+        rng = np.random.default_rng(1)
+        target = rng.normal(size=(50, 3))
+        pred = target + rng.normal(0.0, 0.1, size=(50, 3))
+        one = [{"start_idx": 0, "end_idx_exclusive": 50}]
+        # Single trajectory ⇒ no inter-trajectory averaging ⇒ identical to
+        # the pooled-per-joint mean.
+        self.assertAlmostEqual(
+            macro_rmse_numpy(pred, target, one),
+            real_compute_metrics(pred, target)["rmse_macro_mean"],
+            places=9,
+        )
+        # Empty trajectory list falls back to the whole array (same value).
+        self.assertAlmostEqual(
+            macro_rmse_numpy(pred, target, []),
+            macro_rmse_numpy(pred, target, one),
+            places=9,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
