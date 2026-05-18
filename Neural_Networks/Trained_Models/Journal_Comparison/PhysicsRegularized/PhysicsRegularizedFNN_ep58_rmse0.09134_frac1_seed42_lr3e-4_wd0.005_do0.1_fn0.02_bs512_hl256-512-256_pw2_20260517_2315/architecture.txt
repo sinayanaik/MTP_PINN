@@ -1,0 +1,28 @@
+Model: PhysicsRegularizedFNN
+Params: 275,461
+
+Hyperparameters:
+  n_joints: 5
+  hidden_layers: [256, 512, 256]
+  dropout: 0.1
+  activation: silu
+  in_dim_physics: decomposed_7J
+
+PyTorch repr:
+PhysicsRegularizedFNN(
+  (net): Sequential(
+    (0): Linear(in_features=35, out_features=256, bias=True)
+    (1): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+    (2): SiLU()
+    (3): Dropout(p=0.1, inplace=False)
+    (4): Linear(in_features=256, out_features=512, bias=True)
+    (5): LayerNorm((512,), eps=1e-05, elementwise_affine=True)
+    (6): SiLU()
+    (7): Dropout(p=0.1, inplace=False)
+    (8): Linear(in_features=512, out_features=256, bias=True)
+    (9): LayerNorm((256,), eps=1e-05, elementwise_affine=True)
+    (10): SiLU()
+    (11): Dropout(p=0.1, inplace=False)
+    (12): Linear(in_features=256, out_features=5, bias=True)
+  )
+)
