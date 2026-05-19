@@ -93,6 +93,25 @@ _DATASET_NAME:    str = Path(TRAIN_DATA_RUN_DIR).name
 DATASET_OUT_ROOT: str = MODELS_DIR_ROOT
 REGISTRY_FILE:    str = str(Path(DATASET_OUT_ROOT) / "models_registry.yaml")
 
+# Active run mode — set by main() from _select_run_mode().  Drives the output
+# filenames so the three studies never clobber each other: each mode owns
+# ``grid_results_<mode>.csv`` / ``grid_summary_<mode>.md``.  The DETAILED grid
+# (the canonical 3-model HP comparison consumed by the plot suite) additionally
+# mirrors the legacy unsuffixed ``grid_results.csv`` / ``grid_summary.md``.
+RUN_MODE: str = "quick"
+
+
+def _result_basenames() -> list[tuple[str, str]]:
+    """(csv_basename, md_basename) pairs to write for the active RUN_MODE.
+
+    Always the per-mode pair; DETAILED also writes the legacy mirror so the
+    plot suite (reads ``grid_results.csv``) keeps working unchanged.
+    """
+    pairs = [(f"grid_results_{RUN_MODE}.csv", f"grid_summary_{RUN_MODE}.md")]
+    if RUN_MODE == "detailed":
+        pairs.append(("grid_results.csv", "grid_summary.md"))
+    return pairs
+
 # EDR directory (hyphen in name → not a valid package; must be added to sys.path).
 _EDR_DIR: str = str(_NN_ROOT / "models" / "Equivariant-Decomposed-Residual")
 
@@ -141,14 +160,16 @@ MEM_POLL_INTERVAL: float = 5.0
 # widths, correction reg) is intentionally NOT equalised — it must suit each
 # model — but the training protocol is.
 #
-# Why cosine_warm_restarts (not warmup_cosine): warmup_cosine ties its decay
-# horizon to `epochs`, so its cosine is dead-flat near the peak — the run was
-# early-stopped (~epoch 57) while LR was still ~91% of peak, i.e. it NEVER
-# entered the annealing phase and plateaued at ~epoch 25-30 with no refinement.
-# More patience only prolonged idle high-LR wandering.  cosine_warm_restarts
-# anneals LR 3e-4→3e-6 every T_0=15 epochs then restarts: each cycle settles
-# into (and the restart escapes toward) a better basin → genuine continued
-# improvement well past epoch 30, exactly as EDR already exhibits.
+# Why warmup_cosine (R4, 2026-05-19): cosine_warm_restarts re-spikes the LR
+# every T_0=15 epochs.  For EDR this stacked on the old two-phase optimizer
+# shock and made the val curve wobble, tripping the 50-epoch patience at
+# ~ep70 (the user-observed "EDR only trains 50-70 epochs").  A SINGLE smooth
+# warmup→long-cosine decay over the full 1000-epoch budget removes the
+# periodic shocks: with EDR's new γ capacity-ramp (no freeze/Adam-reset) the
+# loss descends smoothly so early-stop now fires only at true convergence —
+# EDR "naturally keeps learning".  Applied identically to all three archs so
+# the fair-benchmark protocol is preserved (this also tests whether the FNN/
+# PhysReg ~700-epoch tail was merely warm-restart re-annealing).
 _FIXED_HP_FNN_BASE: dict[str, Any] = {
     "hidden_layers":           [256, 512, 256],
     "dropout":                 0.4,
@@ -157,17 +178,15 @@ _FIXED_HP_FNN_BASE: dict[str, Any] = {
     "weight_decay":            5e-3,
     "batch_size":              512,
     "optimizer":               "adamw",
-    # Identical schedule to EDR (fair-benchmark protocol).
-    "lr_scheduler":            "cosine_warm_restarts",
-    "warm_restart_T_0":        15,
-    "warm_restart_T_mult":     1,
-    "warm_restart_eta_min":    3e-6,
+    # Identical schedule to EDR (fair-benchmark protocol): one smooth
+    # warmup→cosine decay over the full epoch budget, no warm restarts (R4).
+    "lr_scheduler":            "warmup_cosine",
     "grad_clip_norm":          5.0,
     "feature_noise_std":       0.02,
-    # User directive (2026-05-17): long-horizon sweep — 1000 epochs ≈ 66
-    # restart cycles (1000/15); early-stop still ends runs that genuinely
-    # converge, this just removes the budget ceiling.
-    "epochs":                  1000,
+    # Long-horizon sweep — equal 1500-epoch budget for ALL three archs (fair
+    # protocol); early-stop still ends runs that genuinely converge, this just
+    # removes the budget ceiling so each model can "keep learning".
+    "epochs":                  1500,
     "min_delta":               1e-5,   # let slow-but-real gains reset patience
     "early_stopping":          True,
     "early_stop_metric":       "val_rmse",
@@ -179,112 +198,93 @@ _FIXED_HP_FNN_BASE: dict[str, Any] = {
     "snapshot_every":          0,
 }
 
-# patience=50 ≈ 3.3 restart cycles (T_0=15), identical to EDR.  NOT artificial
-# inflation: patience must exceed one cycle so a post-restart improvement can
-# register before stopping; early-stop still fires once successive restarts
-# stop yielding gains (genuine convergence, not idle wandering).  Tightened
-# 200→50 (2026-05-17): the 200-epoch tail rarely improved and dominated wall
-# time on the long-horizon (1000-epoch) sweep.
-FIXED_HP_FNN = {**_FIXED_HP_FNN_BASE, "patience": 50}
+# patience=150 for ALL three archs (fair protocol): on the 1500-epoch
+# warmup_cosine schedule a long, smooth tail can improve slowly; 150 lets a
+# genuinely-still-learning model keep going while early-stop still fires once
+# 150 successive epochs yield < min_delta (true convergence, not wandering).
+FIXED_HP_FNN = {**_FIXED_HP_FNN_BASE, "patience": 150}
 
 # PhysReg = same backbone + the physics-consistency penalty (its defining HP).
 FIXED_HP_PHYSREG = {
     **_FIXED_HP_FNN_BASE,
-    "patience":                50,
+    "patience":                150,
     "physics_weight":          0.5,
     "physics_warmup_fraction": 0.05,
     "phi_lr_ratio":            0.1,
 }
 
 FIXED_HP_EDR: dict[str, Any] = {
-    # User directive (2026-05-17): 1000 epochs ≈ 66 warm-restart cycles
-    # (T_0=15) for the long-horizon sweep.  Early-stop (patience below) still
-    # ends genuinely-converged runs; this only lifts the budget ceiling.
-    "epochs":                  1000,
+    # ══════════════════════════════════════════════════════════════════════
+    # EVIDENCE-OPTIMAL EDR (2026-05-19) = proven "corrected-P1" structure
+    #                                     + the two genuinely-new safe wins.
+    # ----------------------------------------------------------------------
+    # Six prior architecture rounds established that EVERY structural /
+    # capacity lever past corrected-P1 monotonically REGRESSED test
+    # (see memory: project_edr_arch_revamp / fair_protocol_edr_capacity).
+    # A 2026-05-19 local 150-ep check reconfirmed it: forcing PSD δM (R2) +
+    # Christoffel-only δC (R1) + spectral-norm (R5) UNDERFITS — EDR test
+    # 0.0987 vs PhysReg 0.0910, train/val both worse → over-constrained.
+    # The val→test gap is a documented data-split property, not a tuning
+    # gap (PhysReg's gap is actually larger).
+    #
+    # So we DO NOT re-run the falsified "more structure" experiments.  We
+    # keep corrected-P1 (EDR's empirical best, ≈0.0896, tied w/ PhysReg) and
+    # add ONLY the two new, NON-structural improvements that no prior round
+    # had, both of which the 150-ep run validated:
+    #   R3  smooth γ-gate replaces the two-phase freeze/Adam-reset shock —
+    #       EDR now descends smoothly; best epoch moved ~22→88, the
+    #       "stops at 50-70 ep" symptom is gone (trains naturally long).
+    #   R4  single warmup_cosine (no warm-restart LR spikes) — smooth.
+    #   R6  headline grid is multi-seed (see GRID_*_QUICK) so the EDR-vs-
+    #       PhysReg verdict finally has error bars (the old single-seed
+    #       "PhysReg wins by 0.37%" was pure noise; EDR's grid-MEAN was
+    #       already lower).
+    # R1/R2/R5 remain available as ABLATION flags (default OFF) and ship
+    # tested for the structural-passivity story, but are NOT the journal
+    # config.
+    # ══════════════════════════════════════════════════════════════════════
+    "epochs":                  1500,   # longer horizon — EDR keeps learning
     "batch_size":              256,
     "learning_rate":           3e-4,
     "weight_decay":            2e-3,
     "optimizer":               "adamw",
-    "lr_scheduler":            "cosine_warm_restarts",
-    "warm_restart_T_0":        15,
-    "warm_restart_T_mult":     1,
-    "warm_restart_eta_min":    3e-6,
+    # R4 — same scheduler family as FNN/PhysReg (fair protocol); EDR raises
+    # the cosine LR floor (1%→5% of base) so the long tail doesn't stall.
+    "lr_scheduler":            "warmup_cosine",
+    "warmup_cosine_min_factor": 0.05,  # EDR-only LR floor (FNN/PhysReg keep 0.01)
     "early_stopping":          True,
-    # Aligned with the canonical trajectory-macro headline that is reported &
-    # ranked, and identical to FNN/PhysReg (fair-benchmark protocol).  Safe:
-    # the adaptive phase-2 detector reads model.val_rmse_history regardless of
-    # this metric (edr_strategy.py — _should_transition_to_phase2).
     "early_stop_metric":       "val_rmse",
-    # User directive (2026-05-17): patience 50 for the long-horizon sweep
-    # (tightened 200→50 — the 200-epoch tail rarely improved and dominated
-    # wall time; overrides the prior anti-overfit patience=25).  CAVEAT (kept
-    # for the record): a 3-seed test showed EDR with long patience crawls val
-    # down via pure val-set overfitting that does NOT transfer — seed 1 ran
-    # 229 ep, train collapsed to 0.072 while TEST *worsened* to 0.094.  The
-    # EMA-by-val checkpoint (ema_decay=0.9, below) is the safety net: it
-    # tracks a flatter, lower-variance solution and wins exactly when the raw
-    # best is an over-fit spike.  Rank on TEST, not val.
-    "patience":                50,
-    "min_delta":               2e-4,
+    "patience":                150,    # equal to FNN/PhysReg (fair protocol)
+    "min_delta":               1e-5,    # R3/R4: smooth descent ⇒ small δ is safe
     "grad_clip_norm":          1.0,
     "feature_noise_std":       0.02,
     "activation":              "silu",
-    # Empirically locked from the 2026-05-16 EDR sweet-spot sweep (11 configs
-    # over width×λ_corr×dropout on run_abl_…_20260515_1923): SMALL [64,64]
-    # δ-nets win decisively (0.0923) — every wider net (0.096-0.098) is far
-    # worse.  Wide+weak-reg overfits, the strong Occam prior protects
-    # generalization.  This is EDR's best in-distribution config; the tie with
-    # PhysReg here is fundamental (data/metric property, not a tuning gap).
-    # EDR's significant edge shows up in the DATA-EFFICIENCY regime instead.
+    # Minimum-capacity δ-nets — the 2026-05-16 sweet spot (every wider net
+    # overfit; the strong Occam prior protects generalisation).
     "gravity_hidden":          [64, 64],
     "inertia_hidden":          [64, 64],
     "coriolis_hidden":         [64, 64],
     "friction_hidden":         [32, 32],
     "use_friction_qdd":        False,
-    # ══════════════════════════════════════════════════════════════════════
-    # REVERTED to "corrected-P1" — the empirically BEST config (2026-05-17).
-    # ----------------------------------------------------------------------
-    # Six architecture rounds (test rmse_traj_macro): corrected-P1 0.0904
-    # (best, smallest val→test gap 0.0096) ▸ +matrix-Coriolis 0.0928 ▸
-    # +per-component λ 0.0919 ▸ +Stribeck+joint-weights 0.0964 (worst test,
-    # best val 0.0799). Every capacity/structure lever PAST corrected-P1
-    # monotonically regressed TEST — "more structure → better test" is
-    # falsified; the val→test gap is a data-split property (PhysReg's gap
-    # 0.0144 is larger). So we revert to the proven minimum-capacity config
-    # and use it as the trustworthy baseline for the robustness-hardening
-    # 3-seed preliminary test. ablation flags (matrix-Coriolis / Stribeck /
-    # joint-weights / per-component λ / δM-PSD) remain available but OFF.
     "use_phys_cond":           True,    # the ONE lever that helped (0.0923→0.0904)
-    "coriolis_matrix_form":    False,   # element-wise generalised better here
-    "friction_form":           "mlp",   # Stribeck regressed test
-    "inertia_psd":             False,   # A2 ablation, OFF (symmetric can reduce M)
-    # ── Generalisation robustness (2026-05-17, non-dataset) ───────────────
-    # EMA of weights: the 3-seed test showed best-by-noisy-val picks an
-    # over-fit checkpoint (seed-1: 229 ep, train→0.0715, TEST→0.0944).  A
-    # per-epoch weight EMA is a flatter, lower-variance solution; the best
-    # EMA-by-val competes with the raw best and wins exactly when the raw
-    # pick was an over-fit spike → lower & more stable TEST, no data change.
-    "ema_decay":               0.9,
-    # Spectral-norm (Lipschitz) cap on δ-net hidden layers — principled
-    # anti-noise-overfit regulariser; OFF here (clean EMA attribution),
-    # available as a tested ablation for a follow-up run.
-    "spectral_norm":           False,
-    "joint_loss_weights":      None,    # uniform; rebalancing overfit val→worse test
+    # ── Structure = corrected-P1 (proven best); R1/R2/R5 OFF (ablation) ────
+    "coriolis_structural":     False,   # R1 OFF — independent δC (corrected-P1)
+    "coriolis_matrix_form":    False,   # element-wise δC generalised best here
+    "inertia_psd":             False,   # R2 OFF — symmetric δM can also reduce M
+    "spectral_norm":           False,   # R5 OFF — caps capacity, underfit at 150ep
+    "friction_form":           "mlp",   # Stribeck regressed test previously
+    # ── Smooth capacity gate (R3 — NEW, validated: best ep 22→88) ─────────
+    "correction_gain_ramp_frac": 0.30, # γ: 0→1 cosine over first 30% of epochs
+    # ── Generalisation robustness ─────────────────────────────────────────
+    "ema_decay":               0.9,     # flat low-variance checkpoint selection
+    "joint_loss_weights":      None,    # uniform (matches macro headline)
     "lambda_correction_reg":   1.0e-1,  # scalar Occam prior (corrected-P1 value)
-    "lambda_correction_reg_per_component": None,  # per-comp λ regressed test
+    "lambda_correction_reg_per_component": None,
     "lambda_correction_decay": "none",
-    "correction_dropout":      0.15,    # corrected-P1 value (kept)
-    # Phase-2 curriculum correctives (kept — these are genuine plateau fixes,
-    # they delay the transition past the initial fast-descent transient):
-    "phase2_start_epoch":      None,
-    "phase2_plateau_window":   8,
-    "phase2_plateau_threshold": 1.5e-3,
-    "phase2_min_epoch":        15,
-    "phase2_max_epoch":        45,
+    "correction_dropout":      0.15,    # corrected-P1 value
     "correction_reg_inertia_normalize": True,
     "enable_passivity_loss":   False,
     "lambda_passivity":        0.01,
-    "frozen_lr_ratio":         1.0,
     "data_train_fraction":     1.0,
     "data_train_seed":         0,
     "stride":                  1,
@@ -319,22 +319,17 @@ _FIXED_HP_BY_ARCH: dict[str, dict[str, Any]] = {
 # FIXED_HP_* base); val/test are full and identical across runs.
 # ============================================================================
 
-# ── QUICK: 1 run per model = the fixed best config (single seed) ────────────
-# 1 run per arch at its locked best config (EDR = [64,64]/λ=5e-2/cdo=0.10).
-# 2026-05-16 finding (fair cosine_warm_restarts protocol, run_abl_…_20260515_1923,
-# rmse_traj_macro): EDR 0.0923 ≈ PhysReg 0.0921 (in-distribution tie, mapped
-# exhaustively over 11 EDR configs) and EDR < FNN 0.0996 (beats the true
-# black-box by ~10%).  Data-efficiency sweep (frac 0.10-1.0) confirmed the tie
-# holds at every fraction — PhysReg also ingests the physics decomposition, so
-# it is physics-informed too.  For the data-efficiency or EDR-sweep grids see
-# git history of this block.
-GRID_FNN_QUICK:     dict[str, list] = {"seed": [42]}
-GRID_PHYSREG_QUICK: dict[str, list] = {"seed": [42]}
-# 3-seed preliminary test (2026-05-17): hardened corrected-P1 × {42,1,2} to
-# (i) confirm the robustness pass did NOT regress test rmse_traj_macro
-# (must stay ≈0.0904, still < PhysReg 0.0921), (ii) measure seed variance —
-# is 0.0904 stable or noisy? — before committing to any large sweep.
-GRID_EDR_QUICK:     dict[str, list] = {"seed": [42, 1, 2]}
+# ── QUICK / HEADLINE: the fixed best config, MULTI-SEED (R6) ────────────────
+# A single seed cannot support a "clean victory" claim — the prior 0.37%
+# PhysReg-vs-EDR gap was decided by seed=42 alone (std=0.00000, n=1 in
+# grid_summary.md).  The headline grid is now 5 seeds per arch so the
+# comparison has error bars; the journal claim is the multi-seed
+# mean ± std of each arch's fixed best config.  (DETAILED below stays
+# single-seed — it is an architecture-tuning sweep, not the headline.)
+_HEADLINE_SEEDS = [42, 1, 2, 3, 4]
+GRID_FNN_QUICK:     dict[str, list] = {"seed": _HEADLINE_SEEDS}
+GRID_PHYSREG_QUICK: dict[str, list] = {"seed": _HEADLINE_SEEDS}
+GRID_EDR_QUICK:     dict[str, list] = {"seed": _HEADLINE_SEEDS}
 
 # ── DETAILED: comprehensive architecture HP sweeps (single seed=42) ─────────
 # FNN (pure MLP on [q,q̇,q̈]) — capacity (depth/width), regularisation
@@ -371,30 +366,28 @@ GRID_PHYSREG_DETAILED: dict[str, list] = {
     "seed":                    [42],
 }  # 4·2·6 = 48
 
-# EDR (structured: four δ-nets + two-phase curriculum) — δ-net capacity,
-# the Occam correction-magnitude penalty (its defining HP), correction
-# dropout, friction conditioning, and weight decay.  edr_width expands to
-# gravity/inertia/coriolis_hidden (+ friction = half) in _build_trials().
+# EDR (structured: four δ-nets + smooth γ-gate) — δ-net capacity, the Occam
+# correction-magnitude penalty (its defining HP), correction dropout, and
+# friction conditioning.  edr_width expands to gravity/inertia/coriolis_hidden
+# (+ friction = half) in _build_trials().
+#
+# Trimmed-210 expansion (2026-05-19): the combined two-stage run uses Stage A's
+# ACTUAL grid winner for Stage B, so the EDR search is widened around the
+# proven corrected-P1 recipe to let the data DISCOVER a stronger config — but
+# only the empirically-decisive axes (width × λ_reg × dropout × friction). NO
+# structural levers (coriolis_structural / inertia_psd / spectral_norm stay
+# OFF in FIXED_HP_EDR; six prior rounds falsified them) and no lr/patience
+# axes (fixed at the new FIXED_HP_EDR horizon). [128,128] re-added as a probe.
 GRID_EDR_DETAILED: dict[str, list] = {
-    # [128,128] & [192,192] dropped (moderate trim, 2026-05-17): the
-    # 2026-05-16 sweet-spot sweep proved every δ-net wider than [96,96]
-    # is a decisively worse overfitter (0.096-0.098 vs 0.092) — the
-    # strong Occam prior cannot rescue an over-capacity δ-net.  Burning
-    # ~30% of the grid on configs history has already falsified is waste.
     "edr_width": [
-        [32, 32], [48, 48], [64, 64], [96, 96],
-    ],                                              # 4  δ-net capacity (decisive)
+        [32, 32], [48, 48], [64, 64], [96, 96], [128, 128],
+    ],                                              # 5  δ-net capacity (decisive)
     "lambda_correction_reg":
-        [2e-3, 5e-3, 1e-2, 2e-2, 5e-2, 1e-1],       # 6  Occam strength (key EDR HP)
-    "correction_dropout":     [0.05, 0.20],         # 2  δ-net reg (mid 0.10 dropped)
+        [2e-3, 5e-3, 1e-2, 2e-2, 5e-2, 1e-1, 2e-1], # 7  Occam strength (key EDR HP)
+    "correction_dropout":     [0.05, 0.15, 0.30],   # 3  δ-net reg
     "use_friction_qdd":       [False, True],        # 2  friction conditioning
-    # weight_decay axis dropped (2026-05-17 trim): 1e-3 vs 2e-3 is the weakest
-    # EDR knob (width & λ_correction_reg dominate) — stays fixed at the
-    # FIXED_HP_EDR value (2e-3) for every trial.
     "seed":                   [42],
-    # lr fixed at the proven 3e-4 (in FIXED_HP_EDR).  To go even deeper add
-    # "learning_rate": [3e-4, 1e-3]  → doubles to 192.
-}  # 4·6·2·2 = 96  (decisive-axes EDR-specific search)
+}  # 5·7·3·2 = 210  (decisive-axes EDR search; no structural / lr / patience)
 
 # ── DATAEFF: lightweight data-efficiency curve (separate study) ─────────────
 # Each arch runs its proven FIXED_HP_* best config (NOT the DETAILED sweep)
@@ -403,10 +396,18 @@ GRID_EDR_DETAILED: dict[str, list] = {
 # `seed` in _build_trials); val/test stay full & identical (loader.py).  This
 # is the "how much data does each architecture need" curve — deliberately
 # kept off the 204-trial DETAILED grid (which stays at frac=1.0).
+#
+# MULTI-SEED (2026-05-19): single-seed made the curve noise-dominated — a
+# ~0.0008 N·m PhysReg wiggle read as "test RMSE increasing with more data"
+# when PhysReg is in fact ~flat (already near its floor; the val→test split
+# shift is a documented data property).  3 seeds per fraction → the plot
+# shows the seed-MEAN with a ±std band (sweep_df aggregates), so the trend
+# reflects signal, not a single lucky/unlucky draw.
 _DATAEFF_FRACTIONS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-GRID_FNN_DATAEFF:     dict[str, list] = {"data_train_fraction": _DATAEFF_FRACTIONS, "seed": [42]}
-GRID_PHYSREG_DATAEFF: dict[str, list] = {"data_train_fraction": _DATAEFF_FRACTIONS, "seed": [42]}
-GRID_EDR_DATAEFF:     dict[str, list] = {"data_train_fraction": _DATAEFF_FRACTIONS, "seed": [42]}
+_DATAEFF_SEEDS = [42, 1, 2]
+GRID_FNN_DATAEFF:     dict[str, list] = {"data_train_fraction": _DATAEFF_FRACTIONS, "seed": _DATAEFF_SEEDS}
+GRID_PHYSREG_DATAEFF: dict[str, list] = {"data_train_fraction": _DATAEFF_FRACTIONS, "seed": _DATAEFF_SEEDS}
+GRID_EDR_DATAEFF:     dict[str, list] = {"data_train_fraction": _DATAEFF_FRACTIONS, "seed": _DATAEFF_SEEDS}
 # 10·1 per arch × 3 archs = 30 trials
 
 # Default = quick; main() overrides _ARCH_GRID after mode selection.
@@ -511,17 +512,24 @@ def _build_trials() -> list[dict[str, Any]]:
     return trials
 
 
-def _partition_trials_by_skip(trials: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
-    """Pre-filter trials against DATASET_OUT_ROOT. Returns (pending, skip_count).
+def _partition_trials_by_skip(
+    trials: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Pre-filter trials against DATASET_OUT_ROOT. Returns (pending, skipped).
+
+    ``skipped`` is the list of already-trained trial dicts (NOT just a count)
+    so the finalizer can reconstruct their CSV/summary rows from disk — the
+    grid_results.csv must describe the whole active grid, not only the trials
+    executed this session.
 
     Runs in the main process before any worker is spawned. Saves the 3–5 s
     cold-start-per-skipped-trial cost that was paid when the check lived
     inside the worker.
     """
     if not SKIP_EXISTING:
-        return list(trials), 0
+        return list(trials), []
     pending: list[dict[str, Any]] = []
-    skipped = 0
+    skipped: list[dict[str, Any]] = []
     subdir_cache: dict[str, Path] = {}
     for t in trials:
         sd = t["save_subdir"]
@@ -530,7 +538,7 @@ def _partition_trials_by_skip(trials: list[dict[str, Any]]) -> tuple[list[dict[s
             base = Path(DATASET_OUT_ROOT) / sd
             subdir_cache[sd] = base
         if base.is_dir() and _find_existing_run(base, t["model_type"], t["hp"]):
-            skipped += 1
+            skipped.append(t)
         else:
             pending.append(t)
     return pending, skipped
@@ -875,6 +883,24 @@ def _measure_worker_rss_gb() -> float:
         return 1.6
 
 
+def _grid_threads_per_worker_target() -> int:
+    """Intra-op torch threads to budget per worker (sizes the CPU pool ceiling).
+
+    These trials are tiny per-joint MLPs: torch intra-op parallelism does
+    almost nothing (the limiter is the Python training loop / dataloader /
+    GPU dispatch), so 1 thread/worker on a big GPU box ~doubles concurrency
+    while keeping total torch threads ≈ physical cores (no oversubscription).
+    Laptop/workstation keep 2 (single-threaded torch has been linked to rare
+    deadlocks on those, and the pool is small there anyway).
+
+    Override: ``MTP_GRID_THREADS_PER_WORKER`` (int ≥ 1).
+    """
+    env = os.environ.get("MTP_GRID_THREADS_PER_WORKER", "").strip()
+    if env.isdigit() and int(env) >= 1:
+        return int(env)
+    return 1 if _detect_env() == "hpc" else 2
+
+
 def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
     """Derive an upper bound on concurrent workers from live hardware.
 
@@ -910,6 +936,7 @@ def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
 
     cpu_phys = psutil.cpu_count(logical=False) or 2
     n_gpus = max(1, n_gpus)
+    tpw = _grid_threads_per_worker_target()
 
     # VRAM ceiling — deliberately loose (0.6 GB/worker ≫ measured ~0.33);
     # never the binding constraint for these tiny trials, just a backstop.
@@ -927,7 +954,13 @@ def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
     except ValueError:
         oversub = 1.0
     oversub = max(1.0, oversub)
-    n_cpu = max(1, int(((cpu_phys - 2) // 2) * oversub))
+    # Size the pool so total torch threads ≈ cpu_phys (NOT 2× — the pool=100
+    # on a 48-core box that ran 0/204 in 6h40m was ~2× oversubscribed).  With
+    # ``tpw`` threads/worker, pool = (cpu_phys-2)//tpw keeps total ≈ cores.
+    # tpw is 1 on HPC for these tiny GPU-bound trials (intra-op parallelism
+    # buys nothing for a 5-joint MLP; the limiter is the Python loop / GPU
+    # dispatch), which ~doubles the pool vs the old hardcoded //2.
+    n_cpu = max(1, int(((cpu_phys - 2) // max(1, tpw)) * oversub))
 
     # RAM ceiling — the real "don't crash the system" guard.  Size the pool so
     # the total worker RSS stays clear of available RAM with a safety margin.
@@ -966,9 +999,11 @@ def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
 def _compute_threads_per_worker(pool_size: int) -> int:
     import psutil
     cpu_phys = psutil.cpu_count(logical=False) or 2
-    # Leave 1 physical core free for the OS / display.  Minimum 2 threads —
-    # single-threaded torch ops have been linked to intermittent deadlocks.
-    return max(2, (cpu_phys - 1) // max(1, pool_size))
+    # Floor at the same per-worker thread target the pool was sized against
+    # (1 on HPC, 2 elsewhere) so total torch threads ≈ physical cores and the
+    # pool/threads pair stays self-consistent.  Cap by spare cores/pool.
+    tpw = _grid_threads_per_worker_target()
+    return max(tpw, (cpu_phys - 1) // max(1, pool_size))
 
 
 # ============================================================================
@@ -1052,12 +1087,19 @@ def _wait_for_memory(log: logging.Logger) -> None:
         time.sleep(MEM_POLL_INTERVAL)
 
 
-def _run_sequential(
+def _run_sequential_collect(
     trials: list[dict[str, Any]],
     log: logging.Logger,
     t_start: float,
-) -> tuple[int, int, int]:
-    """Run every trial in-process, one after another (CPU-only or pool_size=1)."""
+) -> tuple[list["_Result"], list[dict[str, Any]], tuple[int, int, int]]:
+    """Run every trial in-process, one after another (CPU-only or pool_size=1).
+
+    Returns ``(executed_results, skipped_trials, (ok, skip, fail))`` WITHOUT
+    finalizing — the caller owns artifact writing.  Sequential keeps no
+    in-memory ``_Result`` list, so ``executed_results`` is ``[]`` and the
+    whole grid is returned as ``skipped`` for disk reconstruction (every
+    ok/pre-skipped trial has an on-disk run; a trial that failed this session
+    has no run dir and is simply omitted by the reconstructor)."""
     import psutil
     import torch
 
@@ -1099,7 +1141,8 @@ def _run_sequential(
         "edr":      EDR_STRATEGY,
     }
 
-    pending, n_skip = _partition_trials_by_skip(trials)
+    pending, _skipped = _partition_trials_by_skip(trials)
+    n_skip = len(_skipped)
     if n_skip:
         log.info("Pre-dispatch SKIP: %d/%d trials already complete in this batch.",
                  n_skip, len(trials))
@@ -1195,7 +1238,21 @@ def _run_sequential(
             n_fail += 1
             tqdm.write(f"  [ERR ]  {idx:{w}}/{total}  {desc}\n" + error_msg[:400])
 
-    return n_ok, n_skip, n_fail
+    # Sequential keeps no in-memory _Result list; every ok/pre-skipped trial
+    # now has an on-disk run, so the whole grid is handed back for disk
+    # reconstruction. (A failed trial has no run dir; reconstructor omits it.)
+    return [], list(trials), (n_ok, n_skip, n_fail)
+
+
+def _run_sequential(
+    trials: list[dict[str, Any]],
+    log: logging.Logger,
+    t_start: float,
+) -> tuple[int, int, int]:
+    """Behavior-preserving wrapper: run sequentially, then finalize artifacts."""
+    res, skipped, counts = _run_sequential_collect(trials, log, t_start)
+    _finalize(res, skipped, DATASET_OUT_ROOT, log)
+    return counts
 
 
 # ============================================================================
@@ -1252,6 +1309,14 @@ def _pool_init(
     # CUDA so the worker inherits a clean slate.
     os.environ["NN_NUM_WORKERS"] = "0"      # daemonic workers can't spawn children
     os.environ["CUDA_VISIBLE_DEVICES"] = str(_POOL_GPU_ID)
+    # Pin BLAS/OpenMP to the per-worker budget BEFORE torch import.  With a
+    # large HPC pool (~cores workers) an unset OMP/MKL default = all-cores per
+    # process → catastrophic thread oversubscription / scheduler thrash (the
+    # 0/204-in-6h40m failure mode).  Must precede `import torch`.
+    _tpw_env = str(max(1, int(threads_per_worker)))
+    for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+               "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ[_v] = _tpw_env
 
     import torch
     torch.set_num_threads(int(threads_per_worker))
@@ -1742,18 +1807,22 @@ def _flush_results_csv(results: list[_Result], out_root: str) -> None:
             if not k.startswith("_") and k not in hp_keys:
                 hp_keys.append(k)
     hp_keys.sort()
-    csv_path = os.path.join(out_root, "grid_results.csv")
-    with open(csv_path, "w", newline="") as fh:
-        wr = csv.writer(fh)
-        wr.writerow(["n", "arch", "status", "test_rmse", "elapsed_sec"] + hp_keys)
-        for r in sorted(results, key=lambda x: (x.arch, x.rmse if x.rmse is not None else 9e9)):
-            row = [r.n, r.arch, r.status,
-                   f"{r.rmse:.6f}" if r.rmse is not None else "",
-                   f"{r.elapsed:.1f}"]
-            for k in hp_keys:
-                v = r.hp.get(k, "")
-                row.append("-".join(str(x) for x in v) if isinstance(v, (list, tuple)) else v)
-            wr.writerow(row)
+    ordered = sorted(results,
+                     key=lambda x: (x.arch, x.rmse if x.rmse is not None else 9e9))
+    for csv_name, _ in _result_basenames():
+        csv_path = os.path.join(out_root, csv_name)
+        with open(csv_path, "w", newline="") as fh:
+            wr = csv.writer(fh)
+            wr.writerow(["n", "arch", "status", "test_rmse", "elapsed_sec"] + hp_keys)
+            for r in ordered:
+                row = [r.n, r.arch, r.status,
+                       f"{r.rmse:.6f}" if r.rmse is not None else "",
+                       f"{r.elapsed:.1f}"]
+                for k in hp_keys:
+                    v = r.hp.get(k, "")
+                    row.append("-".join(str(x) for x in v)
+                               if isinstance(v, (list, tuple)) else v)
+                wr.writerow(row)
 
 
 def _write_grid_summary(results: list[_Result], out_root: str) -> None:
@@ -1765,7 +1834,10 @@ def _write_grid_summary(results: list[_Result], out_root: str) -> None:
     """
     import statistics as _stats
 
-    ok = [r for r in results if r.status == "ok" and r.rmse is not None]
+    # A reconstructed-from-disk row carries status "skip" but IS a completed
+    # successful run (it has a real test rmse); only fail/err lack an rmse.
+    ok = [r for r in results
+          if r.rmse is not None and r.status in ("ok", "skip")]
 
     # ── grid_results.csv ────────────────────────────────────────────────────
     _flush_results_csv(results, out_root)
@@ -1857,8 +1929,9 @@ def _write_grid_summary(results: list[_Result], out_root: str) -> None:
     disp.append("")
     lines += ["", *disp]
 
-    with open(os.path.join(out_root, "grid_summary.md"), "w") as fh:
-        fh.write("\n".join(lines))
+    for _, md_name in _result_basenames():
+        with open(os.path.join(out_root, md_name), "w") as fh:
+            fh.write("\n".join(lines))
 
     # Always echo the TRAIN/VAL/TEST block to the console so it is visible
     # after ANY grid run (full sweep or 3-seed test), not just in the .md.
@@ -1870,11 +1943,78 @@ def _write_grid_summary(results: list[_Result], out_root: str) -> None:
     _glog.info("=" * 72)
 
 
+def _reconstruct_skipped_results(
+    skipped: list[dict[str, Any]], out_root: str,
+) -> list[_Result]:
+    """Build ``_Result`` rows for already-trained trials from their on-disk
+    runs (reuses :func:`_run_metrics_for`'s full-HP metadata match).
+
+    These trials were pre-skipped (not executed this session) but ARE part of
+    the active grid, so they must appear in grid_results.csv / grid_summary.md.
+    Trials with no recoverable test metric on disk are dropped with a warning.
+    """
+    log = logging.getLogger("grid")
+    out: list[_Result] = []
+    missing = 0
+    for t in skipped:
+        arch, hp = t["arch"], t["hp"]
+        m = _run_metrics_for(out_root, arch, hp)
+        test = m.get("test") if m else None
+        if test is None or test != test:          # missing / NaN
+            missing += 1
+            continue
+        # status "ok": a reconstructed run is a completed, successful result.
+        # ("skipped this session" is a runtime detail, not a property of the
+        # result; downstream consumers filter the CSV on status == "ok".)
+        out.append(_Result(
+            n=0, arch=arch, config=_short_config(hp), status="ok",
+            rmse=float(test), elapsed=0.0, hp=dict(hp),
+        ))
+    if missing:
+        log.warning("Reconstruction: %d/%d skipped trials had no recoverable "
+                    "test metric on disk (omitted).", missing, len(skipped))
+    return out
+
+
+def _finalize(
+    executed: list[_Result],
+    skipped: list[dict[str, Any]],
+    out_root: str,
+    log: logging.Logger,
+) -> None:
+    """Write the CSV/summary describing the WHOLE active grid.
+
+    ``executed`` = trials run this session (real status incl. fail/err);
+    ``skipped``  = already-trained trials, reconstructed from disk.  Combined
+    so the artifacts are complete and resume-safe regardless of how many
+    trials actually ran.
+    """
+    recon = _reconstruct_skipped_results(skipped, out_root)
+    combined = list(executed) + recon
+    if not combined:
+        log.warning("Finalize: no results (executed or reconstructed) — "
+                    "leaving existing grid artifacts untouched.")
+        return
+    for i, r in enumerate(
+        sorted(combined,
+                key=lambda x: (x.arch, x.rmse if x.rmse is not None else 9e9)),
+        1,
+    ):
+        r.n = i
+    try:
+        _write_grid_summary(combined, out_root)
+        names = ", ".join(c for c, _ in _result_basenames())
+        log.info("Wrote %d rows (%d executed + %d reconstructed) -> %s",
+                 len(combined), len(executed), len(recon), names)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to write grid summary: %s", exc)
+
+
 # ============================================================================
 # ── PARALLEL RUNNER (dynamic admission, rich dashboard) ──────────────────────
 # ============================================================================
 
-def _run_parallel_dynamic(
+def _run_parallel_collect(
     trials: list[dict[str, Any]],
     pool_size: int,
     threads_per_worker: int,
@@ -1882,8 +2022,12 @@ def _run_parallel_dynamic(
     log: logging.Logger,
     t_start: float,
     n_gpus: int = 1,
-) -> tuple[int, int, int]:
+) -> tuple[list["_Result"], list[dict[str, Any]], tuple[int, int, int]]:
     """Submit trials while live free VRAM + RAM permit.  No hardcoded N.
+
+    Returns ``(executed_results, pre_skipped_trials, (ok, skip, fail))``
+    WITHOUT finalizing — the caller owns artifact writing (so a two-stage
+    run can derive Stage-A winners from ``executed_results`` before Stage B).
 
     Renders a live rich dashboard on TTY; falls back to periodic plain status
     lines when stdout/stderr are redirected.
@@ -1894,13 +2038,16 @@ def _run_parallel_dynamic(
     is_hpc = env == "hpc"
 
     original_total = len(trials)
-    trials, n_pre_skip = _partition_trials_by_skip(trials)
+    trials, _skipped = _partition_trials_by_skip(trials)
+    n_pre_skip = len(_skipped)
     if n_pre_skip:
         log.info("Pre-dispatch SKIP: %d/%d trials already complete in this batch.",
                  n_pre_skip, original_total)
     if not trials:
-        log.info("Nothing to do — all %d trials already complete.", original_total)
-        return 0, n_pre_skip, 0
+        log.info("Nothing to do — all %d trials already complete; "
+                 "artifacts will be rebuilt from disk by the caller.",
+                 original_total)
+        return [], _skipped, (0, n_pre_skip, 0)
     total = len(trials)
 
     # One-time measurement of the per-process CUDA context overhead.
@@ -2321,12 +2468,28 @@ def _run_parallel_dynamic(
     with state.lock:
         _all = list(state.all_results)
         _ok, _skip, _fail = state.ok, state.skip + n_pre_skip, state.fail
-    try:
-        _write_grid_summary(_all, DATASET_OUT_ROOT)
-        log.info("Wrote grid_results.csv + grid_summary.md to %s", DATASET_OUT_ROOT)
-    except Exception as exc:
-        log.warning("Failed to write grid summary: %s", exc)
-    return _ok, _skip, _fail
+    # Hand back this session's results + the pre-skipped trials; the caller
+    # finalizes (combining executed + disk-reconstructed) so the CSV is never
+    # just the session subset.
+    return _all, _skipped, (_ok, _skip, _fail)
+
+
+def _run_parallel_dynamic(
+    trials: list[dict[str, Any]],
+    pool_size: int,
+    threads_per_worker: int,
+    device_label: str,
+    log: logging.Logger,
+    t_start: float,
+    n_gpus: int = 1,
+) -> tuple[int, int, int]:
+    """Behavior-preserving wrapper: run in parallel, then finalize artifacts."""
+    res, skipped, counts = _run_parallel_collect(
+        trials, pool_size, threads_per_worker, device_label, log, t_start,
+        n_gpus=n_gpus,
+    )
+    _finalize(res, skipped, DATASET_OUT_ROOT, log)
+    return counts
 
 
 # ============================================================================
@@ -2334,14 +2497,25 @@ def _run_parallel_dynamic(
 # ============================================================================
 
 def _select_run_mode(log: logging.Logger) -> str:
-    """Return 'quick', 'detailed', or 'dataeff'.
+    """Return 'quick', 'detailed', 'dataeff', 'combined', or 'reconstruct'.
+
+    'combined' chains both research stages in one process: Stage A runs the
+    full DETAILED HP grid, then Stage B runs the data-efficiency sweep on each
+    arch's Stage-A winning config (selected by minimum test_rmse).
 
     Priority: env ``MTP_GRID_MODE`` → interactive prompt (TTY only) →
-    default 'quick' (safe for background / non-interactive runs).
+    default 'combined' (so just running the script launches the full
+    Stage A → Stage B production run with no env vars / input needed).
+
+    ``reconstruct`` trains nothing: it rebuilds grid_results_*.csv /
+    grid_summary_*.md for an existing study purely from on-disk runs (which
+    sub-study is set by ``MTP_GRID_RECONSTRUCT_OF``, default ``detailed``).
     """
     _ALIASES = {
         "quick": "quick", "detailed": "detailed",
         "dataeff": "dataeff", "data-efficiency": "dataeff", "frac": "dataeff",
+        "reconstruct": "reconstruct", "rebuild": "reconstruct",
+        "combined": "combined", "full": "combined", "ab": "combined",
     }
     env = os.environ.get("MTP_GRID_MODE", "").strip().lower()
     if env in _ALIASES:
@@ -2350,21 +2524,26 @@ def _select_run_mode(log: logging.Logger) -> str:
         return mode
     if env:
         log.warning(
-            "Ignoring invalid MTP_GRID_MODE=%r (use 'quick', 'detailed', or 'dataeff').",
+            "Ignoring invalid MTP_GRID_MODE=%r (use 'quick', 'detailed', "
+            "'dataeff', 'combined', or 'reconstruct').",
             env,
         )
 
     n_quick = sum(len(_cartesian(_ARCH_GRID_QUICK[a])) for a in _ARCH_META)
     n_det   = sum(len(_cartesian(_ARCH_GRID_DETAILED[a])) for a in _ARCH_META)
     n_de    = sum(len(_cartesian(_ARCH_GRID_DATAEFF[a])) for a in _ARCH_META)
+    # Stage B = winners (≤ n archs) × fractions × seeds; n archs as upper bound.
+    n_comb  = n_det + len(_ARCH_META) * len(_DATAEFF_FRACTIONS) * len(_DATAEFF_SEEDS)
 
     if not sys.stdin.isatty():
-        log.warning(
-            "Non-interactive stdin — defaulting to QUICK (%d trials). "
-            "Set MTP_GRID_MODE=detailed (%d) or dataeff (%d) for the other sweeps.",
-            n_quick, n_det, n_de,
+        log.info(
+            "Non-interactive stdin — defaulting to COMBINED (%d trials: "
+            "Stage A HP grid → Stage B data-efficiency on winners). "
+            "Override with MTP_GRID_MODE=quick (%d) / detailed (%d) / "
+            "dataeff (%d) if needed.",
+            n_comb, n_quick, n_det, n_de,
         )
-        return "quick"
+        return "combined"
 
     prompt = (
         "\n"
@@ -2376,16 +2555,250 @@ def _select_run_mode(log: logging.Logger) -> str:
         f"(per-arch HP sweep at 100% data)\n"
         f"    [3] dataeff   — {n_de} trials "
         f"(best config/arch × data-fraction curve)\n"
+        "    [4] reconstruct — no training; rebuild CSV/summary from disk "
+        "(MTP_GRID_RECONSTRUCT_OF, default detailed)\n"
+        f"    [5] combined  — {n_comb} trials (Stage A HP grid → Stage B "
+        f"data-efficiency on the per-arch winners; one process)  [DEFAULT]\n"
         "============================================================\n"
-        "  Enter 1, 2 or 3 (default 1): "
+        "  Enter 1, 2, 3, 4 or 5 (default 5 = combined): "
     )
     try:
         choice = input(prompt).strip()
     except EOFError:
         choice = ""
-    mode = {"2": "detailed", "3": "dataeff"}.get(choice, "quick")
+    mode = {"1": "quick", "2": "detailed", "3": "dataeff",
+            "4": "reconstruct", "5": "combined"}.get(choice, "combined")
     log.info("Run mode selected: %s", mode)
     return mode
+
+
+# ============================================================================
+# ── RUNTIME PROBE  (shared by single-mode main() and combined orchestrator) ──
+# ============================================================================
+
+def _probe_runtime(log: logging.Logger) -> dict[str, Any]:
+    """Probe device/pool capabilities ONCE (no CUDA context in main process).
+
+    Returns ``{cuda_ok, n_gpus, pool_size, threads_per_worker, device_label}``.
+    Factored out of ``main()`` so the combined two-stage orchestrator probes
+    the same way and reuses one pool sizing for both stages.
+    """
+    cuda_ok = _query_cuda_available()
+    n_gpus = _query_n_gpus() if cuda_ok else 1
+    pool_size = _compute_pool_size(cuda_ok, n_gpus)
+    threads_per_worker = _compute_threads_per_worker(pool_size)
+
+    import psutil
+    cpu_phys = psutil.cpu_count(logical=False) or 2
+    free_ram_gb = _query_free_ram_gb()
+    if cuda_ok:
+        free_vram_gb  = _query_free_vram_gb()
+        total_vram_gb = _query_total_vram_gb()
+        try:
+            import subprocess as _sp
+            gpu_name = _sp.check_output(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                timeout=5,
+            ).decode().strip().split("\n")[0]
+        except Exception:
+            gpu_name = "CUDA GPU"
+        _gpu_suffix = f"×{n_gpus}" if n_gpus > 1 else ""
+        device_label = f"cuda{_gpu_suffix} ({gpu_name}, {total_vram_gb:.1f} GB total)"
+        log.info(
+            "device=%s  gpus=%d  VRAM=%.1f/%.1f GB free   RAM=%.1f GB free   CPU=%d phys",
+            device_label, n_gpus, free_vram_gb, total_vram_gb, free_ram_gb, cpu_phys,
+        )
+    else:
+        device_label = "cpu"
+        log.info("device=cpu   RAM=%.1f GB free   CPU=%d phys", free_ram_gb, cpu_phys)
+    log.info("pool_size=%d   threads_per_worker=%d", pool_size, threads_per_worker)
+
+    env = _detect_env()
+    compile_on, compile_mode = _compile_flags(env, "fnn")   # representative arch
+    maxtasks = _maxtasks_for_env(env)
+    log.info(
+        "env=%s   torch_compile=%s  mode=%s   maxtasksperchild=%d",
+        env, compile_on, compile_mode, maxtasks,
+    )
+    return {
+        "cuda_ok": cuda_ok,
+        "n_gpus": n_gpus,
+        "pool_size": pool_size,
+        "threads_per_worker": threads_per_worker,
+        "device_label": device_label,
+    }
+
+
+# ============================================================================
+# ── COMBINED TWO-STAGE ORCHESTRATOR  (Stage A: HP grid → Stage B: dataeff) ───
+# ============================================================================
+
+def _stage_a_winners(
+    executed: list["_Result"],
+    skipped: list[dict[str, Any]],
+    out_root: str,
+    log: logging.Logger,
+) -> dict[str, dict[str, Any]]:
+    """Best config per arch from Stage A, selected by MINIMUM test_rmse.
+
+    Folds disk-reconstructed pre-skipped runs in, so winners are derivable
+    even when Stage A was 100% pre-completed on a prior (resumed) HPC job.
+    Returns ``{arch: fully_expanded_hp_dict}``; an arch with no usable result
+    is omitted (logged) and is simply excluded from Stage B.
+    """
+    ok = [r for r in executed if r.rmse is not None and r.status in ("ok", "skip")]
+    ok += _reconstruct_skipped_results(skipped, out_root)
+    winners: dict[str, dict[str, Any]] = {}
+    for arch in sorted({r.arch for r in ok}):
+        a_ok = [r for r in ok if r.arch == arch]
+        best = min(a_ok, key=lambda r: r.rmse)          # user decision: min test_rmse
+        winners[arch] = dict(best.hp)
+        log.info("Stage-A winner [%s]: test_rmse=%.5f  %s",
+                 arch, best.rmse, _short_config(best.hp))
+    for arch in _ARCH_META:
+        if arch not in winners:
+            log.error("Stage-A winner [%s]: NO usable result — excluded from "
+                      "Stage B.", arch)
+    return winners
+
+
+def _build_stage_b_trials(
+    winners: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Data-efficiency trials = each arch's Stage-A winner × fractions × seeds.
+
+    The winner hp is ALREADY fully expanded (concrete gravity/inertia/coriolis/
+    friction_hidden, no ``edr_width``), so the EDR width-expansion in
+    ``_build_trials`` is deliberately NOT re-run here.  The
+    ``data_train_fraction==1.0`` × 3-seed subset is the multi-seed headline.
+    """
+    de_grid = {"data_train_fraction": _DATAEFF_FRACTIONS, "seed": _DATAEFF_SEEDS}
+    trials: list[dict[str, Any]] = []
+    for arch, win_hp in winners.items():
+        model_type, save_subdir, run_help = _ARCH_META[arch]
+        for combo in _cartesian(de_grid):
+            hp = {**win_hp, **combo}
+            hp["data_train_seed"] = int(combo["seed"])
+            if arch == "edr":
+                hp.update(_EDR_Q_STATS)   # idempotent; trig features preserved
+            trials.append({
+                "arch":        arch,
+                "model_type":  model_type,
+                "save_subdir": save_subdir,
+                "run_help":    run_help,
+                "hp":          hp,
+            })
+    return trials
+
+
+def _write_combined_summary(
+    winners: dict[str, dict[str, Any]],
+    cnt_a: tuple[int, int, int],
+    cnt_b: tuple[int, int, int],
+    out_root: str,
+    log: logging.Logger,
+) -> None:
+    """Additive ``combined_summary.md`` — never collides with grid_* artifacts."""
+    lines = ["# Combined run — Stage A (HP grid) → Stage B (data-efficiency)", ""]
+    lines.append(f"- Stage A: OK={cnt_a[0]}  Skip={cnt_a[1]}  Fail={cnt_a[2]}")
+    lines.append(f"- Stage B: OK={cnt_b[0]}  Skip={cnt_b[1]}  Fail={cnt_b[2]}")
+    lines += ["", "## Stage-A winning config per arch (min test_rmse)", "",
+              "| arch | test_rmse @ Stage A | config |",
+              "|------|--------------------:|--------|"]
+    for arch, hp in winners.items():
+        m = _run_metrics_for(out_root, arch, hp)
+        te = m.get("test", float("nan")) if m else float("nan")
+        te_s = f"{te:.5f}" if isinstance(te, float) and te == te else "—"
+        lines.append(f"| {arch} | {te_s} | {_short_config(hp)} |")
+    lines += [
+        "",
+        "## Headline (multi-seed)",
+        "",
+        "The Stage-B rows with `data_train_fraction == 1.0` (seeds 42, 1, 2) "
+        "ARE the multi-seed headline — see `grid_results_dataeff.csv` for the "
+        "per-seed test RMSE and the plot suite's `sweep_df` for mean ± std.",
+        "",
+        "Artifacts: Stage A → `grid_results_detailed.csv` (+ legacy "
+        "`grid_results.csv` mirror); Stage B → `grid_results_dataeff.csv`.",
+        "",
+    ]
+    path = os.path.join(out_root, "combined_summary.md")
+    try:
+        with open(path, "w") as fh:
+            fh.write("\n".join(lines))
+        log.info("Wrote combined summary -> %s", path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Failed to write combined_summary.md: %s", exc)
+
+
+def _run_combined(log: logging.Logger) -> None:
+    """One process: full HP grid (Stage A) → winners → data-efficiency on the
+    winners (Stage B).  Each stage is finalized to disk as it completes, so an
+    interrupted HPC job resumes (pre-skip + disk-reconstruct) without retrain.
+    """
+    global _ARCH_GRID, RUN_MODE
+
+    if DRY_RUN:
+        log.info("DRY_RUN=True — combined mode prints the Stage-A combo table.")
+        RUN_MODE = "detailed"
+        _ARCH_GRID = dict(_ARCH_GRID_DETAILED)
+        _print_combo_table(_build_trials())
+        return
+
+    for arch in _ARCH_META:
+        _, save_subdir, _ = _ARCH_META[arch]
+        os.makedirs(os.path.join(DATASET_OUT_ROOT, save_subdir), exist_ok=True)
+    os.makedirs(os.path.join(DATASET_OUT_ROOT, "analysis"), exist_ok=True)
+
+    rt = _probe_runtime(log)
+    t_start = time.time()
+
+    def _run(trials: list[dict[str, Any]]):
+        if rt["pool_size"] <= 1:
+            return _run_sequential_collect(trials, log, t_start)
+        return _run_parallel_collect(
+            trials, rt["pool_size"], rt["threads_per_worker"],
+            rt["device_label"], log, t_start, n_gpus=rt["n_gpus"],
+        )
+
+    # ── Stage A — full HP grid (detailed sweep, single seed 42) ─────────────
+    RUN_MODE = "detailed"                       # → legacy grid_results.csv mirror
+    _ARCH_GRID = dict(_ARCH_GRID_DETAILED)
+    trials_a = _build_trials()
+    log.info("=" * 72)
+    log.info("COMBINED · STAGE A — HP grid: %d trials (%s)",
+             len(trials_a),
+             ", ".join(f"{a}:{c}" for a, c in
+                       sorted(Counter(t['arch'] for t in trials_a).items())))
+    log.info("=" * 72)
+    res_a, skip_a, cnt_a = _run(trials_a)
+    _finalize(res_a, skip_a, DATASET_OUT_ROOT, log)   # detailed → +legacy mirror
+
+    winners = _stage_a_winners(res_a, skip_a, DATASET_OUT_ROOT, log)
+    if not winners:
+        log.error("COMBINED: Stage A produced no usable winner for any arch — "
+                  "Stage B skipped. Stage-A artifacts are written.")
+        return
+
+    # ── Stage B — data-efficiency on each arch's Stage-A winner ─────────────
+    RUN_MODE = "dataeff"                         # → grid_results_dataeff.csv only
+    trials_b = _build_stage_b_trials(winners)
+    log.info("=" * 72)
+    log.info("COMBINED · STAGE B — data-efficiency on winners: %d trials",
+             len(trials_b))
+    log.info("=" * 72)
+    res_b, skip_b, cnt_b = _run(trials_b)
+    _finalize(res_b, skip_b, DATASET_OUT_ROOT, log)
+
+    _write_combined_summary(winners, cnt_a, cnt_b, DATASET_OUT_ROOT, log)
+
+    log.info("=" * 72)
+    log.info("COMBINED complete — Stage A: OK=%d Skip=%d Fail=%d  ·  "
+             "Stage B: OK=%d Skip=%d Fail=%d",
+             cnt_a[0], cnt_a[1], cnt_a[2], cnt_b[0], cnt_b[1], cnt_b[2])
+    log.info("Results saved to: %s", DATASET_OUT_ROOT)
+    log.info("Evaluate:  PYTHONPATH=. python3 Neural_Networks/eval_best_models.py")
+    log.info("=" * 72)
 
 
 # ============================================================================
@@ -2399,13 +2812,39 @@ def main() -> None:
     )
     log = logging.getLogger("grid")
 
-    global _ARCH_GRID
+    global _ARCH_GRID, RUN_MODE
     mode = _select_run_mode(log)
-    _ARCH_GRID = dict({
+    _GRID_BY_MODE = {
         "detailed": _ARCH_GRID_DETAILED,
         "dataeff":  _ARCH_GRID_DATAEFF,
         "quick":    _ARCH_GRID_QUICK,
-    }.get(mode, _ARCH_GRID_QUICK))
+    }
+
+    # reconstruct: no training — rebuild a study's CSV/summary purely from
+    # the runs already on disk (idempotent; seconds, not hours).
+    if mode == "reconstruct":
+        sub = os.environ.get("MTP_GRID_RECONSTRUCT_OF", "detailed").strip().lower()
+        if sub not in _GRID_BY_MODE:
+            log.warning("MTP_GRID_RECONSTRUCT_OF=%r invalid; using 'detailed'.", sub)
+            sub = "detailed"
+        RUN_MODE = sub                       # output files named for the sub-study
+        _ARCH_GRID = dict(_GRID_BY_MODE[sub])
+        trials = _build_trials()
+        names = ", ".join(c for c, _ in _result_basenames())
+        log.info("RECONSTRUCT '%s' grid (%d trials) from disk -> %s",
+                 sub, len(trials), names)
+        _finalize([], trials, DATASET_OUT_ROOT, log)
+        log.info("Reconstruction complete (no training performed).")
+        return
+
+    # combined: chain Stage A (HP grid) → Stage B (data-efficiency on winners)
+    # in one process.  Owns its own probe/dirs/dispatch/finalize.
+    if mode == "combined":
+        _run_combined(log)
+        return
+
+    RUN_MODE = mode
+    _ARCH_GRID = dict(_GRID_BY_MODE.get(mode, _ARCH_GRID_QUICK))
 
     trials      = _build_trials()
     total       = len(trials)
@@ -2437,45 +2876,11 @@ def main() -> None:
     os.makedirs(os.path.join(DATASET_OUT_ROOT, "analysis"), exist_ok=True)
 
     # Probe capabilities (no CUDA context created in the main process).
-    cuda_ok = _query_cuda_available()
-    n_gpus = _query_n_gpus() if cuda_ok else 1
-    pool_size = _compute_pool_size(cuda_ok, n_gpus)
-    threads_per_worker = _compute_threads_per_worker(pool_size)
-
-    import psutil
-    cpu_phys = psutil.cpu_count(logical=False) or 2
-    free_ram_gb = _query_free_ram_gb()
-    if cuda_ok:
-        free_vram_gb  = _query_free_vram_gb()
-        total_vram_gb = _query_total_vram_gb()
-        # Short device label for the dashboard header.
-        try:
-            import subprocess as _sp
-            gpu_name = _sp.check_output(
-                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                timeout=5,
-            ).decode().strip().split("\n")[0]
-        except Exception:
-            gpu_name = "CUDA GPU"
-        _gpu_suffix = f"×{n_gpus}" if n_gpus > 1 else ""
-        device_label = f"cuda{_gpu_suffix} ({gpu_name}, {total_vram_gb:.1f} GB total)"
-        log.info(
-            "device=%s  gpus=%d  VRAM=%.1f/%.1f GB free   RAM=%.1f GB free   CPU=%d phys",
-            device_label, n_gpus, free_vram_gb, total_vram_gb, free_ram_gb, cpu_phys,
-        )
-    else:
-        device_label = "cpu"
-        log.info("device=cpu   RAM=%.1f GB free   CPU=%d phys", free_ram_gb, cpu_phys)
-    log.info("pool_size=%d   threads_per_worker=%d", pool_size, threads_per_worker)
-
-    # Detect and log environment — transparent about what gets enabled.
-    env = _detect_env()
-    compile_on, compile_mode = _compile_flags(env, "fnn")   # representative arch
-    maxtasks = _maxtasks_for_env(env)
-    log.info(
-        "env=%s   torch_compile=%s  mode=%s   maxtasksperchild=%d",
-        env, compile_on, compile_mode, maxtasks,
-    )
+    rt = _probe_runtime(log)
+    pool_size          = rt["pool_size"]
+    threads_per_worker = rt["threads_per_worker"]
+    device_label       = rt["device_label"]
+    n_gpus             = rt["n_gpus"]
 
     t_start = time.time()
     try:

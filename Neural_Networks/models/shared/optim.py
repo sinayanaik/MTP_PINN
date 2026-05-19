@@ -28,7 +28,12 @@ def build_scheduler(optimizer, hp: dict[str, Any], n_train_batches: int):
         return None
     if sched_name == "warmup_cosine":
         warmup_ep = max(1, epochs // 20)
-        min_factor = 0.01
+        # Per-model LR floor (fraction of base LR the cosine decays to).
+        # Default 0.01 preserves FNN/PhysReg exactly (they never set the key);
+        # EDR sets 0.05 so its long-horizon tail keeps a non-trivial LR and
+        # "keeps learning" instead of stalling near zero. Deliberate per-model
+        # regularization lever — kept out of the skip/resume fingerprint.
+        min_factor = float(hp.get("warmup_cosine_min_factor", 0.01))
 
         def _warmup_cosine_lambda(ep: int) -> float:
             if ep < warmup_ep:

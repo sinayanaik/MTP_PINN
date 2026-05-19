@@ -43,10 +43,10 @@ from edr_corrections import (  # noqa: E402
 )
 from edr_model import EDRModel  # noqa: E402
 from edr_strategy import (  # noqa: E402
+    _correction_gain,
     _correction_reg_loss,
     _resolve_component_lambdas,
     _resolve_joint_weights,
-    _should_transition_to_phase2,
     _validate_edr_hp,
 )
 
@@ -510,49 +510,126 @@ class TestEDRModelProperties:
         with pytest.raises(ValueError, match="physics.*required|required.*physics"):
             self.model(feat, None)
 
-    # ── Phase switching ──────────────────────────────────────────────────────
+    # ── Smooth capacity gate γ (R3) ──────────────────────────────────────────
 
-    def test_phase1_freezes_inertia_coriolis(self) -> None:
-        """In phase 1, inertia and Coriolis params should have requires_grad=False."""
-        self.model.set_phase(1)
-        for name, param in self.model.inertia_net.named_parameters():
-            assert not param.requires_grad, (
-                f"Phase 1: inertia_net.{name}.requires_grad should be False"
-            )
-        for name, param in self.model.coriolis_net.named_parameters():
-            assert not param.requires_grad, (
-                f"Phase 1: coriolis_net.{name}.requires_grad should be False"
-            )
-
-    def test_phase1_keeps_gravity_friction_active(self) -> None:
-        """In phase 1, gravity and friction params should have requires_grad=True."""
-        self.model.set_phase(1)
-        for name, param in self.model.gravity_net.named_parameters():
-            assert param.requires_grad, (
-                f"Phase 1: gravity_net.{name}.requires_grad should be True"
-            )
-        for name, param in self.model.friction_net.named_parameters():
-            assert param.requires_grad, (
-                f"Phase 1: friction_net.{name}.requires_grad should be True"
-            )
-
-    def test_phase2_all_trainable(self) -> None:
-        """In phase 2, all parameters must be trainable."""
-        self.model.set_phase(2)
+    def test_all_params_trainable_from_start(self) -> None:
+        """No phase freeze: every parameter trains from epoch 1 (R3)."""
         for name, param in self.model.named_parameters():
             assert param.requires_grad, (
-                f"Phase 2: {name}.requires_grad should be True, but is False"
+                f"{name}.requires_grad should be True (γ-gate, no freeze)"
             )
 
-    def test_invalid_phase_raises(self) -> None:
-        with pytest.raises(ValueError, match="phase must be 1 or 2"):
-            self.model.set_phase(3)
+    def test_gamma_zero_recovers_nominal_physics(self) -> None:
+        """γ=0 ⇒ inertia+Coriolis contribution gated off ⇒ τ̂ ≈ τ_phys + δg + δτ_f.
 
-    def test_phase_property(self) -> None:
-        self.model.set_phase(1)
-        assert self.model.phase == 1
-        self.model.set_phase(2)
-        assert self.model.phase == 2
+        At init δg, δτ_f ≈ 0 too, so τ̂ = τ_phys exactly even with γ=0 — the
+        ramp can safely start at 0 with no discontinuity.
+        """
+        self.model.set_correction_gain(0.0)
+        feat, phys = self._make_features(), self._make_physics()
+        n = _N_JOINTS
+        tau_phys = phys[:, 0:n] + phys[:, n:2*n] + phys[:, 2*n:3*n] + phys[:, 3*n:4*n]
+        max_diff = (self.model(feat, phys) - tau_phys).abs().max().item()
+        assert max_diff < _ATOL_INIT, (
+            f"γ=0 at init should give τ̂=τ_phys, max diff {max_diff:.2e}"
+        )
+
+    def test_gamma_scales_inertia_coriolis_contribution(self) -> None:
+        """The (δM·q̈+δC·q̇) contribution scales linearly with γ."""
+        # Give the inertia net a non-trivial output so the gate is observable.
+        with torch.no_grad():
+            for p in self.model.inertia_net.parameters():
+                p.add_(torch.randn_like(p) * 0.05)
+        feat, phys = self._make_features(), self._make_physics()
+        self.model.set_correction_gain(0.0)
+        _, d0 = self.model.compute_corrections(feat, phys)
+        base = self.model(feat, phys)
+        self.model.set_correction_gain(1.0)
+        full = self.model(feat, phys)
+        self.model.set_correction_gain(0.5)
+        half = self.model(feat, phys)
+        # half should sit ~midway between gated-off and full.
+        mid = 0.5 * (base + full)
+        assert torch.allclose(half, mid, atol=1e-5), "γ does not scale linearly"
+
+    def test_invalid_gamma_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"γ must be"):
+            self.model.set_correction_gain(1.5)
+
+    # ── Structural robustness: SPD inertia + Christoffel passivity ───────────
+
+    def test_corrected_inertia_is_spd(self) -> None:
+        """R2: δM = LLᵀ is PSD ⇒ M̃ = M_nom + δM is SPD (M_nom SPD by physics).
+
+        We verify δM itself is symmetric PSD (eigenvalues ≥ 0); adding the
+        SPD nominal M then keeps M̃ SPD for every parameter value.
+        """
+        assert self.model._inertia_psd, "default EDRModel should be inertia_psd=True"
+        with torch.no_grad():
+            for p in self.model.inertia_net.parameters():
+                p.add_(torch.randn_like(p) * 0.3)   # arbitrary (trained-like) weights
+        q = _rand(_BATCH, _N_JOINTS)
+        dM = self.model.inertia_net.compute_delta_M(q)
+        asym = (dM - dM.transpose(1, 2)).abs().max().item()
+        assert asym < 1e-5, f"δM not symmetric: max|δM-δMᵀ|={asym:.2e}"
+        eigmin = torch.linalg.eigvalsh(dM).min().item()
+        assert eigmin > -1e-5, f"δM not PSD: min eigenvalue {eigmin:.2e}"
+
+    def test_structural_coriolis_is_quadratic_in_qd(self) -> None:
+        """δC·q̇ is the Christoffel contraction Σ_jk c_ijk q̇_j q̇_k, hence
+        exactly *quadratic* in q̇: scaling q̇→αq̇ scales δC·q̇ by α²
+        (centripetal/Coriolis homogeneity — a physical invariant the old
+        independent δC network did not satisfy)."""
+        assert self.model._coriolis_structural
+        with torch.no_grad():
+            for p in self.model.inertia_net.parameters():
+                p.add_(torch.randn_like(p) * 0.2)
+        q  = _rand(_BATCH, _N_JOINTS)
+        qd = _rand(_BATCH, _N_JOINTS)
+        base = self.model._structural_delta_C_qd(q, qd, None)
+        for alpha in (0.5, 2.0, -1.0):
+            scaled = self.model._structural_delta_C_qd(q, alpha * qd, None)
+            assert torch.allclose(scaled, (alpha ** 2) * base, atol=1e-5), (
+                f"δC·q̇ not quadratic in q̇ at α={alpha}"
+            )
+
+    def test_structural_coriolis_zero_for_constant_inertia(self) -> None:
+        """If δM does not depend on q (zero-init final layer ⇒ δM≡0, ∂δM/∂q=0)
+        the Christoffel correction is exactly zero — no spurious Coriolis."""
+        q  = _rand(_BATCH, _N_JOINTS)
+        qd = _rand(_BATCH, _N_JOINTS)
+        out = self.model._structural_delta_C_qd(q, qd, None)   # fresh model: δM≈0
+        # δM final layer is near-zero init (std=1e-4), not exactly 0, so ∂δM/∂q
+        # is ~1e-7 — negligible vs the O(1) physics baseline.
+        assert out.abs().max().item() < 1e-5, (
+            f"Christoffel δC should ≈vanish for q-independent δM, got {out.abs().max():.2e}"
+        )
+
+    def test_skew_symmetry_Mdot_minus_2C(self) -> None:
+        """Passivity: q̇ᵀ (δṀ − 2 δC) q̇ = 0 for the corrected terms.
+
+        δṀ = Σ_k (∂δM/∂q_k) q̇_k.  With δC the Christoffel partner of δM the
+        quadratic form vanishes identically (energy-conserving correction).
+        """
+        from torch.func import jacrev, vmap
+        with torch.no_grad():
+            for p in self.model.inertia_net.parameters():
+                p.add_(torch.randn_like(p) * 0.25)
+        q  = _rand(_BATCH, _N_JOINTS)
+        qd = _rand(_BATCH, _N_JOINTS)
+
+        def _dM(qr):
+            return self.model.inertia_net.compute_delta_M(qr.unsqueeze(0)).squeeze(0)
+        J = vmap(jacrev(_dM))(q)                              # ∂δM_ij/∂q_k
+        dM_dt = torch.einsum("bijk,bk->bij", J, qd)           # δṀ
+        # δC matrix from Christoffel: C_ij = Σ_k c_ijk q̇_k
+        c = 0.5 * (J + J.transpose(2, 3) - J.permute(0, 2, 3, 1))
+        Cmat = torch.einsum("bijk,bk->bij", c, qd)
+        S = dM_dt - 2.0 * Cmat
+        quad = torch.einsum("bi,bij,bj->b", qd, S, qd)        # q̇ᵀ S q̇
+        assert quad.abs().max().item() < 1e-4, (
+            f"passivity violated: max |q̇ᵀ(Ṁ̇−2C)q̇| = {quad.abs().max().item():.2e}"
+        )
 
     # ── Structural properties preserved end-to-end ───────────────────────────
 
@@ -577,15 +654,13 @@ class TestEDRModelProperties:
         )
 
     def test_coriolis_zero_at_zero_velocity_through_model(self) -> None:
-        """Coriolis vanishing at q̇=0 holds through assembled model."""
+        """δC·q̇ vanishes at q̇=0 (structural Christoffel form: quadratic in q̇)."""
         q  = _rand(_BATCH, _N_JOINTS)
         qd = torch.zeros(_BATCH, _N_JOINTS)
-        # Use the model's public feature-construction API — the same one forward() uses.
-        inputs = self.model.build_correction_inputs(q, qd)
-        out = self.model.coriolis_net(inputs["coriolis_input"], qd)
+        out = self.model._structural_delta_C_qd(q, qd, None)
         max_abs = out.abs().max().item()
         assert max_abs < 1e-7, (
-            f"CoriolisCorrection via EDRModel at q̇=0: max output = {max_abs:.2e}"
+            f"structural δC·q̇ at q̇=0: max output = {max_abs:.2e}"
         )
 
     # ── Edge cases ───────────────────────────────────────────────────────────
@@ -635,9 +710,9 @@ class TestEDRModelProperties:
         )
         assert comp["total"] > 0, "Total parameter count is zero"
 
-    def test_repr_contains_phase(self) -> None:
+    def test_repr_contains_gamma(self) -> None:
         r = repr(self.model)
-        assert "phase=" in r, f"EDRModel repr missing 'phase=' field:\n{r}"
+        assert "γ=" in r, f"EDRModel repr missing 'γ=' field:\n{r}"
 
     def test_repr_contains_all_nets(self) -> None:
         r = repr(self.model)
@@ -926,8 +1001,8 @@ class TestSpectralNormRobustness:
         on = self.model.friction_net(-qd, tau_f=tf)
         assert (op + on).abs().max().item() < _ATOL_EXACT
         z = torch.zeros(_BATCH, _N_JOINTS)
-        ci = self.model.build_correction_inputs(q, z, _rand(_BATCH, _N_JOINTS*4))["coriolis_input"]
-        assert self.model.coriolis_net(ci, z).abs().max().item() < 1e-6
+        phys = _rand(_BATCH, _N_JOINTS * 4)
+        assert self.model._structural_delta_C_qd(q, z, phys).abs().max().item() < 1e-6
 
     def test_ema_decay_validated(self) -> None:
         from edr_strategy import _validate_edr_hp
@@ -1070,83 +1145,49 @@ class TestEDRModelWithTrigFeatures:
 
 
 # ===========================================================================
-# Pure-function tests: adaptive phase-2 plateau detection
+# Pure-function tests: smooth capacity-gate ramp γ(epoch) (R3)
 # ===========================================================================
 
 
-class TestShouldTransitionToPhase2:
-    """Exhaustively exercise the plateau-detection pure function."""
+class TestCorrectionGainRamp:
+    """The γ ramp replaces the two-phase plateau detector — must be a smooth,
+    monotone 0→1 cosine that then stays saturated (no discontinuity)."""
 
-    _HP_DEFAULT = {
-        "phase2_plateau_window":    5,
-        "phase2_plateau_threshold": 5e-3,
-        "phase2_min_epoch":         3,
-        "phase2_max_epoch":         25,
-    }
+    def test_starts_at_zero(self) -> None:
+        assert _correction_gain(1, 1000, 0.30) == 0.0
 
-    def test_no_transition_in_phase_2(self) -> None:
-        """If we're already in phase 2, never recommend another transition."""
-        should, _ = _should_transition_to_phase2([0.1]*10, self._HP_DEFAULT, 30, current_phase=2)
-        assert should is False
+    def test_saturates_at_one(self) -> None:
+        # ramp ends at ceil(0.30*1000)=300 → γ=1 from epoch 301 onward.
+        assert _correction_gain(301, 1000, 0.30) == 1.0
+        assert _correction_gain(1000, 1000, 0.30) == 1.0
 
-    def test_manual_override_triggers(self) -> None:
-        """When phase2_start_epoch is set (int), it wins over adaptive logic."""
-        hp = {"phase2_start_epoch": 7}
-        assert _should_transition_to_phase2([], hp, 6, 1) == (False,  "before manual phase2_start_epoch") or \
-               _should_transition_to_phase2([], hp, 6, 1)[0] is False
-        should, reason = _should_transition_to_phase2([], hp, 7, 1)
-        assert should is True
-        assert "manual override" in reason
+    def test_monotone_non_decreasing(self) -> None:
+        vals = [_correction_gain(e, 1000, 0.30) for e in range(1, 1001)]
+        assert all(b >= a - 1e-12 for a, b in zip(vals, vals[1:])), (
+            "γ ramp must be monotone non-decreasing"
+        )
+        assert all(0.0 <= v <= 1.0 for v in vals)
 
-    def test_before_min_epoch_holds(self) -> None:
-        """Never trigger before min_epoch regardless of history."""
-        hist = [0.10, 0.099, 0.0985]   # clearly plateauing
-        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 2, 1)
-        assert should is False
-        assert "min_epoch" in reason
+    def test_midpoint_is_half(self) -> None:
+        # Half-cosine: at progress=0.5 (epoch ≈ 1 + 0.5*ramp) γ = 0.5.
+        ramp = 300  # ceil(0.30*1000)
+        mid = _correction_gain(1 + ramp // 2, 1000, 0.30)
+        assert abs(mid - 0.5) < 0.02, f"γ at ramp midpoint should be ~0.5, got {mid}"
 
-    def test_insufficient_history(self) -> None:
-        """If we don't yet have window+1 points of history, defer."""
-        hist = [0.09, 0.088, 0.087]    # only 3 points, window=5 → need 6
-        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 4, 1)
-        assert should is False
-        assert "not enough history" in reason
+    def test_no_curriculum_when_frac_zero(self) -> None:
+        """ramp_frac<=0 ⇒ γ≡1 (full capacity from epoch 1)."""
+        assert _correction_gain(1, 1000, 0.0) == 1.0
+        assert _correction_gain(1, 1000, -0.5) == 1.0
 
-    def test_still_improving_no_trigger(self) -> None:
-        """If val_rmse is still dropping >=0.5% over window, don't transition."""
-        # 10% improvement over 5 epochs — well above 0.5% threshold.
-        hist = [0.100, 0.098, 0.096, 0.094, 0.092, 0.090]
-        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 7, 1)
-        assert should is False
-        assert "still improving" in reason
-
-    def test_plateau_triggers(self) -> None:
-        """Flat val_rmse over window → transition triggers."""
-        hist = [0.090, 0.0900, 0.0900, 0.0900, 0.0900, 0.0900]
-        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 7, 1)
-        assert should is True
-        assert "plateau" in reason
-
-    def test_slight_improvement_below_threshold_triggers(self) -> None:
-        """Improvement below 0.5% counts as plateau."""
-        hist = [0.0900, 0.0899, 0.0898, 0.0898, 0.0898, 0.08982]  # ~0.02%
-        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 7, 1)
-        assert should is True
-
-    def test_safety_fallback_fires_at_max_epoch(self) -> None:
-        """At phase2_max_epoch, always force transition even if still improving."""
-        # Still rapidly improving, but at epoch == max_epoch.
-        hist = [0.10, 0.09, 0.08, 0.07, 0.06, 0.05]
-        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 25, 1)
-        assert should is True
-        assert "safety fallback" in reason
-
-    def test_non_positive_reference_guards(self) -> None:
-        """Degenerate val_rmse=0 in history must not divide by zero."""
-        hist = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        should, reason = _should_transition_to_phase2(hist, self._HP_DEFAULT, 7, 1)
-        assert should is False
-        assert "non-positive" in reason
+    def test_continuous_no_jump(self) -> None:
+        """Successive-epoch γ deltas are tiny — no phase-style discontinuity."""
+        deltas = [
+            _correction_gain(e + 1, 1000, 0.30) - _correction_gain(e, 1000, 0.30)
+            for e in range(1, 1000)
+        ]
+        assert max(deltas) < 0.02, (
+            f"γ ramp must be smooth; largest single-epoch jump {max(deltas):.4f}"
+        )
 
 
 # ===========================================================================

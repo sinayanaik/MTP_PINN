@@ -7,33 +7,33 @@ so no changes to pipeline.py or checkpointing.py are required.
 
 Training additions specific to EDR
 -----------------------------------
-1. **No AMP (Automatic Mixed Precision)**: The passivity regularisation loss
-   requires Jacobian computation via autograd; AMP (float16) is incompatible
-   with reliable Jacobian backprop.  The scaler passed by the pipeline is
+1. **No AMP (Automatic Mixed Precision)**: the structural-Coriolis Jacobian
+   (∂δM/∂q) is computed via autograd; AMP (float16) is incompatible with
+   reliable Jacobian backprop.  The scaler passed by the pipeline is
    unconditionally ignored — EDR always trains in float32.
 
-2. **Two-phase curriculum**: At epoch ``phase2_start_epoch`` the model's
-   inertia and Coriolis correction networks are unfrozen.  The optimizer
-   already has parameter groups for both phases; only the phase state
-   changes in the model.
+2. **Smooth capacity gate γ (R3)**: a scalar γ ∈ [0,1] multiplies the
+   inertia+Coriolis contribution and is cosine-ramped 0→1 over the first
+   ``correction_gain_ramp_frac`` of the epoch budget.  This gives the old
+   phase-1 benefit (easy gravity/friction residuals absorbed first) WITHOUT
+   freezing parameters or resetting the optimizer — Adam momentum stays
+   continuous so the val curve descends smoothly over a long horizon (the
+   two-phase plateau curriculum and its optimizer shock were removed).
 
 3. **Composite loss**:
-       L = L_data  +  λ_corr · L_correction  [+  λ_pass · L_passivity]
+       L = L_data  +  λ_corr · L_correction
 
    - L_data:       Per-joint MSE with **uniform** weights (matches ``val_rmse`` / macro RMSE).
    - L_correction: Correction magnitude regularisation — keeps δ-terms small
                    unless the data strongly disagrees with nominal physics
                    (Occam's razor).  The inertia Frobenius term is optionally
                    scaled by ``1/n_joints²`` (``correction_reg_inertia_normalize``).
-   - L_passivity:  Skew-symmetry of (Ṁ − 2C).  Disabled by default; enable
-                   via ``enable_passivity_loss=True`` in hp.  Expensive to
-                   compute (requires autograd Jacobian), recommended for second
-                   iteration.
+   Passivity is now structural (R1: δC is the Christoffel partner of δM ⇒
+   (Ṁ̃−2C̃) skew-symmetric by construction), so the old soft passivity loss
+   is redundant and disabled.
 
-4. **Optimizer param groups**: Two groups per phase so that frozen phase-1
-   parameters (inertia/Coriolis nets) receive a minimal learning rate
-   during phase 1 rather than zero LR (which would prevent their state dict
-   from being tracked by AdamW momentum buffers on unfreeze).
+4. **Single-group optimizer**: with the γ gate replacing the phase freeze,
+   every parameter trains from epoch 1 under one continuous AdamW group.
 
 5. **Joint weights (all 1.0 for EDR)**: Plain/residual trainers weight J2×2.5;
    EDR uses **equal per-joint weights** so the data MSE matches the scale of
@@ -117,6 +117,14 @@ DEFAULT_EXHAUSTIVE_EDR: dict[str, Any] = {
     "learning_rate":          3e-4,
     "optimizer":              "adamw",
     "lr_scheduler":           "warmup_cosine",
+    # R3 — smooth capacity gate γ replaces the two-phase freeze/unfreeze.
+    # γ cosine-ramps 0→1 over the first ``correction_gain_ramp_frac`` of the
+    # epoch budget (then stays 1.0).  No optimizer discontinuity.
+    "correction_gain_ramp_frac": 0.30,
+    # R1 (Christoffel δC) is an ABLATION flag — default OFF: the proven
+    # "corrected-P1" structure (independent element-wise δC, non-PSD δM) is
+    # EDR's empirical best; forcing structure underfits (2026-05-19).
+    "coriolis_structural":    False,
     "weight_decay":           1e-5,
     "dropout":                0.0,       # Not used; kept for registry compatibility.
     "activation":             "silu",
@@ -140,15 +148,14 @@ DEFAULT_EXHAUSTIVE_EDR: dict[str, Any] = {
     "inertia_hidden":         [64, 64],
     "coriolis_hidden":        [64, 64],
     "friction_hidden":        [32, 32],
-    # Phase-2 curriculum: adaptive plateau detection on val_rmse.
-    # If ``phase2_start_epoch`` is set (int > 0), it forces the transition at
-    # that epoch (back-compat / manual override).  If set to None, the
-    # transition is triggered adaptively when phase-1 val_rmse plateaus.
+    # DEPRECATED (R3): the two-phase plateau curriculum was replaced by the
+    # smooth γ gate (``correction_gain_ramp_frac``).  These keys are retained
+    # only so old checkpoints/metadata still deserialise; they are inert.
     "phase2_start_epoch":     None,
-    "phase2_plateau_window":  5,        # Rolling window over which to measure improvement.
-    "phase2_plateau_threshold": 5e-3,   # Relative improvement threshold (0.5%).
-    "phase2_min_epoch":       3,        # Never trigger before this epoch (noise at start).
-    "phase2_max_epoch":       25,       # Safety fallback: force transition no later than this.
+    "phase2_plateau_window":  5,
+    "phase2_plateau_threshold": 5e-3,
+    "phase2_min_epoch":       3,
+    "phase2_max_epoch":       25,
     "lambda_correction_reg":  5e-3,      # Scalar fallback (used when the dict below is absent).
     # Phase 5: per-component correction-reg (capacity-aware).  None ⇒ use the
     # scalar above for all four (exact back-compat).  A dict {g,M,C,f} lets
@@ -162,94 +169,42 @@ DEFAULT_EXHAUSTIVE_EDR: dict[str, Any] = {
     "correction_reg_inertia_normalize": True,  # Scale ||δM||_F² by 1/n² vs vector terms.
     "correction_dropout":     0.08,      # Dropout after hidden activations (0 = off).
     "use_friction_qdd":       False,     # Feed |q̈| to friction MLP (backward compat default).
-    "use_phys_cond":          True,      # Phase 1: thread analytic decomposition into δ-nets.
-    "coriolis_matrix_form":   True,      # Phase 2: δC = B(q,q̇)·q̇ (correct, cross-joint).
-    "friction_form":          "stribeck",  # Phase 4: Coulomb+Stribeck+viscous (vs "mlp").
-    "inertia_psd":            False,     # A2: δM=LLᵀ (PSD) when True; else unconstrained-symmetric.
+    "use_phys_cond":          True,      # Thread analytic decomposition into δ-nets.
+    "coriolis_matrix_form":   True,      # Only used when coriolis_structural=False (ablation).
+    "friction_form":          "stribeck",  # Coulomb+Stribeck+viscous (vs "mlp").
+    "inertia_psd":            False,     # R2 ablation OFF: symmetric δM can also reduce M (corrected-P1).
     "ema_decay":              0.0,       # Per-epoch weight-EMA (0 = off). >0 ⇒ EMA-vs-raw val selection.
     "spectral_norm":          False,     # Lipschitz-constrain δ-net hidden layers (math robustness).
-    "enable_passivity_loss":  False,     # Passivity (Ṁ−2C skew-symmetry) loss.
+    "enable_passivity_loss":  False,     # Soft passivity loss (now redundant under coriolis_structural).
     "lambda_passivity":       1e-2,      # Passivity loss weight (if enabled).
-    "frozen_lr_ratio":        0.7,       # LR multiplier for inertia/Coriolis group (phase 1 and 2).
     "print_every":            10,        # Pipeline: log epoch INFO every N epochs (see pipeline.py).
 }
 
 
 # ===========================================================================
-# Adaptive phase-2 plateau detection (pure function — easily unit-tested)
+# Smooth capacity gate γ(epoch) — replaces the two-phase plateau curriculum
 # ===========================================================================
 
-def _should_transition_to_phase2(
-    val_rmse_history: list[float],
-    hp: dict[str, Any],
-    current_epoch: int,
-    current_phase: int,
-) -> tuple[bool, str]:
-    """Decide whether the training loop should switch from phase 1 to phase 2.
+def _correction_gain(epoch: int, total_epochs: int, ramp_frac: float) -> float:
+    """Cosine ramp γ ∈ [0, 1] for the inertia+Coriolis capacity gate (R3).
 
-    The decision is based on the recent val_rmse history.  Phase 2 is triggered
-    when either (a) the sliding-window relative improvement falls below a
-    threshold, or (b) a safety-fallback epoch cap is reached.
+    γ = 0 at epoch 1, rises on a half-cosine to 1.0 at
+    ``ceil(ramp_frac · total_epochs)``, then stays 1.0.  This gives the old
+    phase-1 benefit (gravity/friction absorb the easy residuals first) with no
+    optimizer discontinuity — all parameters train from epoch 1, Adam momentum
+    stays continuous, and the val curve descends smoothly so training keeps
+    improving for hundreds of epochs instead of early-stopping on a shock.
 
-    Parameters
-    ----------
-    val_rmse_history:
-        Ordered list of val_rmse observations, oldest first.  Typically one
-        entry per completed training epoch.
-    hp:
-        Hyperparameter dict.  Recognised keys:
-        - ``phase2_start_epoch``      — if an int, forces transition at that epoch (override).
-        - ``phase2_plateau_window``   — sliding-window size W (default 5).
-        - ``phase2_plateau_threshold``— relative improvement threshold (default 5e-3).
-        - ``phase2_min_epoch``        — never trigger before this epoch (default 3).
-        - ``phase2_max_epoch``        — safety fallback: force at this epoch (default 25).
-    current_epoch:
-        The 1-based epoch index that is about to start.  The history should
-        contain one entry per already-completed epoch (so len(history) =
-        current_epoch - 1 at the top of epoch ``current_epoch``).
-    current_phase:
-        The model's current phase.  No transition is recommended if already
-        in phase 2.
-
-    Returns
-    -------
-    (should_transition, reason) — reason is a short human-readable string.
+    ``ramp_frac <= 0`` ⇒ γ ≡ 1.0 (no curriculum; full capacity from epoch 1).
     """
-    if current_phase != 1:
-        return (False, "already in phase 2")
-
-    # Manual override: phase2_start_epoch forces a fixed schedule.
-    override = hp.get("phase2_start_epoch")
-    if override is not None:
-        if current_epoch >= int(override):
-            return (True, f"manual override (phase2_start_epoch={int(override)})")
-        return (False, "before manual phase2_start_epoch")
-
-    min_epoch = int(hp.get("phase2_min_epoch", 3))
-    max_epoch = int(hp.get("phase2_max_epoch", 25))
-    window    = int(hp.get("phase2_plateau_window", 5))
-    threshold = float(hp.get("phase2_plateau_threshold", 5e-3))
-
-    # Safety fallback — force transition at max_epoch even without plateau.
-    if current_epoch >= max_epoch:
-        return (True, f"safety fallback at max_epoch={max_epoch}")
-
-    # Minimum length guard — avoid triggering on early-epoch noise.
-    if current_epoch < min_epoch:
-        return (False, f"before min_epoch={min_epoch}")
-
-    # Need at least ``window+1`` points to measure improvement across W epochs.
-    if len(val_rmse_history) < window + 1:
-        return (False, f"not enough history (need {window + 1}, have {len(val_rmse_history)})")
-
-    old = val_rmse_history[-(window + 1)]
-    new = val_rmse_history[-1]
-    if old <= 0.0:
-        return (False, "non-positive reference val_rmse")
-    rel_improvement = (old - new) / old
-    if rel_improvement < threshold:
-        return (True, f"plateau: rel_improvement={rel_improvement:.4f} < {threshold}")
-    return (False, f"still improving: rel_improvement={rel_improvement:.4f}")
+    rf = float(ramp_frac)
+    if rf <= 0.0:
+        return 1.0
+    ramp_epochs = max(1, int(math.ceil(rf * max(1, int(total_epochs)))))
+    if epoch >= ramp_epochs + 1:
+        return 1.0
+    progress = min(1.0, max(0.0, (epoch - 1) / float(ramp_epochs)))
+    return 0.5 * (1.0 - math.cos(math.pi * progress))
 
 # Hyperparameter keys to embed in the run ID string.
 RUN_ID_KEYS_EDR: list[tuple[str, str]] = [
@@ -258,7 +213,6 @@ RUN_ID_KEYS_EDR: list[tuple[str, str]] = [
     ("learning_rate",        "lr"),
     ("weight_decay",         "wd"),
     ("batch_size",           "bs"),
-    ("phase2_start_epoch",   "ph2"),
     ("lambda_correction_reg","creg"),
     # Sweep disambiguators — without these, distinct width/dropout/friction
     # configs collide in the run-dir name and SKIP_EXISTING wrongly skips them.
@@ -266,21 +220,13 @@ RUN_ID_KEYS_EDR: list[tuple[str, str]] = [
     ("correction_dropout",   "cdo"),
     ("use_friction_qdd",     "fqdd"),
     ("use_phys_cond",        "pc"),
+    ("coriolis_structural",  "cst"),
     ("coriolis_matrix_form", "cmf"),
+    ("correction_gain_ramp_frac", "gr"),
     ("lambda_correction_decay", "lcd"),
     ("joint_loss_weights",   "jw"),
     ("friction_form",        "ff"),
     ("inertia_psd",          "psd"),
-    # B4: distinct phase-2 schedules / frozen-LR previously aliased in the
-    # run-dir name (SKIP_EXISTING itself is safe — it diffs the full hp — but
-    # the dir name was ambiguous for analysis).  All scalars; _fmt_hp_value
-    # handles them.  (Dict HP lambda_correction_reg_per_component is kept OUT
-    # of RUN_ID on purpose — its identity is covered by the full-hp compare.)
-    ("phase2_min_epoch",        "p2min"),
-    ("phase2_max_epoch",        "p2max"),
-    ("phase2_plateau_window",   "p2w"),
-    ("phase2_plateau_threshold","p2t"),
-    ("frozen_lr_ratio",         "flr"),
     ("ema_decay",               "ema"),
     ("spectral_norm",           "sn"),
 ]
@@ -461,11 +407,16 @@ def _validate_edr_hp(hp: dict[str, Any]) -> None:
     _ed = float(hp.get("ema_decay", 0.0) or 0.0)
     if not 0.0 <= _ed < 1.0:
         raise ValueError(f"[EDR] ema_decay must be in [0, 1), got {_ed!r}")
-    for _k in ("use_phys_cond", "coriolis_matrix_form", "inertia_psd",
-               "use_friction_qdd", "spectral_norm"):
+    for _k in ("use_phys_cond", "coriolis_matrix_form", "coriolis_structural",
+               "inertia_psd", "use_friction_qdd", "spectral_norm"):
         _v = hp.get(_k, False)
         if not isinstance(_v, (bool,)) and _v not in (0, 1, True, False):
             raise ValueError(f"[EDR] {_k} must be boolean, got {_v!r}")
+    _gr = float(hp.get("correction_gain_ramp_frac", 0.30))
+    if not 0.0 <= _gr < 1.0:
+        raise ValueError(
+            f"[EDR] correction_gain_ramp_frac must be in [0, 1), got {_gr!r}"
+        )
 
 
 def _make_model_edr(device: torch.device, hp: dict[str, Any]) -> EDRModel:
@@ -477,12 +428,13 @@ def _make_model_edr(device: torch.device, hp: dict[str, Any]) -> EDRModel:
         Target torch device.
     hp:
         Hyperparameter dict.  Recognised keys: gravity_hidden, inertia_hidden,
-        coriolis_hidden, friction_hidden, activation, phase2_start_epoch.
+        coriolis_hidden, friction_hidden, activation, coriolis_structural.
 
     Returns
     -------
     EDRModel
-        Zero-initialised model moved to ``device``, in phase 1.
+        Zero-initialised model moved to ``device`` (γ defaults to 1.0; the
+        training strategy ramps it from 0 over early epochs).
 
     Raises
     ------
@@ -515,8 +467,9 @@ def _make_model_edr(device: torch.device, hp: dict[str, Any]) -> EDRModel:
         use_friction_qdd=bool(hp.get("use_friction_qdd", False)),
         use_phys_cond=bool(hp.get("use_phys_cond", False)),
         coriolis_matrix_form=bool(hp.get("coriolis_matrix_form", True)),
+        coriolis_structural=bool(hp.get("coriolis_structural", True)),
         friction_form=str(hp.get("friction_form", "mlp")),
-        inertia_psd=bool(hp.get("inertia_psd", False)),
+        inertia_psd=bool(hp.get("inertia_psd", True)),
         spectral_norm=bool(hp.get("spectral_norm", False)),
     )
     return model.to(device)
@@ -527,50 +480,30 @@ def _make_model_edr(device: torch.device, hp: dict[str, Any]) -> EDRModel:
 # ===========================================================================
 
 def _build_optimizer_edr(model: EDRModel, hp: dict[str, Any]) -> AdamW:
-    """Construct AdamW with two parameter groups.
+    """Construct a single-group AdamW over all EDR parameters (R3).
 
-    Group 0 — phase-1-active (gravity + friction):  full learning rate.
-    Group 1 — phase-1-frozen (inertia + Coriolis):  reduced learning rate.
-
-    Using a non-zero (but reduced) LR for the frozen-phase group ensures
-    that AdamW's momentum buffers are maintained during phase 1.  When
-    set_phase(2) is called and these parameters are unfrozen, they can begin
-    training immediately with warm momentum estimates.
+    The old two-group split (reduced LR for the "frozen" inertia/Coriolis
+    group) existed only to keep Adam momentum warm across the hard phase-1→2
+    unfreeze.  With the phase curriculum replaced by the smooth γ gate, every
+    parameter trains from epoch 1 with a single, continuous optimizer — no
+    momentum reset, no LR jump — so the loss can descend smoothly over the
+    full long-horizon schedule.
 
     Parameters
     ----------
     model:
         The EDRModel to optimise.
     hp:
-        Hyperparameter dict.  Recognised keys: learning_rate, weight_decay,
-        frozen_lr_ratio.
+        Hyperparameter dict.  Recognised keys: learning_rate, weight_decay.
 
     Returns
     -------
     AdamW
         Configured optimizer instance.
     """
-    lr        = float(hp.get("learning_rate",  3e-4))
-    wd        = float(hp.get("weight_decay",   1e-5))
-    frozen_lr = lr * float(hp.get("frozen_lr_ratio", 0.1))
-
-    # Phase-1-active parameters.
-    active_params = (
-        list(model.gravity_net.parameters())
-        + list(model.friction_net.parameters())
-    )
-    # Phase-1-frozen parameters (lower LR during phase 1, same as active in phase 2).
-    frozen_params = (
-        list(model.inertia_net.parameters())
-        + list(model.coriolis_net.parameters())
-    )
-
-    return AdamW(
-        [
-            {"params": active_params, "lr": lr,        "weight_decay": wd},
-            {"params": frozen_params, "lr": frozen_lr, "weight_decay": wd},
-        ]
-    )
+    lr = float(hp.get("learning_rate", 3e-4))
+    wd = float(hp.get("weight_decay",  1e-5))
+    return AdamW(model.parameters(), lr=lr, weight_decay=wd)
 
 
 # ===========================================================================
@@ -591,9 +524,9 @@ def _train_epoch_edr(
 
     EDR-specific behaviour
     ----------------------
-    • AMP is disabled unconditionally (passivity loss requires Jacobian
-      computation which is unreliable under float16).
-    • At ``phase2_start_epoch`` the model is switched to phase 2.
+    • AMP is disabled unconditionally (the structural-Coriolis Jacobian is
+      unreliable under float16).
+    • The capacity gate γ is set from the cosine ramp for this epoch.
     • The composite EDR loss is used instead of simple MSE.
 
     Parameters
@@ -624,33 +557,22 @@ def _train_epoch_edr(
         pipeline derive a physical-units macro RMSE, and ``extras`` carries
         the per-component correction telemetry that the shared pipeline logs.
     """
-    # ── Adaptive phase-2 transition (plateau detection) ──────────────────
-    should_switch, reason = _should_transition_to_phase2(
-        val_rmse_history=model.val_rmse_history,
-        hp=hp,
-        current_epoch=epoch,
-        current_phase=model.phase,
+    # ── Smooth capacity gate γ (R3 — replaces the two-phase shock) ───────
+    # γ cosine-ramps 0→1 over the first ``correction_gain_ramp_frac`` of the
+    # epoch budget, then stays 1.0.  No freeze, no Adam reset, no LR jump:
+    # the optimizer is fully continuous so the val curve descends smoothly
+    # and training keeps improving for hundreds of epochs.
+    _model_t = model._orig_mod if hasattr(model, "_orig_mod") else model
+    _gamma_prev = float(_model_t.correction_gain)
+    _gamma = _correction_gain(
+        epoch,
+        int(hp.get("epochs", 1000)),
+        float(hp.get("correction_gain_ramp_frac", 0.30)),
     )
-    if should_switch:
-        model.set_phase(2)
-        # Give inertia/Coriolis the same LR as gravity/friction.  Adam's
-        # adaptive denominator naturally yields conservative initial steps
-        # when momentum buffers are cold.
-        base_lr = optimizer.param_groups[0]["lr"]
-        optimizer.param_groups[1]["lr"] = base_lr
-        # Clear stale Adam state for newly unfrozen params so they start
-        # fresh rather than with momentum from near-zero phase-1 gradients.
-        for param in (
-            list(model.inertia_net.parameters())
-            + list(model.coriolis_net.parameters())
-        ):
-            if param in optimizer.state:
-                del optimizer.state[param]
-        logger.info(
-            "EDR curriculum: switching to phase 2 at epoch %d — %s "
-            "(LR=%.2e, Adam state reset).",
-            epoch, reason, base_lr,
-        )
+    _model_t.set_correction_gain(_gamma)
+    # Log at the first epoch and at the epoch γ first reaches full capacity.
+    if epoch == 1 or (_gamma >= 1.0 - 1e-9 and _gamma_prev < 1.0 - 1e-9):
+        logger.info("EDR γ-gate: epoch %d → γ=%.4f", epoch, _gamma)
 
     model.train()
 
@@ -667,6 +589,17 @@ def _train_epoch_edr(
     _norm_inertia_frob = bool(hp.get("correction_reg_inertia_normalize", True))
     _use_pass   = bool(hp.get("enable_passivity_loss",   False))
     _lambda_pass= float(hp.get("lambda_passivity",       1e-2))
+    if _use_pass and getattr(_model_t, "_coriolis_structural", True):
+        # Under structural Coriolis the corrected (M̃,C̃) is a consistent
+        # Christoffel pair ⇒ (Ṁ̃−2C̃) is skew-symmetric *exactly*, so the soft
+        # passivity loss is redundant (and coriolis_net is None). Fail loudly
+        # rather than silently mixing an exact guarantee with a crude penalty.
+        raise ValueError(
+            "[EDR] enable_passivity_loss is redundant with "
+            "coriolis_structural=True (passivity holds by construction). "
+            "Disable enable_passivity_loss, or set coriolis_structural=False "
+            "for the legacy independent-δC ablation."
+        )
     if _use_pass and getattr(model, "_use_phys_cond", False):
         # The passivity helper rebuilds correction inputs without a physics
         # tensor; under phys-conditioning the δC input dim would mismatch.
@@ -981,14 +914,12 @@ def _edr_physics_sched_metadata(hp: dict[str, Any]) -> dict[str, Any]:
         is None when adaptive plateau detection is used (the default).
     """
     _cd = hp.get("correction_dropout", hp.get("dropout", 0.0))
-    _p2 = hp.get("phase2_start_epoch", None)
     return {
-        "mode":                   "edr_two_phase_curriculum",
-        "phase2_start_epoch":     (int(_p2) if _p2 is not None else None),
-        "phase2_plateau_window":  int(hp.get("phase2_plateau_window",    5)),
-        "phase2_plateau_threshold": float(hp.get("phase2_plateau_threshold", 5e-3)),
-        "phase2_min_epoch":       int(hp.get("phase2_min_epoch",         3)),
-        "phase2_max_epoch":       int(hp.get("phase2_max_epoch",        25)),
+        "mode":                   "edr_smooth_gamma_gate",
+        "correction_gain_ramp_frac": float(
+            hp.get("correction_gain_ramp_frac", 0.30)
+        ),
+        "coriolis_structural":    bool(hp.get("coriolis_structural", True)),
         "lambda_correction_reg":  float(hp.get("lambda_correction_reg", 1e-3)),
         "correction_reg_inertia_normalize": bool(
             hp.get("correction_reg_inertia_normalize", True)
@@ -1004,7 +935,7 @@ def _edr_physics_sched_metadata(hp: dict[str, Any]) -> dict[str, Any]:
             str(hp.get("lambda_correction_decay", "none")),
         "joint_loss_weights":     hp.get("joint_loss_weights", None),
         "friction_form":          str(hp.get("friction_form", "mlp")),
-        "inertia_psd":            bool(hp.get("inertia_psd", False)),
+        "inertia_psd":            bool(hp.get("inertia_psd", True)),
         "spectral_norm":          bool(hp.get("spectral_norm", False)),
         "ema_decay":              float(hp.get("ema_decay", 0.0) or 0.0),
     }

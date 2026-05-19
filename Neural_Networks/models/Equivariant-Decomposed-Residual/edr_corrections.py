@@ -392,6 +392,18 @@ class InertiaCorrection(nn.Module):
         # Register as buffers so they are moved to the correct device with the module.
         self.register_buffer("_tri_rows", rows, persistent=False)
         self.register_buffer("_tri_cols", cols, persistent=False)
+        # vmap-safe scatter via fixed basis tensors (no in-place index_put — the
+        # Christoffel-Coriolis Jacobian differentiates δM under torch.func.vmap,
+        # which forbids index_put_ where the source is vmapped).
+        n = self.n_joints
+        _E_low = torch.zeros(self.n_tri, n, n)          # L basis (lower-tri)
+        _E_sym = torch.zeros(self.n_tri, n, n)          # symmetric basis
+        for _k, (_r, _c) in enumerate(zip(rows.tolist(), cols.tolist())):
+            _E_low[_k, _r, _c] = 1.0
+            _E_sym[_k, _r, _c] = 1.0
+            _E_sym[_k, _c, _r] = 1.0                     # idempotent on diagonal
+        self.register_buffer("_E_low", _E_low, persistent=False)
+        self.register_buffer("_E_sym", _E_sym, persistent=False)
         self.hparams = {
             "n_joints":     self.n_joints,
             "in_dim":       self.in_dim,
@@ -430,28 +442,18 @@ class InertiaCorrection(nn.Module):
         delta_M:
             Symmetric correction matrices, shape (B, n_joints, n_joints).
         """
-        B = q_features.shape[0]
         tri_entries = self.net(q_features)   # (B, n_tri)
+        # Out-of-place basis-tensor scatter (vmap/jacrev-safe — see __init__).
+        _E_low = self._E_low.to(tri_entries.dtype)
         if self._psd:
-            # Build lower-triangular L from the n_tri entries, δM = L Lᵀ.
+            # L = Σ_k entry_k · E_low[k]  →  δM = L Lᵀ.
             # Symmetric AND PSD by construction; near-zero init preserved
             # (entries ≈ 0 ⇒ L ≈ 0 ⇒ L Lᵀ ≈ 0).
-            L = torch.zeros(
-                B, self.n_joints, self.n_joints,
-                dtype=q_features.dtype, device=q_features.device,
-            )
-            L[:, self._tri_rows, self._tri_cols] = tri_entries
-            return torch.bmm(L, L.transpose(1, 2))
-        delta_M = torch.zeros(
-            B, self.n_joints, self.n_joints,
-            dtype=q_features.dtype,
-            device=q_features.device,
-        )
-        # Scatter into both symmetric positions.  Diagonal (rows==cols) gets
-        # written twice with the same value — a no-op for correctness.
-        delta_M[:, self._tri_rows, self._tri_cols] = tri_entries
-        delta_M[:, self._tri_cols, self._tri_rows] = tri_entries
-        return delta_M
+            L = torch.einsum("bk,kij->bij", tri_entries, _E_low)
+            return torch.matmul(L, L.transpose(-1, -2))
+        # δM = Σ_k entry_k · E_sym[k]  (exactly symmetric; diagonal written once).
+        _E_sym = self._E_sym.to(tri_entries.dtype)
+        return torch.einsum("bk,kij->bij", tri_entries, _E_sym)
 
     def forward(self, q_features: torch.Tensor, qdd: torch.Tensor) -> torch.Tensor:
         """Compute inertia correction contribution  δM(q) @ q̈.
@@ -819,7 +821,7 @@ class FrictionCorrection(nn.Module):
 def correction_parameter_summary(
     gravity:  GravityCorrection,
     inertia:  InertiaCorrection,
-    coriolis: CoriolisCorrection,
+    coriolis: CoriolisCorrection | None,
     friction: FrictionCorrection,
 ) -> dict[str, int]:
     """Return a dict mapping component name → trainable parameter count.
@@ -837,7 +839,9 @@ def correction_parameter_summary(
     counts = {
         "gravity":  gravity.count_parameters(),
         "inertia":  inertia.count_parameters(),
-        "coriolis": coriolis.count_parameters(),
+        # coriolis is None in the structural mode (δC derived from δM via
+        # Christoffel symbols — zero extra parameters).
+        "coriolis": 0 if coriolis is None else coriolis.count_parameters(),
         "friction": friction.count_parameters(),
     }
     counts["total"] = sum(counts.values())

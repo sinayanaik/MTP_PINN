@@ -133,8 +133,9 @@ class EDRModel(nn.Module):
         use_friction_qdd: bool = False,
         use_phys_cond:    bool = False,
         coriolis_matrix_form: bool = True,
+        coriolis_structural: bool = True,
         friction_form:    str = "mlp",
-        inertia_psd:      bool = False,
+        inertia_psd:      bool = True,
         spectral_norm:    bool = False,
     ) -> None:
         super().__init__()
@@ -167,14 +168,32 @@ class EDRModel(nn.Module):
         # ``build_correction_inputs``.
         self._use_phys_cond = bool(use_phys_cond)
         _pc_extra = self.n_joints if self._use_phys_cond else 0
-        # Coriolis correction structure: B(q,q̇)·q̇ matrix form (correct,
-        # cross-joint) vs legacy element-wise q̇⊙MLP.  See CoriolisCorrection.
+        # Coriolis correction structure.
+        #   coriolis_structural=True (default, R1): δC is NOT an independent
+        #     network — it is *derived* from the SAME inertia correction δM(q)
+        #     via the Christoffel symbols of the first kind:
+        #         δc_ijk = ½(∂δM_ij/∂q_k + ∂δM_ik/∂q_j − ∂δM_jk/∂q_i)
+        #         (δC·q̇)_i = Σ_jk δc_ijk q̇_j q̇_k
+        #     This makes the corrected (M̃,C̃) a *consistent* rigid-body pair, so
+        #     (Ṁ̃ − 2C̃) is skew-symmetric by construction (passivity holds
+        #     exactly, not via a soft penalty) and the high-capacity independent
+        #     δC network — the dominant val→test memorisation channel — is
+        #     removed entirely.  No coriolis_net is built in this mode.
+        #   coriolis_structural=False: legacy independent CoriolisCorrection
+        #     (matrix_form below selects B(q,q̇)·q̇ vs element-wise q̇⊙MLP).
+        #     Kept only for ablation / back-compat.
+        self._coriolis_structural = bool(coriolis_structural)
         self._coriolis_matrix_form = bool(coriolis_matrix_form)
         # Friction correction structure: "mlp" (legacy) or "stribeck"
         # (structured Coulomb+Stribeck+viscous).  See FrictionCorrection.
         self._friction_form = str(friction_form)
-        # δM = L Lᵀ (symmetric + PSD) when True; unconstrained-symmetric when
-        # False (default — can also reduce over-estimated nominal inertia).
+        # δM = L Lᵀ (symmetric + PSD) when True (R2 default).  The nominal
+        # M(q) from Pinocchio is SPD for any rigid body, so M̃ = M + δM with a
+        # PSD δM is *guaranteed SPD by construction* — the corrected inertia is
+        # always a valid inertia matrix (the data interface exposes only
+        # τ_M = M·q̈, never the M matrix, so a PSD δM is the strongest SPD
+        # guarantee obtainable; an indefinite δM could make M̃ non-physical and
+        # is free to memorise residual noise → the val→test gap).
         self._inertia_psd = bool(inertia_psd)
         # Spectral-norm (Lipschitz cap) on δ-net HIDDEN layers — principled
         # generalisation regulariser; structural guarantees & near-zero init
@@ -225,6 +244,7 @@ class EDRModel(nn.Module):
             "use_friction_qdd":   self._use_friction_qdd,
             "use_phys_cond":      self._use_phys_cond,
             "coriolis_matrix_form": self._coriolis_matrix_form,
+            "coriolis_structural": self._coriolis_structural,
             "friction_form":      self._friction_form,
             "inertia_psd":        self._inertia_psd,
             "spectral_norm":      self._spectral_norm,
@@ -248,15 +268,23 @@ class EDRModel(nn.Module):
             psd=self._inertia_psd,
             spectral_norm=self._spectral_norm,
         )
-        self.coriolis_net = CoriolisCorrection(
-            n_joints=self.n_joints,
-            in_dim=_coriolis_in_dim,
-            hidden_sizes=coriolis_hidden,
-            activation=activation,
-            dropout=correction_dropout,
-            matrix_form=self._coriolis_matrix_form,
-            spectral_norm=self._spectral_norm,
-        )
+        # The independent Coriolis network is built ONLY in the legacy
+        # (ablation) mode.  In the default structural mode δC is derived from
+        # the inertia network via Christoffel symbols (see
+        # ``_structural_delta_C_qd``) — no extra parameters, and C is forced to
+        # be the consistent partner of M.
+        if not self._coriolis_structural:
+            self.coriolis_net = CoriolisCorrection(
+                n_joints=self.n_joints,
+                in_dim=_coriolis_in_dim,
+                hidden_sizes=coriolis_hidden,
+                activation=activation,
+                dropout=correction_dropout,
+                matrix_form=self._coriolis_matrix_form,
+                spectral_norm=self._spectral_norm,
+            )
+        else:
+            self.coriolis_net = None
         self.friction_net = FrictionCorrection(
             n_joints=self.n_joints,
             hidden_sizes=friction_hidden,
@@ -268,15 +296,21 @@ class EDRModel(nn.Module):
             spectral_norm=self._spectral_norm,
         )
 
-        # Curriculum phase tracker (1 or 2).  Updated by set_phase().
-        self._phase: int = 1
-        # Rolling history of val_rmse (unnormalised/macro) observed during
-        # training.  Populated via ``record_val_rmse()`` by the training loop;
-        # consumed by the adaptive phase-2 plateau detector in edr_strategy.
-        # Not a torch buffer — this is runtime-only training state.
+        # ── Smooth capacity gate γ ∈ [0, 1] (R3) ─────────────────────────────
+        # Replaces the old hard two-phase freeze/unfreeze curriculum.  γ scales
+        # the inertia + Coriolis contribution; the training strategy cosine-
+        # anneals it 0→1 over the first fraction of training so the easy
+        # gravity/friction residuals are absorbed first WITHOUT an optimizer
+        # discontinuity (all parameters train from epoch 1, Adam momentum
+        # continuous).  Registered as a buffer so it is saved/restored with the
+        # checkpoint and defaults to 1.0 (full model) at inference.
+        self.register_buffer(
+            "correction_gain", torch.tensor(1.0, dtype=torch.float32)
+        )
+        # Rolling history of val_rmse — retained purely for checkpoint/resume
+        # extras (collect_model_training_extras) and the pipeline's duck-typed
+        # ``record_val_rmse`` hook.  No longer drives any curriculum decision.
         self._val_rmse_history: list[float] = []
-        # Apply phase-1 frozen state immediately after construction.
-        self.set_phase(1)
 
     # -----------------------------------------------------------------------
     # Public API — feature construction and introspection
@@ -300,6 +334,32 @@ class EDRModel(nn.Module):
         if not self._has_trig_features:
             return None
         return (self.q_mean, self.q_std)
+
+    def _inertia_input(
+        self, q: torch.Tensor, physics: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Feature tensor for the inertia network δM(q).
+
+        Single source for the δM feature map: used both by
+        :meth:`build_correction_inputs` and by the Christoffel-Coriolis
+        Jacobian (:meth:`_structural_delta_C_qd`), so ∂δM/∂q is taken w.r.t.
+        the *exact* features δM consumes.  δM depends on configuration only;
+        when phys-conditioned the nominal inertia torque τ_M is appended as an
+        exogenous (held-constant w.r.t. q for the Christoffel derivative) slice.
+        """
+        if self._has_trig_features:
+            q_raw = q * self.q_std + self.q_mean
+            base = torch.cat([q, torch.sin(q_raw), torch.cos(q_raw)], dim=-1)
+        else:
+            base = q
+        if self._use_phys_cond:
+            if physics is None:
+                raise ValueError(
+                    "[EDRModel._inertia_input] use_phys_cond=True but "
+                    "physics=None — δM input requires the τ_M slice."
+                )
+            return torch.cat([base, physics[:, _PHYS_M_START:_PHYS_M_END]], dim=-1)
+        return base
 
     def build_correction_inputs(
         self,
@@ -378,20 +438,19 @@ class EDRModel(nn.Module):
             q_raw = None
             gravity_base = q
             coriolis_base = torch.cat([q, qd, vel_prod], dim=-1)
-        # δM(q) shares the gravity configuration dependence (function of q only).
-        inertia_base = gravity_base
 
         if self._use_phys_cond and physics is not None:
             tau_g = physics[:, _PHYS_G_START: _PHYS_G_END]
-            tau_M = physics[:, _PHYS_M_START: _PHYS_M_END]
             tau_C = physics[:, _PHYS_C_START: _PHYS_C_END]
             gravity_input  = torch.cat([gravity_base,  tau_g], dim=-1)
-            inertia_input  = torch.cat([inertia_base,  tau_M], dim=-1)
             coriolis_input = torch.cat([coriolis_base, tau_C], dim=-1)
         else:
             gravity_input  = gravity_base
-            inertia_input  = inertia_base
             coriolis_input = coriolis_base
+        # δM(q) input is built by the single ``_inertia_input`` helper so the
+        # Christoffel-Coriolis Jacobian path differentiates EXACTLY the feature
+        # map used here (no drift between the two δM call-sites).
+        inertia_input = self._inertia_input(q, physics)
         return {
             "gravity_input":      gravity_input,
             "inertia_input":      inertia_input,
@@ -401,64 +460,97 @@ class EDRModel(nn.Module):
         }
 
     # -----------------------------------------------------------------------
-    # Two-phase curriculum control
+    # Smooth capacity gate γ (replaces the old two-phase curriculum)
     # -----------------------------------------------------------------------
 
-    def set_phase(self, phase: int) -> None:
-        """Switch between curriculum phases.
+    def set_correction_gain(self, gain: float) -> None:
+        """Set the inertia+Coriolis capacity gate γ ∈ [0, 1].
 
-        Phase 1: Only gravity and friction corrections are trainable.
-                 Inertia and Coriolis corrections are frozen.
-        Phase 2: All four corrections are trainable.
-
-        The phase-1 freeze prevents δM(q)·q̈ from absorbing large gravity
-        residuals early in training — the δM network has enough degrees of
-        freedom to partially explain gravity errors if allowed to train freely
-        from the start.
-
-        Parameters
-        ----------
-        phase:
-            Must be 1 or 2.
-
-        Raises
-        ------
-        ValueError
-            If ``phase`` is not 1 or 2.
+        γ multiplies the (δM·q̈ + δC·q̇) contribution.  The training strategy
+        cosine-anneals it 0→1 over the first fraction of training so the easy
+        gravity/friction residuals are absorbed first — the benefit of the old
+        phase-1 freeze — but WITHOUT freezing parameters or resetting the
+        optimizer state, so Adam momentum stays continuous and the val curve
+        descends smoothly instead of taking a discontinuous jump.
         """
-        if phase not in (1, 2):
-            raise ValueError(f"[EDRModel.set_phase] phase must be 1 or 2, got {phase!r}")
-
-        self._phase = phase
-
-        if phase == 1:
-            # Freeze inertia and Coriolis; activate gravity and friction.
-            _set_requires_grad(self.inertia_net,  requires_grad=False)
-            _set_requires_grad(self.coriolis_net, requires_grad=False)
-            _set_requires_grad(self.gravity_net,  requires_grad=True)
-            _set_requires_grad(self.friction_net, requires_grad=True)
-        else:
-            # Phase 2: unfreeze everything.
-            _set_requires_grad(self.inertia_net,  requires_grad=True)
-            _set_requires_grad(self.coriolis_net, requires_grad=True)
-            _set_requires_grad(self.gravity_net,  requires_grad=True)
-            _set_requires_grad(self.friction_net, requires_grad=True)
-
-    @property
-    def phase(self) -> int:
-        """Current curriculum phase (1 or 2)."""
-        return self._phase
+        g = float(gain)
+        if not 0.0 <= g <= 1.0:
+            raise ValueError(f"[EDRModel.set_correction_gain] γ must be ∈ [0,1], got {g!r}")
+        self.correction_gain.fill_(g)
 
     # -----------------------------------------------------------------------
-    # Validation-metric history (consumed by adaptive phase-2 plateau detector)
+    # Structural Coriolis — derived from δM via Christoffel symbols (R1)
+    # -----------------------------------------------------------------------
+
+    def _structural_delta_C_qd(
+        self,
+        q:        torch.Tensor,
+        qd:       torch.Tensor,
+        physics:  torch.Tensor | None,
+    ) -> torch.Tensor:
+        """δC·q̇ derived from the inertia correction δM(q) via Christoffel symbols.
+
+        Christoffel symbols of the first kind for the correction:
+
+            δc_ijk = ½ ( ∂δM_ij/∂q_k + ∂δM_ik/∂q_j − ∂δM_jk/∂q_i )
+            (δC·q̇)_i = Σ_jk δc_ijk q̇_j q̇_k
+
+        Because the nominal (M, C) from Pinocchio is already a consistent
+        Christoffel pair, adding this δC built from δM keeps the *corrected*
+        (M̃, C̃) consistent ⇒ (Ṁ̃ − 2C̃) is skew-symmetric by construction
+        (passivity holds exactly).  Differentiation is w.r.t. normalised q —
+        a constant affine reparametrisation of the physical angle, so the
+        passivity structure is preserved in the (consistent) normalised
+        generalised coordinate the whole model already lives in.
+
+        The Jacobian ∂δM/∂q is taken through the SAME ``_inertia_input`` map
+        the forward δM uses (no drift), via ``torch.func`` (vmap+jacrev) over
+        the tiny δM-MLP — cheap for n_joints=5.
+        """
+        from torch.func import jacrev, vmap
+
+        n = self.n_joints
+
+        def _delta_M_one(q_row: torch.Tensor, phys_row: torch.Tensor | None) -> torch.Tensor:
+            # q_row: (n,), phys_row: (4n,) or None  → δM: (n, n)
+            qd_in = q_row.unsqueeze(0)
+            phys_in = None if phys_row is None else phys_row.unsqueeze(0)
+            feats = self._inertia_input(qd_in, phys_in)
+            return self.inertia_net.compute_delta_M(feats).squeeze(0)
+
+        # J[b, i, j, k] = ∂δM_ij / ∂q_k.  randomness="different" lets the
+        # inertia δ-MLP's dropout draw an independent mask per sample under
+        # vmap (exactly its normal per-row training behaviour); in eval()
+        # dropout is identity so the Jacobian — hence δC — is deterministic
+        # and the passivity guarantee is exact at inference.
+        if physics is None:
+            J = vmap(
+                jacrev(_delta_M_one, argnums=0), in_dims=(0, None),
+                randomness="different",
+            )(q, None)
+        else:
+            J = vmap(
+                jacrev(_delta_M_one, argnums=0), in_dims=(0, 0),
+                randomness="different",
+            )(q, physics)
+
+        # (δC·q̇)_i = Σ_jk ½(J_ijk + J_ikj − J_jki) q̇_j q̇_k
+        t1 = torch.einsum("bijk,bj,bk->bi", J, qd, qd)            # Σ ∂M_ij/∂q_k q̇_j q̇_k
+        t2 = torch.einsum("bikj,bj,bk->bi", J, qd, qd)            # Σ ∂M_ik/∂q_j q̇_j q̇_k
+        t3 = torch.einsum("bjki,bj,bk->bi", J, qd, qd)            # Σ ∂M_jk/∂q_i q̇_j q̇_k
+        return 0.5 * (t1 + t2 - t3)
+
+    # -----------------------------------------------------------------------
+    # Validation-metric history (checkpoint/resume extras only)
     # -----------------------------------------------------------------------
 
     def record_val_rmse(self, rmse: float) -> None:
         """Append a validation-RMSE observation to the rolling history.
 
-        The training pipeline calls this after each validation evaluation.
-        The history is consumed by the adaptive phase-2 transition logic
-        in ``edr_strategy._should_transition_to_phase2``.
+        Retained only for checkpoint/resume bookkeeping
+        (``collect_model_training_extras``) and the pipeline's duck-typed
+        hook.  No longer drives any curriculum decision (the two-phase
+        plateau detector was removed in favour of the smooth γ gate).
         """
         self._val_rmse_history.append(float(rmse))
 
@@ -563,7 +655,11 @@ class EDRModel(nn.Module):
         delta_g     = self.gravity_net(inputs["gravity_input"])          # (B, n)
         delta_M     = self.inertia_net.compute_delta_M(inputs["inertia_input"])  # (B,n,n)
         delta_M_qdd = torch.bmm(delta_M, qdd.unsqueeze(-1)).squeeze(-1)   # (B, n)
-        delta_C_qd  = self.coriolis_net(inputs["coriolis_input"], qd)    # (B, n)
+        if self._coriolis_structural:
+            # δC is the Christoffel partner of δM — no independent network.
+            delta_C_qd = self._structural_delta_C_qd(q, qd, physics)      # (B, n)
+        else:
+            delta_C_qd = self.coriolis_net(inputs["coriolis_input"], qd)  # (B, n)
         delta_tau_f = self.friction_net(
             qd,
             qdd if self._use_friction_qdd else None,
@@ -571,11 +667,15 @@ class EDRModel(nn.Module):
         )                                                                # (B, n)
 
         # ── Assemble corrected prediction ─────────────────────────────────
-        # τ̂ = (τ_g + δg) + (τ_M + δM·q̈) + (τ_C + δC·q̇) + (τ_f + δτ_f)
+        # τ̂ = (τ_g + δg) + (τ_M + γ·δM·q̈) + (τ_C + γ·δC·q̇) + (τ_f + δτ_f)
+        # γ (correction_gain) smoothly ramps the inertia+Coriolis capacity in
+        # over early training (replaces the old hard phase-1 freeze); it is
+        # 1.0 at inference / after the ramp completes.
+        _g = self.correction_gain
         tau_hat = (
             (tau_g + delta_g)
-            + (tau_M + delta_M_qdd)
-            + (tau_C + delta_C_qd)
+            + (tau_M + _g * delta_M_qdd)
+            + (tau_C + _g * delta_C_qd)
             + (tau_f + delta_tau_f)
         )
 
@@ -635,37 +735,24 @@ class EDRModel(nn.Module):
         return correction_parameter_summary(
             gravity=self.gravity_net,
             inertia=self.inertia_net,
-            coriolis=self.coriolis_net,
+            coriolis=self.coriolis_net,   # None in structural mode (handled)
             friction=self.friction_net,
         )
 
     def __repr__(self) -> str:
         comp = self.count_parameters_by_component()
+        _cor = (
+            "δC = Christoffel(δM)   [passive by construction, 0 extra params]"
+            if self._coriolis_structural
+            else "δC(q,q̇)·q̇  [independent network]"
+        )
         lines = [
-            f"EDRModel(n_joints={self.n_joints}, phase={self._phase})",
+            f"EDRModel(n_joints={self.n_joints}, γ={float(self.correction_gain):.3g})",
             f"  gravity_net:  {comp['gravity']:>6,} params   δg(q)",
-            f"  inertia_net:  {comp['inertia']:>6,} params   δM(q)·q̈   [(A+A^T)/2 symmetric]",
-            f"  coriolis_net: {comp['coriolis']:>6,} params   δC(q,q̇)·q̇  [quadratic in ‖q̇‖]",
+            f"  inertia_net:  {comp['inertia']:>6,} params   δM(q)·q̈   [L Lᵀ PSD ⇒ M̃ SPD]",
+            f"  coriolis_net: {comp['coriolis']:>6,} params   {_cor}",
             f"  friction_net: {comp['friction']:>6,} params   q̇⊙h(|q̇|)   [odd function]",
             f"  {'─' * 42}",
             f"  total:        {comp['total']:>6,} params",
         ]
         return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Internal helper
-# ---------------------------------------------------------------------------
-
-def _set_requires_grad(module: nn.Module, requires_grad: bool) -> None:
-    """Enable or disable gradient computation for all parameters in a module.
-
-    Parameters
-    ----------
-    module:
-        The nn.Module whose parameters to modify.
-    requires_grad:
-        True to enable gradient tracking, False to freeze.
-    """
-    for param in module.parameters():
-        param.requires_grad_(requires_grad)
