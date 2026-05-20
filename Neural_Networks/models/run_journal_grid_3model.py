@@ -203,16 +203,16 @@ _FIXED_HP_FNN_BASE: dict[str, Any] = {
     "snapshot_every":          0,
 }
 
-# patience=150 for ALL three archs (fair protocol): on the 1500-epoch
-# warmup_cosine schedule a long, smooth tail can improve slowly; 150 lets a
-# genuinely-still-learning model keep going while early-stop still fires once
-# 150 successive epochs yield < min_delta (true convergence, not wandering).
-FIXED_HP_FNN = {**_FIXED_HP_FNN_BASE, "patience": 150}
+# patience=50 for FNN/PhysReg, 150 for EDR: FNN/PhysReg converge quickly on
+# the warmup_cosine schedule so a tighter patience cuts wasted tail epochs;
+# EDR's smooth γ-gate ramp + slower descent still benefits from 150 to reach
+# true convergence (early-stop fires only on real plateau, not wandering).
+FIXED_HP_FNN = {**_FIXED_HP_FNN_BASE, "patience": 50}
 
 # PhysReg = same backbone + the physics-consistency penalty (its defining HP).
 FIXED_HP_PHYSREG = {
     **_FIXED_HP_FNN_BASE,
-    "patience":                150,
+    "patience":                50,
     "physics_weight":          0.5,
     "physics_warmup_fraction": 0.05,
     "phi_lr_ratio":            0.1,
@@ -259,7 +259,7 @@ FIXED_HP_EDR: dict[str, Any] = {
     "warmup_cosine_min_factor": 0.05,  # EDR-only LR floor (FNN/PhysReg keep 0.01)
     "early_stopping":          True,
     "early_stop_metric":       "val_rmse",
-    "patience":                150,    # equal to FNN/PhysReg (fair protocol)
+    "patience":                150,    # EDR-only: γ-gate ramp needs longer tail (FNN/PhysReg use 50)
     "min_delta":               1e-5,    # R3/R4: smooth descent ⇒ small δ is safe
     "grad_clip_norm":          1.0,
     "feature_noise_std":       0.02,
