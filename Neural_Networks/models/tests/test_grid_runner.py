@@ -183,29 +183,42 @@ def test_select_run_mode_accepts_dataeff_env(monkeypatch):
 # ── A1: CPU is the binding ceiling (cores shared across GPUs, no oversub) ────
 
 def test_compute_pool_size_cpu_bound_and_safe(monkeypatch):
+    """Auto-sizer combines VRAM/CPU/RAM ceilings then applies the 70 % utilization
+    cap as a deterministic spike buffer.  The binding axis (smallest ceiling)
+    sets the pre-cap maximum.
+    """
     import psutil
     monkeypatch.delenv("MTP_GRID_POOL_SIZE", raising=False)
     monkeypatch.delenv("MTP_GRID_WORKER_RAM_GB", raising=False)
     monkeypatch.delenv("MTP_GRID_CPU_OVERSUB", raising=False)
+    monkeypatch.delenv("MTP_GRID_UTILIZATION_CAP", raising=False)
     monkeypatch.setattr(GR, "_measure_worker_rss_gb", lambda: 1.34)
+    # Tiny peak VRAM keeps the VRAM ceiling non-binding for this CPU-bound test.
+    monkeypatch.setattr(GR, "_measure_worker_peak_vram_gb", lambda: 0.5)
     monkeypatch.setattr(GR, "_query_free_ram_gb", lambda: 177.0)
     monkeypatch.setattr(GR, "_query_total_vram_gb", lambda: 160.0)
     monkeypatch.setattr(psutil, "cpu_count", lambda logical=False: 48)
 
+    util_cap = 0.70
     ps = GR._compute_pool_size(True, 2)
-    n_vram = int(160.0 / 0.6)                     # 266
-    n_cpu = int(((48 - 2) // 2) * 1.0)            # 23 — shared, no *n_gpus, oversub off
-    n_ram = int((177.0 - 32.0) / 1.34)            # 108 (32 GB safety margin)
-    assert ps == min(n_vram, n_cpu, n_ram) == n_cpu
+    n_vram = int(160.0 / (0.5 + GR.VRAM_RESERVE_GB))  # peak_vram + reserve
+    n_cpu  = int(((48 - 2) // 2) * 1.0)               # 23 — shared, oversub off
+    n_ram  = int((177.0 - 32.0) / 1.34)               # 108 (32 GB safety)
+    raw    = min(n_vram, n_cpu, n_ram)
+    assert ps == int(raw * util_cap)                  # 70 % of binding ceiling
     # CPU ceiling is independent of GPU count (cores are shared, not per-GPU).
     assert GR._compute_pool_size(True, 1) == ps
     # Never exceeds the RAM safety budget.
     assert ps * 1.34 <= (177.0 - 32.0) + 1e-6
     # Oversubscription is opt-in via env and scales the CPU budget.
     monkeypatch.setenv("MTP_GRID_CPU_OVERSUB", "2.0")
-    assert GR._compute_pool_size(True, 2) == int(((48 - 2) // 2) * 2.0)  # 46
+    assert GR._compute_pool_size(True, 2) == int(((48 - 2) // 2) * 2.0 * util_cap)
     monkeypatch.delenv("MTP_GRID_CPU_OVERSUB", raising=False)
-    # Explicit override still wins outright.
+    # Explicit utilization cap override works.
+    monkeypatch.setenv("MTP_GRID_UTILIZATION_CAP", "1.0")
+    assert GR._compute_pool_size(True, 2) == raw
+    monkeypatch.delenv("MTP_GRID_UTILIZATION_CAP", raising=False)
+    # Explicit pool override still wins outright (no cap applied).
     monkeypatch.setenv("MTP_GRID_POOL_SIZE", "150")
     assert GR._compute_pool_size(True, 2) == 150
     # CPU-only ⇒ sequential.
@@ -213,9 +226,9 @@ def test_compute_pool_size_cpu_bound_and_safe(monkeypatch):
 
 
 def test_measure_worker_rss_gb_bounded():
-    """Never raises and returns a value in the sane clamp band."""
+    """Never raises and returns a value in the sane clamp band [1.0, 16.0]."""
     v = GR._measure_worker_rss_gb()
-    assert isinstance(v, float) and 0.6 <= v <= 4.0
+    assert isinstance(v, float) and 1.0 <= v <= 16.0
 
 
 if __name__ == "__main__":

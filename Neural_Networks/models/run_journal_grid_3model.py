@@ -125,7 +125,12 @@ BATCH_SIZE: int = 512
 # admission loop needed 3+ GB free just to dispatch one trial. Workers would
 # finish their first task and then stall indefinitely because free RAM
 # (post-worker-RSS) never climbed back to 3 GB. 1.0 GB is adequate protection.
-VRAM_RESERVE_GB: float = 0.5
+# VRAM reserve bumped 0.5 → 2.0 GB (2026-05-20): cuDNN kernel selection +
+# torch.compile workspaces can spike a few hundred MB above measured peak;
+# 0.5 GB was too tight on the A100 burst-admit window and a 7-worker bunch
+# could over-commit before the 1 Hz poller observed the allocation.  At 2 GB
+# the headroom is unambiguous and still trivial vs 80 GB cards.
+VRAM_RESERVE_GB: float = 2.0
 RAM_RESERVE_GB:  float = 1.0
 
 # Polling cadence for the admission loop.
@@ -806,81 +811,232 @@ def _query_free_ram_gb() -> float:
     return psutil.virtual_memory().available / 1e9
 
 
-def _measure_cuda_ctx_gb() -> float:
-    """Measure a fresh process's CUDA context overhead via a child subprocess.
+# ── Resource probe (peak RSS + peak VRAM) ───────────────────────────────────
+# A single subprocess that mirrors what a real worker does (import torch, build
+# the largest model in the sweep, run a forward+backward) and reports the
+# *peak* host RSS and *peak* CUDA allocation.  This is the ground truth used by
+# the auto-sizer.  The old `_measure_worker_rss_gb` measured only import-time
+# RSS (~1.6 GB) and clamped to 4 GB — which silently dropped real ~8–10 GB
+# steady-state measurements and let the OOM-killer reap workers on the tail.
+#
+# Cached on disk for 7 days, keyed on hostname + GPU model + dataset path, so
+# the probe runs at most once per machine/dataset.
 
-    We do NOT touch CUDA in the main process, because even a single context
-    permanently consumes ~350 MB on this GPU — non-trivial on a 4 GB card.
-    The child allocates a 1-element tensor, prints the VRAM delta, and exits.
+_PROBE_CACHE_DIR = Path.home() / ".cache" / "mtp_grid"
+_PROBE_CACHE_TTL_SEC = 7 * 86400
+_PROBE_RESULT_CACHE: dict[str, dict[str, float]] = {}   # in-process memo
+
+
+def _probe_cache_key(dataset_dir: str) -> tuple[str, Path]:
+    """Cache-key (string, file path) over hostname + GPU model + dataset."""
+    import hashlib
+    import socket
+    gpu_name = "cpu"
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            timeout=5,
+        ).decode().strip()
+        if out:
+            gpu_name = out.splitlines()[0].strip()
+    except Exception:
+        pass
+    key = f"{socket.gethostname()}|{gpu_name}|{Path(dataset_dir).name}"
+    h = hashlib.sha1(key.encode()).hexdigest()[:16]
+    return key, _PROBE_CACHE_DIR / f"probe_{h}.json"
+
+
+def _probe_resource_peaks(dataset_dir: str = "", force: bool = False) -> dict[str, float]:
+    """Spawn a representative worker subprocess and measure peak RSS + peak VRAM.
+
+    The subprocess:
+      1. Imports ``torch`` and the pipeline/strategies stack a real worker uses.
+      2. Builds the largest-HP model in the active sweep (EDR 4×MLP[128,128]).
+      3. Runs 5 forward+backward iterations at the standard batch size.
+      4. Reports peak host RSS and ``torch.cuda.max_memory_allocated``.
+
+    Returns: ``{"rss_gb", "vram_gb", "cuda_ctx_gb", "source"}``.
+
+    Cached: in-process for the current run, on-disk for 7 days keyed on
+    (hostname, GPU model, dataset).  Re-probes on cache miss or stale entry.
+    Always returns something (falls back to safe HPC defaults on failure).
     """
+    import json
     import subprocess
     import sys
+
+    plog = logging.getLogger(__name__)
+    key, cache_path = _probe_cache_key(dataset_dir)
+    if not force and key in _PROBE_RESULT_CACHE:
+        return _PROBE_RESULT_CACHE[key]
+    if not force and cache_path.is_file():
+        try:
+            age = time.time() - cache_path.stat().st_mtime
+            if age < _PROBE_CACHE_TTL_SEC:
+                data = json.loads(cache_path.read_text())
+                data["source"] = "cache"
+                _PROBE_RESULT_CACHE[key] = data
+                plog.info(
+                    "resource probe (cache hit, age %.1fd): rss=%.2fGB vram=%.2fGB ctx=%.2fGB",
+                    age / 86400, data["rss_gb"], data["vram_gb"], data["cuda_ctx_gb"],
+                )
+                return data
+        except Exception:
+            pass
+
+    repo_root = str(Path(__file__).resolve().parents[2])
+    # The script runs in a clean process.  It mirrors a real worker's path:
+    # imports → build large model → fwd+bwd → measure peaks → print JSON.
     script = (
-        "import torch, sys\n"
-        "if not torch.cuda.is_available():\n"
-        "    print(0); sys.exit(0)\n"
-        "f0, _ = torch.cuda.mem_get_info(0)\n"
-        "t = torch.zeros(1, device='cuda:0')\n"
-        "f1, _ = torch.cuda.mem_get_info(0)\n"
-        "del t\n"
-        "print((f0 - f1) / 1e9)\n"
+        "import json, os, sys, gc\n"
+        f"sys.path.insert(0, {repo_root!r})\n"
+        'os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")\n'
+        'for _v in ("OMP_NUM_THREADS","MKL_NUM_THREADS","OPENBLAS_NUM_THREADS"):\n'
+        '    os.environ.setdefault(_v, "1")\n'
+        "import psutil\n"
+        "baseline_rss = psutil.Process().memory_info().rss / 1e9\n"
+        "try:\n"
+        "    import torch\n"
+        "    has_cuda = bool(torch.cuda.is_available())\n"
+        "except Exception:\n"
+        '    print("PROBE_RESULT_JSON:" + json.dumps({"error":"torch_import"}))\n'
+        "    sys.exit(0)\n"
+        "cuda_ctx_gb = 0.0\n"
+        "if has_cuda:\n"
+        "    try:\n"
+        "        f0,_ = torch.cuda.mem_get_info(0)\n"
+        "        _t = torch.zeros(1, device='cuda:0')\n"
+        "        f1,_ = torch.cuda.mem_get_info(0)\n"
+        "        cuda_ctx_gb = max(0.05, (f0-f1)/1e9)\n"
+        "        del _t\n"
+        "        torch.cuda.empty_cache()\n"
+        "        torch.cuda.reset_peak_memory_stats(0)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "try:\n"
+        "    import Neural_Networks.models.shared.pipeline  # noqa\n"
+        "    import Neural_Networks.models.shared.strategies  # noqa\n"
+        "except Exception:\n"
+        "    pass\n"
+        "rss_imports = psutil.Process().memory_info().rss / 1e9\n"
+        "device = torch.device('cuda' if has_cuda else 'cpu')\n"
+        "class _Probe(torch.nn.Module):\n"
+        "    def __init__(self):\n"
+        "        super().__init__()\n"
+        "        def _mlp(n_in, hidden, n_out):\n"
+        "            dims = [n_in] + list(hidden) + [n_out]\n"
+        "            layers = []\n"
+        "            for i,(a,b) in enumerate(zip(dims, dims[1:])):\n"
+        "                layers.append(torch.nn.Linear(a, b))\n"
+        "                if i < len(dims) - 2:\n"
+        "                    layers.append(torch.nn.LayerNorm(b))\n"
+        "                    layers.append(torch.nn.SiLU())\n"
+        "                    layers.append(torch.nn.Dropout(0.3))\n"
+        "            return torch.nn.Sequential(*layers)\n"
+        "        self.g = _mlp(15, [128,128], 5)\n"
+        "        self.i = _mlp(15, [128,128], 25)\n"
+        "        self.c = _mlp(15, [128,128], 25)\n"
+        "        self.f = _mlp(15, [64,64], 5)\n"
+        "    def forward(self, x):\n"
+        "        return self.g(x) + self.i(x)[:,:5] + self.c(x)[:,:5] + self.f(x)\n"
+        "model = _Probe().to(device)\n"
+        "opt = torch.optim.Adam(model.parameters(), lr=1e-3)\n"
+        "peak_rss = rss_imports\n"
+        "for _ in range(5):\n"
+        "    x = torch.randn(512, 15, device=device)\n"
+        "    y = torch.randn(512, 5, device=device)\n"
+        "    opt.zero_grad(set_to_none=True)\n"
+        "    out = model(x)\n"
+        "    loss = ((out - y) ** 2).mean()\n"
+        "    loss.backward()\n"
+        "    opt.step()\n"
+        "    peak_rss = max(peak_rss, psutil.Process().memory_info().rss / 1e9)\n"
+        "peak_vram = (torch.cuda.max_memory_allocated(0)/1e9 + cuda_ctx_gb) if has_cuda else 0.0\n"
+        "out = {\n"
+        "    'rss_gb': round(peak_rss, 3),\n"
+        "    'vram_gb': round(peak_vram, 3),\n"
+        "    'cuda_ctx_gb': round(cuda_ctx_gb, 3),\n"
+        "    'rss_baseline_gb': round(baseline_rss, 3),\n"
+        "    'rss_after_imports_gb': round(rss_imports, 3),\n"
+        "}\n"
+        "print('PROBE_RESULT_JSON:' + json.dumps(out))\n"
     )
+
+    fallback = {
+        "rss_gb": 3.0, "vram_gb": 1.5, "cuda_ctx_gb": 0.35,
+        "rss_baseline_gb": 0.5, "rss_after_imports_gb": 1.6, "source": "fallback",
+    }
     try:
-        out = subprocess.check_output(
-            [sys.executable, "-c", script], timeout=30, text=True,
-        ).strip()
-        val = float(out.splitlines()[-1])
-        # Defensive: if the measurement looks absurd, fall back to a typical value.
-        return val if 0.05 <= val <= 2.0 else 0.35
-    except Exception:
-        return 0.35
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, timeout=240, text=True, cwd=repo_root,
+        )
+        out_text = (proc.stdout or "") + (proc.stderr or "")
+        for ln in out_text.splitlines():
+            if ln.startswith("PROBE_RESULT_JSON:"):
+                data = json.loads(ln[len("PROBE_RESULT_JSON:"):])
+                if "error" in data:
+                    plog.warning("resource probe reported error: %s", data["error"])
+                    _PROBE_RESULT_CACHE[key] = fallback
+                    return fallback
+                data["source"] = "probe"
+                try:
+                    _PROBE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_text(json.dumps(data))
+                except Exception as exc:
+                    plog.debug("probe cache write failed: %s", exc)
+                _PROBE_RESULT_CACHE[key] = data
+                plog.info(
+                    "resource probe (measured): rss=%.2fGB vram=%.2fGB ctx=%.2fGB "
+                    "(baseline=%.2f, post-imports=%.2f)",
+                    data["rss_gb"], data["vram_gb"], data["cuda_ctx_gb"],
+                    data.get("rss_baseline_gb", 0.0),
+                    data.get("rss_after_imports_gb", 0.0),
+                )
+                return data
+        plog.warning("resource probe produced no PROBE_RESULT_JSON line — using fallback")
+    except subprocess.TimeoutExpired:
+        plog.warning("resource probe timed out — using fallback")
+    except Exception as exc:
+        plog.warning("resource probe failed (%s) — using fallback", exc)
+    _PROBE_RESULT_CACHE[key] = fallback
+    return fallback
+
+
+def _measure_cuda_ctx_gb() -> float:
+    """CUDA context overhead per worker (~0.35 GB on consumer GPUs).
+
+    Thin wrapper around the unified resource probe.  Falls back to 0.35 GB.
+    """
+    data = _probe_resource_peaks(TRAIN_DATA_RUN_DIR)
+    val = float(data.get("cuda_ctx_gb", 0.35))
+    return val if 0.05 <= val <= 2.0 else 0.35
 
 
 def _measure_worker_rss_gb() -> float:
-    """Measure a realistic per-worker resident-set size via a child subprocess.
+    """Per-worker peak resident-set size (host RAM) under realistic load.
 
-    A pool worker's RAM footprint is dominated by the one-time ``import torch``
-    plus the pipeline/strategy stack and a CUDA context — not the tiny per-trial
-    tensors.  Rather than guess this (a fixed conservative constant makes the
-    auto pool *undershoot* the safe maximum and leaves the box under-utilised),
-    we spawn one representative worker-like process, let it do exactly the
-    imports + CUDA-context creation a real worker does, and read its RSS.  The
-    RAM-ceiling in ``_compute_pool_size`` then reflects reality, so the no-env
-    ``python3 …`` run self-sizes to the true safe max.  Falls back to a sane
-    1.6 GB if anything goes wrong (never raises).
+    Thin wrapper around the unified resource probe.  Uses the *peak* RSS
+    measured during a representative forward+backward — not import-time RSS.
+    A small 1.2x safety factor cushions allocator high-water-mark drift.
+    Clamp band widened to [1.0, 16.0] GB so a real ~8–10 GB measurement isn't
+    silently dropped (was [0.6, 4.0] — the OOM-kill root cause).
     """
-    import subprocess
-    import sys
-    from pathlib import Path as _P
+    data = _probe_resource_peaks(TRAIN_DATA_RUN_DIR)
+    val = float(data.get("rss_gb", 3.0)) * 1.2
+    return min(16.0, max(1.0, val))
 
-    repo_root = str(_P(__file__).resolve().parents[2])
-    edr_dir = str(_P(__file__).resolve().parent / "Equivariant-Decomposed-Residual")
-    script = (
-        "import sys, psutil\n"
-        f"sys.path[:0] = [{repo_root!r}, {edr_dir!r}]\n"
-        "try:\n"
-        "    import torch\n"
-        "    if torch.cuda.is_available():\n"
-        "        _x = torch.zeros(1, device='cuda:0'); del _x\n"
-        "except Exception:\n"
-        "    pass\n"
-        "try:\n"
-        "    import Neural_Networks.models.shared.pipeline  # noqa: F401\n"
-        "    import Neural_Networks.models.shared.strategies  # noqa: F401\n"
-        "except Exception:\n"
-        "    pass\n"
-        "print(psutil.Process().memory_info().rss / 1e9)\n"
-    )
-    try:
-        out = subprocess.check_output(
-            [sys.executable, "-c", script], timeout=120, text=True,
-            cwd=repo_root,
-        ).strip()
-        val = float(out.splitlines()[-1])
-        # Clamp to a sane band; outside it the measurement is untrustworthy.
-        return val if 0.6 <= val <= 4.0 else 1.6
-    except Exception:
-        return 1.6
+
+def _measure_worker_peak_vram_gb() -> float:
+    """Per-trial peak VRAM (device) under realistic load.
+
+    Returns the probe's measured peak ``torch.cuda.max_memory_allocated``
+    plus the CUDA context overhead, with a 1.5x safety factor for cuDNN /
+    torch.compile workspace spikes that the probe's short burst can miss.
+    """
+    data = _probe_resource_peaks(TRAIN_DATA_RUN_DIR)
+    return max(0.5, float(data.get("vram_gb", 1.5)) * 1.5)
 
 
 def _grid_threads_per_worker_target() -> int:
@@ -904,24 +1060,32 @@ def _grid_threads_per_worker_target() -> int:
 def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
     """Derive an upper bound on concurrent workers from live hardware.
 
-    pool_size = min(VRAM ceiling, CPU ceiling, RAM ceiling), the binding one
-    wins.  For this grid the trials are *tiny* MLPs (~0.25 GB VRAM each), so
-    the A100s sit nearly idle and the throughput limiter is **CPU cores**
-    (each step is dominated by the Python loop / dataloader / host↔device
-    copies, not GPU compute).  CPU is the binding ceiling; therefore:
+    Three ceilings, each derived from a MEASURED quantity (not a guess), with
+    a 70 % cap on the binding one for safe headroom against allocator spikes:
 
-      • the CPU budget is the physical core count (shared across GPUs — cores
-        are NOT per-GPU), discounted for the 2-thread/worker floor, with
-        oversubscription DEFAULTING OFF (1.0).  Oversubscribing tiny CPU-bound
-        trials thrashes the scheduler and slows every run — measured the hard
-        way: pool=100 on a 48-core box ran 0/204 trials in 6h40m;
-      • a hard RAM ceiling so a big pool can never OOM-crash or swap the box.
+      • VRAM ceiling : ``total_vram / (peak_vram_per_trial × 1.5 + RESERVE)``
+        — uses the resource probe's measured peak VRAM, not a loose 0.6 GB
+        constant.  Per-GPU equivalent is enforced separately in the
+        admission loop's ``_pick_gpu`` (this number is the cross-GPU sum).
 
-    Tunables (env): ``MTP_GRID_POOL_SIZE`` forces an exact size (highest
-    priority); ``MTP_GRID_CPU_OVERSUB`` (default 1.0) scales the CPU budget;
-    ``MTP_GRID_WORKER_RAM_GB`` overrides the per-worker RSS estimate (default
-    is *measured* live via ``_measure_worker_rss_gb`` so the no-env run
-    self-sizes to the true safe max — no fixed-guess undershoot).
+      • CPU ceiling  : ``(cpu_phys - 2) // tpw_target`` × ``oversub`` — same
+        as before; the throughput limiter for tiny GPU-bound MLP trials is
+        the Python step loop, not GPU compute.
+
+      • RAM ceiling  : ``(free_ram - 32) / per_worker_peak_rss`` — uses the
+        resource probe's measured *peak* RSS during a real fwd+bwd, not the
+        prior import-time RSS that clamped to 4 GB and let the OOM-killer
+        reap workers on the tail (the WORKER-DIED root cause).
+
+    Final ``pool_size = min(VRAM, CPU, RAM) × 0.70`` (the balanced setting:
+    fills ~70 % of the binding resource and reserves the rest as a deterministic
+    spike buffer).  Floor at 1.
+
+    Tunables (env, advanced — autosizer is preferred):
+      • ``MTP_GRID_POOL_SIZE`` forces an exact size (highest priority).
+      • ``MTP_GRID_CPU_OVERSUB`` scales the CPU budget (default 1.0).
+      • ``MTP_GRID_WORKER_RAM_GB`` overrides the per-worker RSS estimate.
+      • ``MTP_GRID_UTILIZATION_CAP`` overrides the 70 % cap (0.50–1.00).
     """
     import psutil
     _plog = logging.getLogger(__name__)
@@ -938,34 +1102,21 @@ def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
     n_gpus = max(1, n_gpus)
     tpw = _grid_threads_per_worker_target()
 
-    # VRAM ceiling — deliberately loose (0.6 GB/worker ≫ measured ~0.33);
-    # never the binding constraint for these tiny trials, just a backstop.
+    # ── VRAM ceiling (measured peak × 1.5 safety, plus reserve) ─────────────
     vram_total = _query_total_vram_gb()
-    n_vram = max(1, int(vram_total / 0.6))
+    peak_vram = _measure_worker_peak_vram_gb()                  # already × 1.5
+    vram_per_worker = peak_vram + VRAM_RESERVE_GB
+    n_vram = max(1, int(vram_total / max(0.5, vram_per_worker)))
 
-    # CPU ceiling — the real throughput limiter.  Leave 2 cores for
-    # OS/main/drain.  Cores are SHARED across GPUs (not per-GPU), so there is
-    # no `* n_gpus` here.  _compute_threads_per_worker floors at 2 threads/
-    # worker, so total torch threads ≈ pool*2 — halve the usable cores so the
-    # pool keeps total threads ≈ core count (not 2x oversubscribed).  oversub
-    # defaults to 1.0: oversubscribing these CPU-bound trials slows every run.
+    # ── CPU ceiling ─────────────────────────────────────────────────────────
     try:
         oversub = float(os.environ.get("MTP_GRID_CPU_OVERSUB", "1.0"))
     except ValueError:
         oversub = 1.0
     oversub = max(1.0, oversub)
-    # Size the pool so total torch threads ≈ cpu_phys (NOT 2× — the pool=100
-    # on a 48-core box that ran 0/204 in 6h40m was ~2× oversubscribed).  With
-    # ``tpw`` threads/worker, pool = (cpu_phys-2)//tpw keeps total ≈ cores.
-    # tpw is 1 on HPC for these tiny GPU-bound trials (intra-op parallelism
-    # buys nothing for a 5-joint MLP; the limiter is the Python loop / GPU
-    # dispatch), which ~doubles the pool vs the old hardcoded //2.
     n_cpu = max(1, int(((cpu_phys - 2) // max(1, tpw)) * oversub))
 
-    # RAM ceiling — the real "don't crash the system" guard.  Size the pool so
-    # the total worker RSS stays clear of available RAM with a safety margin.
-    # Default per-worker RSS is MEASURED (not a fixed guess) so the auto pool
-    # reflects this box and doesn't leave RAM on the table.
+    # ── RAM ceiling (measured peak RSS) ─────────────────────────────────────
     _env_ram = os.environ.get("MTP_GRID_WORKER_RAM_GB", "").strip()
     if _env_ram:
         try:
@@ -975,23 +1126,33 @@ def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
             per_worker_ram, _ram_src = _measure_worker_rss_gb(), "measured"
     else:
         per_worker_ram, _ram_src = _measure_worker_rss_gb(), "measured"
-    per_worker_ram = max(0.5, per_worker_ram)
+    per_worker_ram = max(1.0, per_worker_ram)
     free_ram = _query_free_ram_gb()
-    # 32 GB margin (was 16): measured per-worker RSS undershoots steady state
-    # (RSS grows post-import — CUDA context, caching allocator, dataset
-    # tensors, autograd graph), so a tight margin gets eaten into swap.
     ram_safety_gb = 32.0
     n_ram = max(1, int((free_ram - ram_safety_gb) / per_worker_ram))
 
-    pool_size = max(1, min(n_vram, n_cpu, n_ram))
+    # ── Combine: take the binding axis then apply utilization cap ───────────
+    raw = max(1, min(n_vram, n_cpu, n_ram))
+    try:
+        util_cap = float(os.environ.get("MTP_GRID_UTILIZATION_CAP", "0.70"))
+    except ValueError:
+        util_cap = 0.70
+    util_cap = min(1.0, max(0.50, util_cap))
+    pool_size = max(1, int(raw * util_cap))
+
     _bound = min(
         (("VRAM", n_vram), ("CPU", n_cpu), ("RAM", n_ram)), key=lambda kv: kv[1]
     )[0]
     _plog.info(
-        "pool_size=%d  (ceilings: VRAM=%d  CPU=%d[oversub=%.1f]  "
-        "RAM=%d[%s rss=%.2fGB, free=%.0fGB-%.0f safety]  → bound by %s)",
-        pool_size, n_vram, n_cpu, oversub, n_ram, _ram_src,
-        per_worker_ram, free_ram, ram_safety_gb, _bound,
+        "pool_size=%d (raw=%d × util_cap=%.2f)  ceilings: "
+        "VRAM=%d[peak=%.2fGB+reserve=%.2f]  "
+        "CPU=%d[phys=%d,tpw=%d,oversub=%.1f]  "
+        "RAM=%d[%s rss=%.2fGB, free=%.0fGB-%.0f safety]  → bound by %s",
+        pool_size, raw, util_cap,
+        n_vram, peak_vram, VRAM_RESERVE_GB,
+        n_cpu, cpu_phys, tpw, oversub,
+        n_ram, _ram_src, per_worker_ram, free_ram, ram_safety_gb,
+        _bound,
     )
     return pool_size
 
@@ -1267,6 +1428,13 @@ def _run_sequential(
 _POOL_PROGRESS_QUEUE: "mp.Queue | None" = None
 _POOL_THREADS_PER_WORKER: int = 2
 _POOL_GPU_ID: int = 0
+# Heavy-import cache populated in ``_pool_init``.  Doing these imports ONCE per
+# worker lifetime instead of per trial removes ~5–10 s of latency from every
+# dispatch and means the slot's "start" message lands within ~1 s of admit
+# (was ~30–60 s — the "waiting … nothing training starts" symptom).
+_POOL_TRAIN_JOB_CTOR: Any = None        # pipeline.TrainJob
+_POOL_RUN_TRAINING: Any = None          # pipeline.run_training
+_POOL_STRATEGIES: dict[str, Any] = {}   # arch → strategy instance
 
 
 def _pool_init(
@@ -1290,8 +1458,15 @@ def _pool_init(
     ``maxtasksperchild`` recycle blocked forever on ``queue.get()`` and silently
     hung the whole grid.  A constant has no such failure mode and survives
     unlimited worker recycling.
+
+    Heavy imports (pipeline, strategies, EDR strategy) happen here ONCE and
+    are cached in module globals (``_POOL_TRAIN_JOB_CTOR``, ``_POOL_RUN_TRAINING``,
+    ``_POOL_STRATEGIES``).  Per-trial dispatch only does the (cheap) skip-existing
+    check and trial submission, so a fresh worker's first slot flips to
+    ``running`` within ~1 s of dispatch instead of ~30–60 s.
     """
     global _POOL_PROGRESS_QUEUE, _POOL_THREADS_PER_WORKER, _POOL_GPU_ID
+    global _POOL_TRAIN_JOB_CTOR, _POOL_RUN_TRAINING, _POOL_STRATEGIES
     _POOL_PROGRESS_QUEUE = progress_queue
     _POOL_THREADS_PER_WORKER = int(threads_per_worker)
     _POOL_GPU_ID = int(gpu_id)
@@ -1336,6 +1511,57 @@ def _pool_init(
             torch.backends.cuda.matmul.allow_tf32  = True
             torch.backends.cudnn.allow_tf32        = True
 
+    # ── Pre-warm heavy imports (pipeline, strategies, EDR) ─────────────────
+    # The spawn worker inherits NO sys.path, so we restore the two roots first.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _repo_root = str(_Path(__file__).resolve().parents[2])
+    if _repo_root not in _sys.path:
+        _sys.path.insert(0, _repo_root)
+    _edr_dir = str(_Path(__file__).resolve().parent / "Equivariant-Decomposed-Residual")
+    if _edr_dir not in _sys.path:
+        _sys.path.insert(0, _edr_dir)
+
+    try:
+        from Neural_Networks.models.shared.pipeline import TrainJob, run_training
+        from Neural_Networks.models.shared.strategies import (
+            PLAIN_STRATEGY, PHYSICS_REG_STRATEGY,
+        )
+        from edr_strategy import EDR_STRATEGY  # noqa: E402
+        _POOL_TRAIN_JOB_CTOR = TrainJob
+        _POOL_RUN_TRAINING = run_training
+        _POOL_STRATEGIES = {
+            "fnn":      PLAIN_STRATEGY,
+            "physreg":  PHYSICS_REG_STRATEGY,
+            "edr":      EDR_STRATEGY,
+        }
+    except Exception as exc:
+        # If imports fail here, every _run_one_trial call will retry inline
+        # (the per-trial fallback path is preserved) and surface the real error.
+        logging.getLogger(__name__).warning(
+            "_pool_init: pre-warm import failed (will retry per-trial): %s", exc,
+        )
+
+    # One-line readiness signal — visible in the rich log pane / non-TTY fallback.
+    logging.getLogger(__name__).info(
+        "pool_init_done  pid=%d  gpu=%d  tpw=%d  imports=%s",
+        os.getpid(), _POOL_GPU_ID, int(threads_per_worker),
+        "ok" if _POOL_RUN_TRAINING is not None else "deferred",
+    )
+
+
+def _pool_warmup_noop() -> str:
+    """No-op task used as a synchronous warmup barrier.
+
+    The main process submits one of these per worker slot BEFORE dispatching any
+    real trial, and joins on the results.  This guarantees every worker has
+    completed ``_pool_init`` (including the heavy imports above) so the first
+    real trial dispatches into a fully-warmed worker — the dashboard's "waiting"
+    state lasts ~1 s instead of the cold-start window of ~30–60 s.
+    """
+    import os as _os
+    return f"warm:pid={_os.getpid()}:gpu={_POOL_GPU_ID}"
+
 
 def _run_one_trial(
     trial: dict[str, Any],
@@ -1356,29 +1582,29 @@ def _run_one_trial(
     os.makedirs(models_dir, exist_ok=True)
 
     try:
-        import sys as _sys
-        from pathlib import Path as _Path
+        # Use pre-warmed imports from _pool_init.  If pre-warm failed (rare),
+        # fall back to inline imports so we never lose the trial.
+        TrainJob = _POOL_TRAIN_JOB_CTOR
+        run_training = _POOL_RUN_TRAINING
+        strategy_map = _POOL_STRATEGIES
+        if TrainJob is None or run_training is None or not strategy_map:
+            import sys as _sys
+            from pathlib import Path as _Path
+            _repo_root = str(_Path(__file__).resolve().parents[2])
+            if _repo_root not in _sys.path:
+                _sys.path.insert(0, _repo_root)
+            _edr_dir = str(_Path(__file__).resolve().parent / "Equivariant-Decomposed-Residual")
+            if _edr_dir not in _sys.path:
+                _sys.path.insert(0, _edr_dir)
+            from Neural_Networks.models.shared.pipeline import TrainJob, run_training  # noqa
+            from Neural_Networks.models.shared.strategies import (
+                PLAIN_STRATEGY, PHYSICS_REG_STRATEGY,
+            )
+            from edr_strategy import EDR_STRATEGY  # noqa: E402
+            strategy_map = {
+                "fnn": PLAIN_STRATEGY, "physreg": PHYSICS_REG_STRATEGY, "edr": EDR_STRATEGY,
+            }
 
-        # Spawn workers inherit no state: ensure both the repo root (for
-        # ``import Neural_Networks``) and the EDR dir are on sys.path.
-        _repo_root = str(_Path(__file__).resolve().parents[2])
-        if _repo_root not in _sys.path:
-            _sys.path.insert(0, _repo_root)
-        _edr_dir = str(_Path(__file__).resolve().parent / "Equivariant-Decomposed-Residual")
-        if _edr_dir not in _sys.path:
-            _sys.path.insert(0, _edr_dir)
-
-        from Neural_Networks.models.shared.pipeline import TrainJob, run_training
-        from Neural_Networks.models.shared.strategies import (
-            PLAIN_STRATEGY, PHYSICS_REG_STRATEGY,
-        )
-        from edr_strategy import EDR_STRATEGY  # noqa: E402
-
-        strategy_map = {
-            "fnn":      PLAIN_STRATEGY,
-            "physreg":  PHYSICS_REG_STRATEGY,
-            "edr":      EDR_STRATEGY,
-        }
         strategy = strategy_map[arch]
 
         # Skip-existing inside the worker — cheap, avoids redundant data load.
@@ -1482,6 +1708,11 @@ class _TUIState:
     all_results: list = field(default_factory=list)        # uncapped — system of record
     best_by_arch: dict = field(default_factory=dict)       # arch → best _Result so far
     t_start: float = 0.0
+    # Most recent failing trial — surfaced in the dashboard so the user can see
+    # the cause without opening _errors/trial_errors.log mid-run.  Both empty
+    # when no failures yet.
+    last_error_arch: str = ""
+    last_error_msg:  str = ""
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -1617,12 +1848,25 @@ def _render_dashboard(state: _TUIState) -> Any:
         "     ",
         ("OK ",   "bold"), (f"{ok_n:>2d}",   "bold green"),
         "   ", ("SKIP ", "bold"), (f"{skip_n:>2d}", "bold yellow"),
-        "   ", ("FAIL ", "bold"), (f"{fail_n:>2d}", "bold red"),
+        "   ", ("FAIL ", "bold"),
+        (f"{fail_n:>2d}", "bold red reverse" if fail_n > 0 else "bold red"),
     )
 
     res_outer = Table.grid(expand=True)
     res_outer.add_row(res_tbl)
     res_outer.add_row(counts)
+    # Surface the most recent error so the user can act without tailing the
+    # _errors/trial_errors.log file.  Empty until the first failure.
+    with state.lock:
+        last_err_arch = state.last_error_arch
+        last_err_msg  = state.last_error_msg
+    if last_err_msg:
+        err_line = Text.assemble(
+            ("LAST ERROR  ", "bold red"),
+            (f"{last_err_arch}  ", "bold"),
+            (last_err_msg[:180], "red"),
+        )
+        res_outer.add_row(err_line)
     resources_panel = Panel(res_outer, title="resources (live)", border_style="blue", padding=(0, 1))
 
     # ── Active trials (two lines per slot, capped at 5 visible) ────────────
@@ -2055,11 +2299,27 @@ def _run_parallel_collect(
     log.info("CUDA ctx overhead (per worker): %.2f GB", cuda_ctx_gb)
 
     # Per-trial estimates — different HPs will differ in future grids.
-    estimates = [_estimate_trial_mem(t["hp"], t["arch"], cuda_ctx_gb) for t in trials]
+    # Two sources are reconciled: (a) the analytical model-size estimate, and
+    # (b) the resource probe's *measured* peak VRAM from a real fwd+bwd.
+    # The probe is the ground truth (the analytical formula systematically
+    # undershoots by 5–20× because it ignores cuDNN workspaces, the caching
+    # allocator's high-water mark, and torch.compile graph buffers).  Floor
+    # every trial's VRAM estimate at the measured peak so the admission loop
+    # never over-commits a GPU.
+    measured_peak_vram_gb = _measure_worker_peak_vram_gb()
+    log.info("Probe peak VRAM (per trial, ×1.5 safety): %.2f GB",
+             measured_peak_vram_gb)
+    estimates: list[tuple[float, float]] = []
+    for t in trials:
+        v_anal, r_anal = _estimate_trial_mem(t["hp"], t["arch"], cuda_ctx_gb)
+        # Use the LARGER of analytical and probed peak as the dispatch budget.
+        v_eff = max(v_anal, measured_peak_vram_gb)
+        estimates.append((v_eff, r_anal))
     vram_max = max(e[0] for e in estimates)
     vram_min = min(e[0] for e in estimates)
     ram_max  = max(e[1] for e in estimates)
-    log.info("Per-trial estimate: vram∈[%.2f, %.2f] GB  ram_max=%.2f GB", vram_min, vram_max, ram_max)
+    log.info("Per-trial estimate: vram∈[%.2f, %.2f] GB  ram_max=%.2f GB",
+             vram_min, vram_max, ram_max)
 
     # Largest-first: big trials slot in when VRAM is cold.
     pending: list[tuple[dict, tuple[float, float]]] = sorted(
@@ -2199,6 +2459,26 @@ def _run_parallel_collect(
     # Monotonic timestamp of the last admit/reap — drives the starvation guard.
     last_progress_t: list[float] = [time.time()]
 
+    # ── RAM safety floor for the circuit breaker ────────────────────────────
+    # Keep at least this much RAM truly free, even under burst-admit pressure.
+    # On HPC (lots of RAM) this is a small fraction of the box; on a laptop the
+    # default is sized to leave headroom for the desktop environment.  Scales
+    # with `_total_ram_gb` so the same code path works across machines.
+    ram_safety_floor_gb = max(8.0, _total_ram_gb * 0.05)
+
+    # Per-trial wallclock timeout (default 45 min).  A trial running longer
+    # than this is logged as a `slow_trial` warning every check; it is NOT
+    # forcibly terminated (terminating a multiprocessing.Pool worker requires
+    # killing the whole per-GPU pool, which would lose other live trials).
+    # The starvation guard further down catches *wedged* grids (pool empty AND
+    # pending work AND no progress for STARVATION_TIMEOUT_SEC).
+    try:
+        _trial_timeout_min = int(os.environ.get("MTP_GRID_TRIAL_TIMEOUT_MIN", "45"))
+    except ValueError:
+        _trial_timeout_min = 45
+    max_trial_sec: float = float(max(10, _trial_timeout_min) * 60)
+    _slow_trial_warned: set = set()
+
     def _set_counts() -> None:
         with state.lock:
             state.in_flight = len(in_flight_map)
@@ -2241,6 +2521,11 @@ def _run_parallel_collect(
                 first_line = err_msg.splitlines()[-1] if err_msg else "(no traceback)"
                 log.warning("Trial FAIL  %s  →  %s  (see %s)",
                             _hp_desc(trial['arch'], trial['hp']), first_line[:160], _log_path)
+                # Surface the latest failure in the dashboard so the user can
+                # see it without tailing the error log mid-run.
+                with state.lock:
+                    state.last_error_arch = trial['arch']
+                    state.last_error_msg = first_line[:200]
             elapsed_trial = time.time() - submitted_at
             rmse = result.get("rmse")
             with state.lock:
@@ -2317,16 +2602,52 @@ def _run_parallel_collect(
         last_progress_t[0] = time.time()
         _set_counts()
 
+    # Probe-measured peak RSS per worker, used by the RAM circuit breaker
+    # below.  Falls back to a safe estimate if the probe wasn't run.
+    _per_worker_peak_rss_gb = _measure_worker_rss_gb() / 1.2  # undo the 1.2x safety
+    # Circuit-breaker threshold: dispatch is held off if free RAM would drop
+    # below half the projected steady-state pool RSS after admitting one more.
+    # Prevents the corner case where individual trials silently spike past the
+    # probe-measured peak (large HP combos, dataset cache growth, etc.) and the
+    # OS OOM-killer would otherwise reap workers.
+    def _ram_circuit_breaker_open() -> bool:
+        with state.lock:
+            ram_free = state.free_ram_gb
+        in_flight_n = len(in_flight_map)
+        # Project the RAM impact of one more admit on top of currently running
+        # workers.  Use the *peak* RSS (probe ground truth) per worker.
+        projected_extra = _per_worker_peak_rss_gb * 1.0
+        # If admitting would push the system past 90 % RAM utilization, hold.
+        ram_threshold = ram_safety_floor_gb
+        if ram_free < projected_extra + ram_threshold:
+            return True
+        return False
+
     def _try_admit_one() -> bool:
         """Dispatch the next trial onto a GPU that can hold it.
 
-        VRAM is a hard PER-GPU gate (a GPU OOM crashes the trial outright).
-        RAM is advisory only: pool workers' base RSS is already charged once
-        spawned and every admission reuses a worker whose marginal cost is the
-        trial's tensor working set; gating dispatch on the full RAM estimate
-        previously deadlocked the grid, so we only log RAM tightness.
+        Three gates:
+          1. VRAM (hard, per-GPU): a CUDA-OOM crashes the trial outright.
+          2. RAM circuit breaker (advisory): hold dispatch if admitting would
+             push free RAM below the safety floor + projected per-trial spike.
+             This prevents OOM-kills the probe's static peak can't anticipate.
+          3. Reserve floor (legacy): warn if free RAM is below RAM_RESERVE_GB
+             but still dispatch (reused workers pay marginal cost only).
         """
         if not pending or _free_slots_total() == 0:
+            return False
+        # RAM circuit breaker — if open, hold off this admit cycle.  Returning
+        # False here causes the admission loop to sleep + retry; the breaker
+        # closes when a running trial completes and frees its working set.
+        if _ram_circuit_breaker_open() and in_flight_map:
+            with state.lock:
+                ram_free = state.free_ram_gb
+            log.warning(
+                "RAM circuit breaker OPEN — free=%.2f GB < %.2f GB threshold "
+                "(in-flight=%d × peak=%.2f GB).  Waiting for a trial to free RAM.",
+                ram_free, ram_safety_floor_gb + _per_worker_peak_rss_gb,
+                len(in_flight_map), _per_worker_peak_rss_gb,
+            )
             return False
         trial, est = pending[0]                       # largest-first
         with state.lock:
@@ -2384,6 +2705,34 @@ def _run_parallel_collect(
         n_gpus_eff, per_gpu_counts, maxtasks,
     )
 
+    # ── Synchronous warmup barrier ──────────────────────────────────────────
+    # Submit one no-op task per worker slot and join on the results.  This
+    # guarantees every worker has completed ``_pool_init`` (including the
+    # pre-warmed pipeline/strategies imports) BEFORE the first real trial
+    # dispatches.  Without this, the first ``pool_size`` trials race against
+    # cold-start imports and the dashboard shows "waiting" for ~30–60 s.
+    try:
+        _t0_warm = time.time()
+        warm_handles: list = []
+        for g, p in enumerate(pools):
+            for _ in range(per_gpu_counts[g]):
+                warm_handles.append(p.apply_async(_pool_warmup_noop))
+        # Liberal per-worker timeout (300 s) accommodates HPC's heavy import
+        # path; the warmup never sees user code, so a hang here is structural.
+        warm_results = []
+        for ar in warm_handles:
+            try:
+                warm_results.append(ar.get(timeout=300))
+            except Exception as exc:
+                log.warning("warmup task failed (worker may still be usable): %s", exc)
+        log.info(
+            "Pool warmup barrier passed: %d/%d workers ready in %.1fs",
+            len(warm_results), len(warm_handles), time.time() - _t0_warm,
+        )
+    except Exception as exc:
+        # A warmup failure is not fatal — real dispatch will surface true errors.
+        log.warning("Warmup barrier raised (non-fatal): %s", exc)
+
     def _terminate_all_pools() -> None:
         for p in pools:
             try:
@@ -2425,6 +2774,21 @@ def _run_parallel_collect(
                     time.sleep(ADMISSION_POLL_SEC)
             elif in_flight_map:
                 time.sleep(ADMISSION_POLL_SEC)
+            # Slow-trial watchdog: warn once per trial that exceeds the
+            # wallclock budget.  Does NOT terminate (would kill the whole
+            # GPU pool and lose other live trials), just surfaces the wedge
+            # so the user can decide whether to abort.
+            _now = time.time()
+            for ar, (_trial, _est, _slot, submitted_at, _gpu) in list(in_flight_map.items()):
+                age = _now - submitted_at
+                if age > max_trial_sec and id(ar) not in _slow_trial_warned:
+                    _slow_trial_warned.add(id(ar))
+                    log.warning(
+                        "SLOW TRIAL  arch=%s  %s  age=%.0fs (limit=%.0fs).  "
+                        "Continuing — not terminated to preserve sibling trials.",
+                        _trial["arch"], _hp_desc(_trial["arch"], _trial["hp"]),
+                        age, max_trial_sec,
+                    )
             # Starvation guard: pool fully idle, work still pending, and no
             # progress for STARVATION_TIMEOUT_SEC ⇒ genuinely wedged (every
             # remaining trial's VRAM estimate exceeds every GPU forever).
