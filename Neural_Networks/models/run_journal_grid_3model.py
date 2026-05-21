@@ -125,12 +125,13 @@ BATCH_SIZE: int = 512
 # admission loop needed 3+ GB free just to dispatch one trial. Workers would
 # finish their first task and then stall indefinitely because free RAM
 # (post-worker-RSS) never climbed back to 3 GB. 1.0 GB is adequate protection.
-# VRAM reserve bumped 0.5 → 2.0 GB (2026-05-20): cuDNN kernel selection +
-# torch.compile workspaces can spike a few hundred MB above measured peak;
-# 0.5 GB was too tight on the A100 burst-admit window and a 7-worker bunch
-# could over-commit before the 1 Hz poller observed the allocation.  At 2 GB
-# the headroom is unambiguous and still trivial vs 80 GB cards.
-VRAM_RESERVE_GB: float = 2.0
+# VRAM reserve history:
+#   0.5 GB (pre 2026-05-20) — too tight; 7-worker bursts over-committed.
+#   2.0 GB (2026-05-20)     — safe margin for cuDNN spikes / compile workspaces.
+#   1.0 GB (2026-05-22)     — A100 80GB cuDNN spikes are <500 MB; 1 GB is
+#                             still 2× the observed worst-case spike on this
+#                             dataset and frees 2 GB extra usable across 2 GPUs.
+VRAM_RESERVE_GB: float = 1.0
 RAM_RESERVE_GB:  float = 1.0
 
 # Polling cadence for the admission loop.
@@ -254,9 +255,16 @@ FIXED_HP_EDR: dict[str, Any] = {
     # count, so no early-truncation risk).  Patience 150→50 trims the
     # plateau tail (~100 epochs × 2.1 min/ep ≈ 3.5h saved per trial); now
     # matches FNN/PhysReg.
+    #
+    # 2026-05-22 BATCH/LR SCALE-UP: HPC live trace showed A100×2 at 16% VRAM
+    # / 24% RAM utilisation (each EDR trial only ~1.6 GB VRAM at batch=256).
+    # Bumped batch 256→1024 (4×) with √4 LR scaling 3e-4→6e-4 — uses the
+    # spare VRAM (each trial → ~6 GB, still 8% per trial on an 80 GB A100)
+    # to cut per-epoch step count 4× and ~2.3× the per-epoch wall-clock.
+    # Per-trial expected to drop from ~3.7 h → ~1.6 h on A100.
     "epochs":                  1000,   # longer horizon — EDR keeps learning (was 1500)
-    "batch_size":              256,
-    "learning_rate":           3e-4,
+    "batch_size":              1024,   # 2026-05-22: 256→1024 (A100 has 6× VRAM headroom; faster epochs)
+    "learning_rate":           6e-4,   # 2026-05-22: 3e-4→6e-4 (√4 scale for 4× batch bump)
     "weight_decay":            2e-3,
     "optimizer":               "adamw",
     # R4 — same scheduler family as FNN/PhysReg (fair protocol); EDR raises
@@ -310,6 +318,15 @@ _FIXED_HP_BY_ARCH: dict[str, dict[str, Any]] = {
     "physreg":  FIXED_HP_PHYSREG,
     "edr":      FIXED_HP_EDR,
 }
+
+# Probe batch size = the LARGEST batch any arch will actually train at, so the
+# measured peak VRAM bounds every trial's real footprint (the auto-sizer then
+# never over-commits a GPU).  Before 2026-05-22 this was hardcoded 512 while
+# EDR trained at 256; after the EDR batch bump to 1024 the probe must track it
+# or the VRAM ceiling would undercount and pool oversubscription could OOM.
+_PROBE_BATCH_SIZE: int = max(
+    int(hp.get("batch_size", 512)) for hp in _FIXED_HP_BY_ARCH.values()
+)
 
 # ============================================================================
 # ── RUN MODES: quick test  vs  detailed HP sweep ────────────────────────────
@@ -1013,7 +1030,7 @@ def _probe_resource_peaks(dataset_dir: str = "", force: bool = False) -> dict[st
         "device = torch.device('cuda' if has_cuda else 'cpu')\n"
         "t0 = time.time()\n"
         "try:\n"
-        f"    loaders = make_dataloaders({dataset_dir!r}, batch_size=512, mode='pointwise', "
+        f"    loaders = make_dataloaders({dataset_dir!r}, batch_size={_PROBE_BATCH_SIZE}, mode='pointwise', "
         "num_workers=0, normalise=True)\n"
         "    dataset_load_sec = time.time() - t0\n"
         "    train_loader = loaders['train']\n"
@@ -1029,7 +1046,7 @@ def _probe_resource_peaks(dataset_dir: str = "", force: bool = False) -> dict[st
         "    'hidden_layers':   [512, 512, 512],\n"
         "    'activation':      'silu',\n"
         "    'dropout':         0.3,\n"
-        "    'batch_size':      512,\n"
+        f"    'batch_size':      {_PROBE_BATCH_SIZE},\n"
         "    'learning_rate':   1e-3,\n"
         "    'weight_decay':    5e-3,\n"
         "    'feature_noise_std': 0.0,\n"
@@ -1235,7 +1252,13 @@ def _compute_pool_size(cuda_available: bool, n_gpus: int = 1) -> int:
 
     # ── CPU ceiling ─────────────────────────────────────────────────────────
     try:
-        oversub = float(os.environ.get("MTP_GRID_CPU_OVERSUB", "1.0"))
+        # 2026-05-22: HPC default oversub 1.0→1.5.  EDR's per-step time is
+        # GPU-dispatch-bound, not CPU-bound, so 1.5 workers/core overlaps data
+        # loading without contention.  This only RAISES the CPU ceiling; the
+        # VRAM ceiling (now probed at the true batch size) still binds first
+        # when each trial is VRAM-heavy, so it can't trigger an OOM.
+        _oversub_default = "1.5" if _detect_env() == "hpc" else "1.0"
+        oversub = float(os.environ.get("MTP_GRID_CPU_OVERSUB", _oversub_default))
     except ValueError:
         oversub = 1.0
     oversub = max(1.0, oversub)
