@@ -157,18 +157,60 @@ def test_result_basenames_mirror_only_detailed():
 
 # ── new EDR grid + horizon ──────────────────────────────────────────────────
 
-def test_edr_detailed_grid_is_210():
-    assert len(G._cartesian(G.GRID_EDR_DETAILED)) == 210
+def test_edr_detailed_grid_is_tightened():
+    # 2026-05-22: grid tightened to 16 = 2 widths × 2 λ × 2 cdrop × 2 fqdd × 1 seed.
+    # Rationale: per-HP analysis of the prior 56-run grid showed
+    # correction_dropout=0.05 dragged test_rmse from 0.092→0.106 (gap_mean
+    # 0.022 vs 0.013) — dropped entirely. See project_edr_dropout_root_cause.
+    # Single seed=[42] per user request; multi-seed verification lives in DATAEFF.
+    assert len(G._cartesian(G.GRID_EDR_DETAILED)) == 16
+    # The dropped values must remain dropped — guard against accidental restore.
+    assert 0.05 not in G.GRID_EDR_DETAILED["correction_dropout"]
+    assert 0.15 not in G.GRID_EDR_DETAILED["correction_dropout"]
+    # Single seed in DETAILED — multi-seed coverage now lives in DATAEFF.
+    assert G.GRID_EDR_DETAILED["seed"] == [42]
 
 
-def test_uniform_horizon_all_archs():
-    # epochs=1500 and patience=150 for ALL three nets (fair protocol)
-    for hp in (G.FIXED_HP_FNN, G.FIXED_HP_PHYSREG, G.FIXED_HP_EDR):
-        assert hp["epochs"] == 1500
-        assert hp["patience"] == 150
+def test_horizon_per_arch():
+    # 2026-05-22: horizon is no longer uniform — EDR was wastefully budgeted
+    # at 1500 epochs but no run ever reached that (median 330, p90 612).
+    # FNN/PhysReg keep their original horizon; EDR trimmed to 1000.
+    assert G.FIXED_HP_FNN["epochs"] == 1500
+    assert G.FIXED_HP_PHYSREG["epochs"] == 1500
+    assert G.FIXED_HP_EDR["epochs"] == 1000
+    # 2026-05-22: patience is now uniform at 50 across archs (was 150 for EDR).
+    assert G.FIXED_HP_FNN["patience"] == 50
+    assert G.FIXED_HP_PHYSREG["patience"] == 50
+    assert G.FIXED_HP_EDR["patience"] == 50
     # structural levers stay OFF (no re-opened experiments)
     for k in ("coriolis_structural", "inertia_psd", "spectral_norm"):
         assert G.FIXED_HP_EDR[k] is False
+
+
+def test_write_resume_status_roundtrip(tmp_path):
+    # Resume-status writer (2026-05-22) records what is done/pending so the
+    # user can read a single JSON between HPC jobs.
+    import json
+    skipped = [
+        {"arch": "edr", "hp": {"seed": 42, "correction_dropout": 0.30,
+                               "torch_compile": True, "_q_mean": [0.0]*5}},
+        {"arch": "fnn", "hp": {"seed": 42}},
+    ]
+    pending = [
+        {"arch": "edr", "hp": {"seed": 1, "correction_dropout": 0.30}},
+    ]
+    path = str(tmp_path / "status.json")
+    G._write_resume_status(skipped, pending, path)
+    with open(path) as f:
+        blob = json.load(f)
+    assert blob["total_planned"] == 3
+    assert blob["completed_count"] == 2
+    assert blob["pending_count"] == 1
+    assert blob["completed_by_arch"] == {"edr": 1, "fnn": 1}
+    assert blob["pending_by_arch"] == {"edr": 1}
+    # Skip keys (torch_compile, _q_mean) are excluded from the pending signature
+    # so the file stays human-readable.
+    assert blob["pending_trials"][0]["hp_signature"] == {"seed": 1, "correction_dropout": 0.30}
 
 
 def test_default_mode_is_combined(monkeypatch):

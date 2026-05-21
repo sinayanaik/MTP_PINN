@@ -1,0 +1,614 @@
+total_models: 5
+last_updated: '2026-05-22T02:15:23.133619'
+models:
+- model_type: EDR_A2b_lowreg
+  run_id: EDR_A2b_lowreg_ep250_rmse0.08961_frac0.15_seed0_lr3e-4_wd1e-5_bs512_creg0.002_w48-48_cdo0.3_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_ffmlp_psdFalse_ema0.9_snFalse_20260522_0215
+  run_dir: /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/EDR_A2b_lowreg/EDR_A2b_lowreg_ep250_rmse0.08961_frac0.15_seed0_lr3e-4_wd1e-5_bs512_creg0.002_w48-48_cdo0.3_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_ffmlp_psdFalse_ema0.9_snFalse_20260522_0215
+  trained_at: '2026-05-22T02:15:23.133518'
+  model_path: /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/EDR_A2b_lowreg/EDR_A2b_lowreg_ep250_rmse0.08961_frac0.15_seed0_lr3e-4_wd1e-5_bs512_creg0.002_w48-48_cdo0.3_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_ffmlp_psdFalse_ema0.9_snFalse_20260522_0215/model.pt
+  training:
+    time_seconds: 775.6
+    time_formatted: 12m 55s
+    epochs_ran: 250
+    epochs_max: 250
+    stopped_early: false
+    final_train_loss: 0.1052842
+    final_val_loss: 0.1181114
+  hardware:
+    device: cuda:NVIDIA GeForce RTX 3050 Laptop GPU
+    torch_version: 2.5.1+cu124
+  data:
+    num_train_samples: 20930
+    num_val_samples: 63765
+    num_test_samples: 105200
+  hyperparams:
+    epochs: 250
+    batch_size: 512
+    data_train_fraction: 0.15
+    data_train_seed: 0
+    stride: 1
+    seed: 42
+    early_stopping: false
+    patience: 10000
+    min_delta: 1.0e-05
+    print_every: 5
+    diagnostic_test_eval: true
+    torch_compile: false
+    snapshot_every: 0
+    learning_rate: 0.0003
+    weight_decay: 1.0e-05
+    optimizer: adamw
+    lr_scheduler: warmup_cosine
+    warmup_cosine_min_factor: 0.05
+    grad_clip_norm: 1.0
+    feature_noise_std: 0.02
+    ema_decay: 0.9
+    early_stop_metric: val_rmse
+    activation: silu
+    gravity_hidden:
+    - 48
+    - 48
+    inertia_hidden:
+    - 48
+    - 48
+    coriolis_hidden:
+    - 48
+    - 48
+    friction_hidden:
+    - 24
+    - 24
+    correction_dropout: 0.3
+    correction_gain_ramp_frac: 0.3
+    phase2_start_epoch: null
+    lambda_correction_reg: 0.002
+    correction_reg_inertia_normalize: true
+    enable_passivity_loss: false
+    lambda_passivity: 0.01
+    coriolis_structural: false
+    inertia_psd: false
+    spectral_norm: false
+    friction_form: mlp
+    use_friction_qdd: true
+    use_phys_cond: true
+    coriolis_matrix_form: false
+    _q_mean:
+    - 0.046050681435593224
+    - 0.2553536452949156
+    - -0.04444235929629164
+    - -0.08426595649886473
+    - 0.014318062060619037
+    _q_std:
+    - 0.7940621423668914
+    - 0.36533274402811017
+    - 0.9958711246734849
+    - 0.7509819200873898
+    - 0.7503768025606623
+  metrics:
+    avg_rmse_mean: 0.09440471976995468
+    avg_rmse_pooled: 0.10319156846023027
+    avg_r2_overall: 0.8931151479538689
+    avg_r2_mean: 0.8576337099075317
+    avg_nrmse_mean: 0.07278034090995789
+    avg_mse_mean: 0.010647778399288654
+    avg_pearson_mean: 0.9259715916226329
+    per_joint_rmse:
+    - 0.06794213503599167
+    - 0.16415463387966156
+    - 0.09662523865699768
+    - 0.03946465253829956
+    - 0.10383696109056473
+    per_joint_r2:
+    - 0.8783369064331055
+    - 0.8904091119766235
+    - 0.9293920993804932
+    - 0.8453166484832764
+    - 0.744713544845581
+    avg_rmse_traj_macro: 0.08676209098395227
+    test_rmse_mean: 0.09870310127735138
+    test_rmse_pooled: 0.1083512262495561
+    test_rmse_traj_macro: 0.08961046021999024
+    test_r2_overall: 0.8862117540963381
+    test_nrmse_mean: 0.07717155665159225
+    test_mse_mean: 0.011739515699446201
+  val_metrics:
+    rmse_traj_macro: 0.08316415089632537
+    rmse_pooled: 0.09406249827593932
+    rmse_mean: 0.08673754334449768
+    r2_overall: 0.9053514318358548
+    r2_mean: 0.8794214129447937
+    nrmse_mean: 0.07096754014492035
+    per_joint_rmse:
+    - 0.06834717839956284
+    - 0.14723797142505646
+    - 0.08554469794034958
+    - 0.03641326725482941
+    - 0.09614459425210953
+  test_metrics:
+    rmse_traj_macro: 0.08961046021999024
+    rmse_pooled: 0.1083512262495561
+    rmse_mean: 0.09870310127735138
+    r2_overall: 0.8862117540963381
+    r2_mean: 0.8423175811767578
+    nrmse_mean: 0.07717155665159225
+    per_joint_rmse:
+    - 0.06769762188196182
+    - 0.17361204326152802
+    - 0.10276442766189575
+    - 0.0412052683532238
+    - 0.1082361564040184
+- model_type: PhysReg_A2_long
+  run_id: PhysReg_A2_long_ep250_rmse0.09069_frac0.15_seed0_lr3e-4_wd0.005_do0.3_fn0.02_bs512_hl256-512-256_pw0.5_20260522_0201
+  run_dir: /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/PhysReg_A2_long/PhysReg_A2_long_ep250_rmse0.09069_frac0.15_seed0_lr3e-4_wd0.005_do0.3_fn0.02_bs512_hl256-512-256_pw0.5_20260522_0201
+  trained_at: '2026-05-22T02:01:26.223303'
+  model_path: /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/PhysReg_A2_long/PhysReg_A2_long_ep250_rmse0.09069_frac0.15_seed0_lr3e-4_wd0.005_do0.3_fn0.02_bs512_hl256-512-256_pw0.5_20260522_0201/model.pt
+  training:
+    time_seconds: 569.4
+    time_formatted: 9m 29s
+    epochs_ran: 250
+    epochs_max: 250
+    stopped_early: false
+    final_train_loss: 0.092816
+    final_val_loss: 0.1116233
+  hardware:
+    device: cuda:NVIDIA GeForce RTX 3050 Laptop GPU
+    torch_version: 2.5.1+cu124
+  data:
+    num_train_samples: 20930
+    num_val_samples: 63765
+    num_test_samples: 105200
+  hyperparams:
+    epochs: 250
+    batch_size: 512
+    data_train_fraction: 0.15
+    data_train_seed: 0
+    stride: 1
+    seed: 42
+    early_stopping: false
+    patience: 10000
+    min_delta: 1.0e-05
+    print_every: 5
+    diagnostic_test_eval: true
+    torch_compile: false
+    snapshot_every: 0
+    learning_rate: 0.0003
+    weight_decay: 0.005
+    dropout: 0.3
+    activation: silu
+    hidden_layers:
+    - 256
+    - 512
+    - 256
+    optimizer: adamw
+    lr_scheduler: warmup_cosine
+    early_stop_metric: val_rmse
+    grad_clip_norm: 5.0
+    feature_noise_std: 0.02
+    physics_weight: 0.5
+    physics_warmup_fraction: 0.05
+    phi_lr_ratio: 0.1
+  metrics:
+    avg_rmse_mean: 0.09408636391162872
+    avg_rmse_pooled: 0.10277969617420661
+    avg_r2_overall: 0.8939666720355
+    avg_r2_mean: 0.8562561869621277
+    avg_nrmse_mean: 0.07254378497600555
+    avg_mse_mean: 0.010563183575868607
+    avg_pearson_mean: 0.9271985588161226
+    per_joint_rmse:
+    - 0.06885629147291183
+    - 0.16193237900733948
+    - 0.09345545619726181
+    - 0.03821335732936859
+    - 0.10797429829835892
+    per_joint_r2:
+    - 0.8750410079956055
+    - 0.893356204032898
+    - 0.9339486956596375
+    - 0.8549701571464539
+    - 0.7239647507667542
+    avg_rmse_traj_macro: 0.08634876556733627
+    test_rmse_mean: 0.09932749718427658
+    test_rmse_pooled: 0.10893445115950853
+    test_rmse_traj_macro: 0.09069303957919246
+    test_r2_overall: 0.8849834754199423
+    test_nrmse_mean: 0.07782803475856781
+    test_mse_mean: 0.011866290122270584
+  val_metrics:
+    rmse_traj_macro: 0.08086126155236006
+    rmse_pooled: 0.09172723649661475
+    rmse_mean: 0.08442910015583038
+    r2_overall: 0.9099927176814617
+    r2_mean: 0.8847572207450867
+    nrmse_mean: 0.06896969676017761
+    per_joint_rmse:
+    - 0.07165965437889099
+    - 0.144221231341362
+    - 0.07846856117248535
+    - 0.03381054848432541
+    - 0.09398550540208817
+  test_metrics:
+    rmse_traj_macro: 0.09069303957919246
+    rmse_pooled: 0.10893445115950853
+    rmse_mean: 0.09932749718427658
+    r2_overall: 0.8849834754199423
+    r2_mean: 0.8368362188339233
+    nrmse_mean: 0.07782803475856781
+    per_joint_rmse:
+    - 0.06710140407085419
+    - 0.1717832237482071
+    - 0.10146874189376831
+    - 0.0406513586640358
+    - 0.11563277989625931
+- model_type: EDR_A2_long
+  run_id: EDR_A2_long_ep250_rmse0.08933_frac0.15_seed0_lr3e-4_wd1e-5_bs512_creg0.01_w48-48_cdo0.3_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_ffmlp_psdFalse_ema0.9_snFalse_20260522_0151
+  run_dir: /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/EDR_A2_long/EDR_A2_long_ep250_rmse0.08933_frac0.15_seed0_lr3e-4_wd1e-5_bs512_creg0.01_w48-48_cdo0.3_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_ffmlp_psdFalse_ema0.9_snFalse_20260522_0151
+  trained_at: '2026-05-22T01:51:53.194251'
+  model_path: /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/EDR_A2_long/EDR_A2_long_ep250_rmse0.08933_frac0.15_seed0_lr3e-4_wd1e-5_bs512_creg0.01_w48-48_cdo0.3_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_ffmlp_psdFalse_ema0.9_snFalse_20260522_0151/model.pt
+  training:
+    time_seconds: 748.1
+    time_formatted: 12m 28s
+    epochs_ran: 250
+    epochs_max: 250
+    stopped_early: false
+    final_train_loss: 0.1051092
+    final_val_loss: 0.117708
+  hardware:
+    device: cuda:NVIDIA GeForce RTX 3050 Laptop GPU
+    torch_version: 2.5.1+cu124
+  data:
+    num_train_samples: 20930
+    num_val_samples: 63765
+    num_test_samples: 105200
+  hyperparams:
+    epochs: 250
+    batch_size: 512
+    data_train_fraction: 0.15
+    data_train_seed: 0
+    stride: 1
+    seed: 42
+    early_stopping: false
+    patience: 10000
+    min_delta: 1.0e-05
+    print_every: 5
+    diagnostic_test_eval: true
+    torch_compile: false
+    snapshot_every: 0
+    learning_rate: 0.0003
+    weight_decay: 1.0e-05
+    optimizer: adamw
+    lr_scheduler: warmup_cosine
+    warmup_cosine_min_factor: 0.05
+    grad_clip_norm: 1.0
+    feature_noise_std: 0.02
+    ema_decay: 0.9
+    early_stop_metric: val_rmse
+    activation: silu
+    gravity_hidden:
+    - 48
+    - 48
+    inertia_hidden:
+    - 48
+    - 48
+    coriolis_hidden:
+    - 48
+    - 48
+    friction_hidden:
+    - 24
+    - 24
+    correction_dropout: 0.3
+    correction_gain_ramp_frac: 0.3
+    phase2_start_epoch: null
+    lambda_correction_reg: 0.01
+    correction_reg_inertia_normalize: true
+    enable_passivity_loss: false
+    lambda_passivity: 0.01
+    coriolis_structural: false
+    inertia_psd: false
+    spectral_norm: false
+    friction_form: mlp
+    use_friction_qdd: true
+    use_phys_cond: true
+    coriolis_matrix_form: false
+    _q_mean:
+    - 0.046050681435593224
+    - 0.2553536452949156
+    - -0.04444235929629164
+    - -0.08426595649886473
+    - 0.014318062060619037
+    _q_std:
+    - 0.7940621423668914
+    - 0.36533274402811017
+    - 0.9958711246734849
+    - 0.7509819200873898
+    - 0.7503768025606623
+  metrics:
+    avg_rmse_mean: 0.09414535015821457
+    avg_rmse_pooled: 0.10291861226595962
+    avg_r2_overall: 0.8936798509716544
+    avg_r2_mean: 0.8584705591201782
+    avg_nrmse_mean: 0.07257099449634552
+    avg_mse_mean: 0.010591670870780945
+    avg_pearson_mean: 0.926473302079633
+    per_joint_rmse:
+    - 0.06738622486591339
+    - 0.1636495143175125
+    - 0.09666794538497925
+    - 0.03938836604356766
+    - 0.10363472253084183
+    per_joint_r2:
+    - 0.8803197145462036
+    - 0.8910825252532959
+    - 0.9293296337127686
+    - 0.8459141254425049
+    - 0.7457070350646973
+    avg_rmse_traj_macro: 0.08651084590072361
+    test_rmse_mean: 0.09840819984674454
+    test_rmse_pooled: 0.10811085163533345
+    test_rmse_traj_macro: 0.08932725546428673
+    test_r2_overall: 0.8867160670780296
+    test_nrmse_mean: 0.07688244432210922
+    test_mse_mean: 0.011687582358717918
+  val_metrics:
+    rmse_traj_macro: 0.0829532759256965
+    rmse_pooled: 0.09372577388871521
+    rmse_mean: 0.08652487397193909
+    r2_overall: 0.9060278636657438
+    r2_mean: 0.8798260688781738
+    nrmse_mean: 0.07087942212820053
+    per_joint_rmse:
+    - 0.06828097254037857
+    - 0.14617709815502167
+    - 0.08575712144374847
+    - 0.036444008350372314
+    - 0.0959651842713356
+  test_metrics:
+    rmse_traj_macro: 0.08932725546428673
+    rmse_pooled: 0.10811085163533345
+    rmse_mean: 0.09840819984674454
+    r2_overall: 0.8867160670780296
+    r2_mean: 0.8434951901435852
+    nrmse_mean: 0.07688244432210922
+    per_joint_rmse:
+    - 0.06683985888957977
+    - 0.1733877956867218
+    - 0.1027212142944336
+    - 0.04107111692428589
+    - 0.10802101343870163
+- model_type: PhysReg_A1
+  run_id: PhysReg_A1_ep50_rmse0.09586_frac0.25_seed0_lr3e-4_wd0.005_do0.3_fn0.02_bs512_hl256-512-256_pw0.5_20260522_0137
+  run_dir: /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/PhysReg_A1/PhysReg_A1_ep50_rmse0.09586_frac0.25_seed0_lr3e-4_wd0.005_do0.3_fn0.02_bs512_hl256-512-256_pw0.5_20260522_0137
+  trained_at: '2026-05-22T01:37:23.162477'
+  model_path: /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/PhysReg_A1/PhysReg_A1_ep50_rmse0.09586_frac0.25_seed0_lr3e-4_wd0.005_do0.3_fn0.02_bs512_hl256-512-256_pw0.5_20260522_0137/model.pt
+  training:
+    time_seconds: 122.6
+    time_formatted: 2m 2s
+    epochs_ran: 50
+    epochs_max: 50
+    stopped_early: false
+    final_train_loss: 0.1301607
+    final_val_loss: 0.1255784
+  hardware:
+    device: cuda:NVIDIA GeForce RTX 3050 Laptop GPU
+    torch_version: 2.5.1+cu124
+  data:
+    num_train_samples: 34883
+    num_val_samples: 63765
+    num_test_samples: 105200
+  hyperparams:
+    epochs: 50
+    batch_size: 512
+    data_train_fraction: 0.25
+    data_train_seed: 0
+    stride: 1
+    seed: 42
+    early_stopping: false
+    patience: 10000
+    min_delta: 1.0e-05
+    print_every: 5
+    diagnostic_test_eval: true
+    torch_compile: false
+    snapshot_every: 0
+    learning_rate: 0.0003
+    weight_decay: 0.005
+    dropout: 0.3
+    activation: silu
+    hidden_layers:
+    - 256
+    - 512
+    - 256
+    optimizer: adamw
+    lr_scheduler: warmup_cosine
+    early_stop_metric: val_rmse
+    grad_clip_norm: 5.0
+    feature_noise_std: 0.02
+    physics_weight: 0.5
+    physics_warmup_fraction: 0.05
+    phi_lr_ratio: 0.1
+  metrics:
+    avg_rmse_mean: 0.09849835932254791
+    avg_rmse_pooled: 0.10793802697064131
+    avg_r2_overall: 0.8830563394805391
+    avg_r2_mean: 0.8449287414550781
+    avg_nrmse_mean: 0.0756130963563919
+    avg_mse_mean: 0.011650082655251026
+    avg_pearson_mean: 0.9216260228855742
+    per_joint_rmse:
+    - 0.07342245429754257
+    - 0.17277972400188446
+    - 0.09698972851037979
+    - 0.03961796313524246
+    - 0.10968196392059326
+    per_joint_r2:
+    - 0.8579182624816895
+    - 0.8785902261734009
+    - 0.9288583993911743
+    - 0.8441125154495239
+    - 0.7151644229888916
+    avg_rmse_traj_macro: 0.09119744971690905
+    test_rmse_mean: 0.10368405282497406
+    test_rmse_pooled: 0.11453300096250944
+    test_rmse_traj_macro: 0.09586022988499598
+    test_r2_overall: 0.8728574195303107
+    test_nrmse_mean: 0.08042917400598526
+    test_mse_mean: 0.013117507100105286
+  val_metrics:
+    rmse_traj_macro: 0.08530762213616763
+    rmse_pooled: 0.09607307099039485
+    rmse_mean: 0.08897372335195541
+    r2_overall: 0.9012619886180929
+    r2_mean: 0.8711022138595581
+    nrmse_mean: 0.07320783287286758
+    per_joint_rmse:
+    - 0.07663208246231079
+    - 0.14862580597400665
+    - 0.08463660627603531
+    - 0.0365435928106308
+    - 0.09843052923679352
+  test_metrics:
+    rmse_traj_macro: 0.09586022988499598
+    rmse_pooled: 0.11453300096250944
+    rmse_mean: 0.10368405282497406
+    r2_overall: 0.8728574195303107
+    r2_mean: 0.8272749185562134
+    nrmse_mean: 0.08042917400598526
+    per_joint_rmse:
+    - 0.0714079737663269
+    - 0.18590281903743744
+    - 0.10376561433076859
+    - 0.0413709320127964
+    - 0.11597292125225067
+- model_type: EDR_A1
+  run_id: EDR_A1_ep50_rmse0.09064_frac0.25_seed0_lr3e-4_wd1e-5_bs512_creg0.01_w48-48_cdo0.3_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_ffmlp_psdFalse_ema0.9_snFalse_20260522_0135
+  run_dir: /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/EDR_A1/EDR_A1_ep50_rmse0.09064_frac0.25_seed0_lr3e-4_wd1e-5_bs512_creg0.01_w48-48_cdo0.3_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_ffmlp_psdFalse_ema0.9_snFalse_20260522_0135
+  trained_at: '2026-05-22T01:35:16.585982'
+  model_path: /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/EDR_A1/EDR_A1_ep50_rmse0.09064_frac0.25_seed0_lr3e-4_wd1e-5_bs512_creg0.01_w48-48_cdo0.3_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_ffmlp_psdFalse_ema0.9_snFalse_20260522_0135/model.pt
+  training:
+    time_seconds: 164.3
+    time_formatted: 2m 44s
+    epochs_ran: 50
+    epochs_max: 50
+    stopped_early: false
+    final_train_loss: 0.1158574
+    final_val_loss: 0.1220051
+  hardware:
+    device: cuda:NVIDIA GeForce RTX 3050 Laptop GPU
+    torch_version: 2.5.1+cu124
+  data:
+    num_train_samples: 34883
+    num_val_samples: 63765
+    num_test_samples: 105200
+  hyperparams:
+    epochs: 50
+    batch_size: 512
+    data_train_fraction: 0.25
+    data_train_seed: 0
+    stride: 1
+    seed: 42
+    early_stopping: false
+    patience: 10000
+    min_delta: 1.0e-05
+    print_every: 5
+    diagnostic_test_eval: true
+    torch_compile: false
+    snapshot_every: 0
+    learning_rate: 0.0003
+    weight_decay: 1.0e-05
+    optimizer: adamw
+    lr_scheduler: warmup_cosine
+    warmup_cosine_min_factor: 0.05
+    grad_clip_norm: 1.0
+    feature_noise_std: 0.02
+    ema_decay: 0.9
+    early_stop_metric: val_rmse
+    activation: silu
+    gravity_hidden:
+    - 48
+    - 48
+    inertia_hidden:
+    - 48
+    - 48
+    coriolis_hidden:
+    - 48
+    - 48
+    friction_hidden:
+    - 24
+    - 24
+    correction_dropout: 0.3
+    correction_gain_ramp_frac: 0.3
+    phase2_start_epoch: null
+    lambda_correction_reg: 0.01
+    correction_reg_inertia_normalize: true
+    enable_passivity_loss: false
+    lambda_passivity: 0.01
+    coriolis_structural: false
+    inertia_psd: false
+    spectral_norm: false
+    friction_form: mlp
+    use_friction_qdd: true
+    use_phys_cond: true
+    coriolis_matrix_form: false
+    _q_mean:
+    - 0.046050681435593224
+    - 0.2553536452949156
+    - -0.04444235929629164
+    - -0.08426595649886473
+    - 0.014318062060619037
+    _q_std:
+    - 0.7940621423668914
+    - 0.36533274402811017
+    - 0.9958711246734849
+    - 0.7509819200873898
+    - 0.7503768025606623
+  metrics:
+    avg_rmse_mean: 0.09561768919229507
+    avg_rmse_pooled: 0.10426813450062163
+    avg_r2_overall: 0.8908733206009057
+    avg_r2_mean: 0.8528868556022644
+    avg_nrmse_mean: 0.07399137318134308
+    avg_mse_mean: 0.01087121944874525
+    avg_pearson_mean: 0.9233639173697105
+    per_joint_rmse:
+    - 0.0717407837510109
+    - 0.16586899757385254
+    - 0.09596297889947891
+    - 0.04027703031897545
+    - 0.10423867404460907
+    per_joint_r2:
+    - 0.8643522262573242
+    - 0.8881081342697144
+    - 0.9303566217422485
+    - 0.8388828039169312
+    - 0.7427345514297485
+    avg_rmse_traj_macro: 0.08773481297580808
+    test_rmse_mean: 0.09982019662857056
+    test_rmse_pooled: 0.10923754268075758
+    test_rmse_traj_macro: 0.09064432356960088
+    test_r2_overall: 0.8843425573255309
+    test_nrmse_mean: 0.07842151820659637
+    test_mse_mean: 0.011932415887713432
+  val_metrics:
+    rmse_traj_macro: 0.08405964169943825
+    rmse_pooled: 0.09550603585778225
+    rmse_mean: 0.08817462623119354
+    r2_overall: 0.9024240769461882
+    r2_mean: 0.8753374218940735
+    nrmse_mean: 0.07221819460391998
+    per_joint_rmse:
+    - 0.07110819965600967
+    - 0.14920589327812195
+    - 0.08666133135557175
+    - 0.03683983162045479
+    - 0.09705789387226105
+  test_metrics:
+    rmse_traj_macro: 0.09064432356960088
+    rmse_pooled: 0.10923754268075758
+    rmse_mean: 0.09982019662857056
+    r2_overall: 0.8843425573255309
+    r2_mean: 0.8369320034980774
+    nrmse_mean: 0.07842151820659637
+    per_joint_rmse:
+    - 0.07212274521589279
+    - 0.17520290613174438
+    - 0.10118766874074936
+    - 0.0422251895070076
+    - 0.10836245119571686

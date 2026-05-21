@@ -1,0 +1,77 @@
+01:32:26  diag.a1  INFO  ==============================================================================
+01:32:26  diag.a1  INFO  A1 baseline — EDR
+01:32:26  diag.a1  INFO  ==============================================================================
+01:32:28  Neural_Networks.loader  INFO  RobotDataset [train]: loaded 139531 samples from /home/san/Desktop/MTP_PINN/Neural_Networks/train_data/run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837/train  (ram)
+01:32:28  Neural_Networks.loader  INFO  RobotDataset [val]: loaded 63765 samples from /home/san/Desktop/MTP_PINN/Neural_Networks/train_data/run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837/val  (ram)
+01:32:28  Neural_Networks.loader  INFO  RobotDataset [test]: loaded 105200 samples from /home/san/Desktop/MTP_PINN/Neural_Networks/train_data/run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837/test  (ram)
+01:32:29  edr_strategy  INFO  EDR γ-gate: epoch 1 → γ=0.0000
+01:32:33  diag.EDR_A1  INFO  epoch    1/50  train_loss=0.20283 (obj=0.20283)  val_loss=0.19509  train_rmse=0.11100  val_rmse=0.10105 N·m  l_data=0.20283  l_corr=0.00000  |δg|=3.629e-03  ||δM||_F=1.359e-04  |δC·q̇|=4.181e-05  |δτ_f|=2.920e-03  best_ep=1  patience=0/10000
+01:32:46  diag.EDR_A1  INFO  epoch    5/50  train_loss=0.14036 (obj=0.14366)  val_loss=0.13761  train_rmse=0.09611  val_rmse=0.08797 N·m  l_data=0.14036  l_corr=0.00330  |δg|=8.651e-02  ||δM||_F=5.299e-01  |δC·q̇|=2.840e-01  |δτ_f|=8.225e-02  best_ep=5  patience=0/10000
+01:33:02  diag.EDR_A1  INFO  epoch   10/50  train_loss=0.12745 (obj=0.12846)  val_loss=0.12679  train_rmse=0.09238  val_rmse=0.08521 N·m  l_data=0.12745  l_corr=0.00101  |δg|=9.989e-02  ||δM||_F=2.307e-01  |δC·q̇|=1.471e-01  |δτ_f|=5.738e-02  best_ep=10  patience=0/10000
+01:33:19  diag.EDR_A1  INFO  epoch   15/50  train_loss=0.12265 (obj=0.12333)  val_loss=0.12474  train_rmse=0.09096  val_rmse=0.08477 N·m  l_data=0.12265  l_corr=0.00068  |δg|=1.062e-01  ||δM||_F=1.628e-01  |δC·q̇|=1.110e-01  |δτ_f|=4.833e-02  best_ep=15  patience=0/10000
+01:33:19  edr_strategy  INFO  EDR γ-gate: epoch 16 → γ=1.0000
+01:33:36  diag.EDR_A1  INFO  epoch   20/50  train_loss=0.12024 (obj=0.12094)  val_loss=0.12381  train_rmse=0.09018  val_rmse=0.08449 N·m  l_data=0.12024  l_corr=0.00070  |δg|=1.091e-01  ||δM||_F=1.624e-01  |δC·q̇|=1.137e-01  |δτ_f|=4.592e-02  best_ep=20  patience=0/10000
+01:33:53  diag.EDR_A1  INFO  epoch   25/50  train_loss=0.11848 (obj=0.11920)  val_loss=0.12311  train_rmse=0.08969  val_rmse=0.08431 N·m  l_data=0.11848  l_corr=0.00072  |δg|=1.106e-01  ||δM||_F=1.660e-01  |δC·q̇|=1.162e-01  |δτ_f|=4.450e-02  best_ep=25  patience=0/10000
+01:34:09  diag.EDR_A1  INFO  epoch   30/50  train_loss=0.11731 (obj=0.11805)  val_loss=0.12270  train_rmse=0.08927  val_rmse=0.08421 N·m  l_data=0.11731  l_corr=0.00074  |δg|=1.129e-01  ||δM||_F=1.682e-01  |δC·q̇|=1.177e-01  |δτ_f|=4.383e-02  best_ep=30  patience=0/10000
+01:34:26  diag.EDR_A1  INFO  epoch   35/50  train_loss=0.11678 (obj=0.11753)  val_loss=0.12238  train_rmse=0.08908  val_rmse=0.08418 N·m  l_data=0.11678  l_corr=0.00075  |δg|=1.141e-01  ||δM||_F=1.692e-01  |δC·q̇|=1.182e-01  |δτ_f|=4.359e-02  best_ep=34  patience=1/10000
+01:34:42  diag.EDR_A1  INFO  epoch   40/50  train_loss=0.11605 (obj=0.11681)  val_loss=0.12222  train_rmse=0.08882  val_rmse=0.08409 N·m  l_data=0.11605  l_corr=0.00076  |δg|=1.150e-01  ||δM||_F=1.702e-01  |δC·q̇|=1.192e-01  |δτ_f|=4.357e-02  best_ep=40  patience=0/10000
+01:34:57  diag.EDR_A1  INFO  epoch   45/50  train_loss=0.11594 (obj=0.11670)  val_loss=0.12207  train_rmse=0.08882  val_rmse=0.08405 N·m  l_data=0.11594  l_corr=0.00076  |δg|=1.154e-01  ||δM||_F=1.704e-01  |δC·q̇|=1.194e-01  |δτ_f|=4.299e-02  best_ep=41  patience=4/10000
+01:35:13  diag.EDR_A1  INFO  epoch   50/50  train_loss=0.11586 (obj=0.11663)  val_loss=0.12201  train_rmse=0.08879  val_rmse=0.08406 N·m  l_data=0.11586  l_corr=0.00077  |δg|=1.158e-01  ||δM||_F=1.709e-01  |δC·q̇|=1.196e-01  |δτ_f|=4.306e-02  best_ep=41  patience=9/10000
+01:35:13  diag.EDR_A1  INFO  EMA not selected: best ema_val_rmse=0.08412 ≥ raw best_val_rmse=0.08406 — keeping raw best.
+01:35:16  diag.EDR_A1  INFO  Saved to /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/EDR_A1/EDR_A1_ep50_rmse0.09064_frac0.25_seed0_lr3e-4_wd1e-5_bs512_creg0.01_w48-48_cdo0.3_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_ffmlp_psdFalse_ema0.9_snFalse_20260522_0135  test_rmse_traj_macro=0.09064  (pooled-per-joint=0.09982  rmse_pooled=0.10924)
+01:35:16  diag.EDR_A1  INFO  ════════ TRAINING SUMMARY [EDR_A1] ════════
+  epochs ran      : 50 / 50
+  model selected   : raw-best-by-val
+  best epoch       : 41
+  test  rmse (N·m) : 0.09064   (trajectory-macro)
+  val   rmse @best : 0.08406
+  train rmse @best : 0.08894
+  gen. gap (test−val@best): +0.00658   |  overfit gap (val−train @best): -0.00488
+═══════════════════════════════════════
+01:35:16  diag.a1  INFO  ==============================================================================
+01:35:16  diag.a1  INFO  A1 baseline — PhysReg
+01:35:16  diag.a1  INFO  ==============================================================================
+01:35:16  Neural_Networks.loader  INFO  RobotDataset [train]: loaded 139531 samples from /home/san/Desktop/MTP_PINN/Neural_Networks/train_data/run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837/train  (ram)
+01:35:17  Neural_Networks.loader  INFO  RobotDataset [val]: loaded 63765 samples from /home/san/Desktop/MTP_PINN/Neural_Networks/train_data/run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837/val  (ram)
+01:35:17  Neural_Networks.loader  INFO  RobotDataset [test]: loaded 105200 samples from /home/san/Desktop/MTP_PINN/Neural_Networks/train_data/run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837/test  (ram)
+01:35:20  diag.PhysReg_A1  INFO  epoch    1/50  train_loss=1.17645 (obj=1.75552)  val_loss=0.41427  train_rmse=0.29223  val_rmse=0.16376 N·m  l_data=1.45714  l_phys=1.19349  α=0.250  best_ep=1  patience=0/10000
+01:35:29  diag.PhysReg_A1  INFO  epoch    5/50  train_loss=0.23355 (obj=0.36018)  val_loss=0.15782  train_rmse=0.12611  val_rmse=0.09607 N·m  l_data=0.28341  l_phys=0.15354  α=0.500  best_ep=5  patience=0/10000
+01:35:42  diag.PhysReg_A1  INFO  epoch   10/50  train_loss=0.17719 (obj=0.26813)  val_loss=0.14281  train_rmse=0.10942  val_rmse=0.09085 N·m  l_data=0.21501  l_phys=0.10624  α=0.500  best_ep=10  patience=0/10000
+01:35:54  diag.PhysReg_A1  INFO  epoch   15/50  train_loss=0.15862 (obj=0.23977)  val_loss=0.13672  train_rmse=0.10340  val_rmse=0.08878 N·m  l_data=0.19253  l_phys=0.09449  α=0.500  best_ep=15  patience=0/10000
+01:36:06  diag.PhysReg_A1  INFO  epoch   20/50  train_loss=0.14857 (obj=0.22387)  val_loss=0.13303  train_rmse=0.09980  val_rmse=0.08764 N·m  l_data=0.17956  l_phys=0.08861  α=0.500  best_ep=20  patience=0/10000
+01:36:18  diag.PhysReg_A1  INFO  epoch   25/50  train_loss=0.14106 (obj=0.21378)  val_loss=0.12987  train_rmse=0.09724  val_rmse=0.08672 N·m  l_data=0.17069  l_phys=0.08619  α=0.500  best_ep=24  patience=1/10000
+01:36:30  diag.PhysReg_A1  INFO  epoch   30/50  train_loss=0.13649 (obj=0.20711)  val_loss=0.12823  train_rmse=0.09558  val_rmse=0.08637 N·m  l_data=0.16469  l_phys=0.08484  α=0.500  best_ep=29  patience=1/10000
+01:36:43  diag.PhysReg_A1  INFO  epoch   35/50  train_loss=0.13372 (obj=0.20340)  val_loss=0.12665  train_rmse=0.09457  val_rmse=0.08556 N·m  l_data=0.16139  l_phys=0.08401  α=0.500  best_ep=35  patience=0/10000
+01:36:55  diag.PhysReg_A1  INFO  epoch   40/50  train_loss=0.13172 (obj=0.20072)  val_loss=0.12623  train_rmse=0.09380  val_rmse=0.08556 N·m  l_data=0.15894  l_phys=0.08356  α=0.500  best_ep=37  patience=3/10000
+01:37:07  diag.PhysReg_A1  INFO  epoch   45/50  train_loss=0.13075 (obj=0.19938)  val_loss=0.12555  train_rmse=0.09349  val_rmse=0.08531 N·m  l_data=0.15774  l_phys=0.08327  α=0.500  best_ep=45  patience=0/10000
+01:37:19  diag.PhysReg_A1  INFO  epoch   50/50  train_loss=0.13016 (obj=0.19913)  val_loss=0.12558  train_rmse=0.09348  val_rmse=0.08534 N·m  l_data=0.15737  l_phys=0.08351  α=0.500  best_ep=45  patience=5/10000
+01:37:23  diag.PhysReg_A1  INFO  Saved to /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/PhysReg_A1/PhysReg_A1_ep50_rmse0.09586_frac0.25_seed0_lr3e-4_wd0.005_do0.3_fn0.02_bs512_hl256-512-256_pw0.5_20260522_0137  test_rmse_traj_macro=0.09586  (pooled-per-joint=0.10368  rmse_pooled=0.11453)
+01:37:23  diag.PhysReg_A1  INFO  ════════ TRAINING SUMMARY [PhysReg_A1] ════════
+  epochs ran      : 50 / 50
+  model selected   : raw-best-by-val
+  best epoch       : 45
+  test  rmse (N·m) : 0.09586   (trajectory-macro)
+  val   rmse @best : 0.08531
+  train rmse @best : 0.09349
+  gen. gap (test−val@best): +0.01055   |  overfit gap (val−train @best): -0.00818
+═══════════════════════════════════════
+01:37:23  diag.a1  INFO  ==============================================================================
+01:37:23  diag.a1  INFO  A1 SUMMARY
+01:37:23  diag.a1  INFO  ==============================================================================
+01:37:23  diag.a1  INFO  [EDR_A1]
+01:37:23  diag.a1  INFO    epochs ran:               50
+01:37:23  diag.a1  INFO    best_val:    ep= 42  val_rmse=0.08405  (test@same=0.09065)
+01:37:23  diag.a1  INFO    best_test:   ep= 21  test_rmse=0.09050
+01:37:23  diag.a1  INFO    last epoch:  val_rmse=0.08406  test_rmse=0.09066
+01:37:23  diag.a1  INFO    best_ema:    ep= 50  ema_val=0.08411  (test@same=0.09066)
+01:37:23  diag.a1  INFO  [PhysReg_A1]
+01:37:23  diag.a1  INFO    epochs ran:               50
+01:37:23  diag.a1  INFO    best_val:    ep= 46  val_rmse=0.08531  (test@same=0.09585)
+01:37:23  diag.a1  INFO    best_test:   ep= 46  test_rmse=0.09585
+01:37:23  diag.a1  INFO    last epoch:  val_rmse=0.08534  test_rmse=0.09592
+01:37:23  diag.a1  INFO  ------------------------------------------------------------------------------
+01:37:23  diag.a1  INFO  SELECTION-BIAS DIAGNOSTIC
+01:37:23  diag.a1  INFO  ------------------------------------------------------------------------------
+01:37:23  diag.a1  INFO  [EDR_A1]  test@best_val = 0.09065   best_test = 0.09050   selection cost = 0.00016
+01:37:23  diag.a1  INFO  [PhysReg_A1]  test@best_val = 0.09585   best_test = 0.09585   selection cost = 0.00000
+01:37:23  diag.a1  INFO  Summary written to /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/a1_summary.json

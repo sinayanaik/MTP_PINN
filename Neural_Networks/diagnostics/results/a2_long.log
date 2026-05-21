@@ -1,0 +1,157 @@
+01:39:19  diag.a1  INFO  ==============================================================================
+01:39:19  diag.a1  INFO  A2_long baseline — EDR  (epochs=250 frac=0.15)
+01:39:19  diag.a1  INFO  ==============================================================================
+01:39:20  Neural_Networks.loader  INFO  RobotDataset [train]: loaded 139531 samples from /home/san/Desktop/MTP_PINN/Neural_Networks/train_data/run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837/train  (ram)
+01:39:20  Neural_Networks.loader  INFO  RobotDataset [val]: loaded 63765 samples from /home/san/Desktop/MTP_PINN/Neural_Networks/train_data/run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837/val  (ram)
+01:39:21  Neural_Networks.loader  INFO  RobotDataset [test]: loaded 105200 samples from /home/san/Desktop/MTP_PINN/Neural_Networks/train_data/run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837/test  (ram)
+01:39:21  edr_strategy  INFO  EDR γ-gate: epoch 1 → γ=0.0000
+01:39:25  diag.EDR_A2_long  INFO  epoch    1/250  train_loss=0.20365 (obj=0.20365)  val_loss=0.19646  train_rmse=0.11124  val_rmse=0.10136 N·m  l_data=0.20365  l_corr=0.00000  |δg|=2.107e-03  ||δM||_F=2.073e-04  |δC·q̇|=6.577e-05  |δτ_f|=1.693e-03  best_ep=1  patience=0/10000
+01:39:37  diag.EDR_A2_long  INFO  epoch    5/250  train_loss=0.17710 (obj=0.17729)  val_loss=0.17062  train_rmse=0.10511  val_rmse=0.09648 N·m  l_data=0.17710  l_corr=0.00019  |δg|=6.076e-02  ||δM||_F=6.787e-02  |δC·q̇|=4.097e-02  |δτ_f|=4.237e-02  best_ep=5  patience=0/10000
+01:39:53  diag.EDR_A2_long  INFO  epoch   10/250  train_loss=0.15388 (obj=0.15559)  val_loss=0.15250  train_rmse=0.09998  val_rmse=0.09251 N·m  l_data=0.15388  l_corr=0.00170  |δg|=8.107e-02  ||δM||_F=3.502e-01  |δC·q̇|=1.854e-01  |δτ_f|=8.594e-02  best_ep=10  patience=0/10000
+01:40:09  diag.EDR_A2_long  INFO  epoch   15/250  train_loss=0.13959 (obj=0.14412)  val_loss=0.13777  train_rmse=0.09595  val_rmse=0.08834 N·m  l_data=0.13959  l_corr=0.00453  |δg|=8.869e-02  ||δM||_F=6.014e-01  |δC·q̇|=3.516e-01  |δτ_f|=9.197e-02  best_ep=15  patience=0/10000
+01:40:24  diag.EDR_A2_long  INFO  epoch   20/250  train_loss=0.12972 (obj=0.13470)  val_loss=0.12945  train_rmse=0.09299  val_rmse=0.08589 N·m  l_data=0.12972  l_corr=0.00497  |δg|=9.339e-02  ||δM||_F=6.064e-01  |δC·q̇|=3.778e-01  |δτ_f|=9.161e-02  best_ep=20  patience=0/10000
+01:40:40  diag.EDR_A2_long  INFO  epoch   25/250  train_loss=0.12401 (obj=0.12777)  val_loss=0.12572  train_rmse=0.09132  val_rmse=0.08484 N·m  l_data=0.12401  l_corr=0.00376  |δg|=9.818e-02  ||δM||_F=5.175e-01  |δC·q̇|=3.220e-01  |δτ_f|=8.901e-02  best_ep=25  patience=0/10000
+01:40:55  diag.EDR_A2_long  INFO  epoch   30/250  train_loss=0.12173 (obj=0.12439)  val_loss=0.12426  train_rmse=0.09066  val_rmse=0.08450 N·m  l_data=0.12173  l_corr=0.00266  |δg|=1.030e-01  ||δM||_F=4.353e-01  |δC·q̇|=2.606e-01  |δτ_f|=8.539e-02  best_ep=30  patience=0/10000
+01:41:09  diag.EDR_A2_long  INFO  epoch   35/250  train_loss=0.11939 (obj=0.12137)  val_loss=0.12330  train_rmse=0.09001  val_rmse=0.08429 N·m  l_data=0.11939  l_corr=0.00197  |δg|=1.070e-01  ||δM||_F=3.627e-01  |δC·q̇|=2.162e-01  |δτ_f|=8.049e-02  best_ep=34  patience=1/10000
+01:41:24  diag.EDR_A2_long  INFO  epoch   40/250  train_loss=0.11761 (obj=0.11915)  val_loss=0.12266  train_rmse=0.08933  val_rmse=0.08417 N·m  l_data=0.11761  l_corr=0.00153  |δg|=1.097e-01  ||δM||_F=3.075e-01  |δC·q̇|=1.840e-01  |δτ_f|=7.457e-02  best_ep=39  patience=1/10000
+01:41:38  diag.EDR_A2_long  INFO  epoch   45/250  train_loss=0.11632 (obj=0.11758)  val_loss=0.12222  train_rmse=0.08901  val_rmse=0.08403 N·m  l_data=0.11632  l_corr=0.00126  |δg|=1.123e-01  ||δM||_F=2.679e-01  |δC·q̇|=1.613e-01  |δτ_f|=6.887e-02  best_ep=42  patience=3/10000
+01:41:53  diag.EDR_A2_long  INFO  epoch   50/250  train_loss=0.11556 (obj=0.11665)  val_loss=0.12159  train_rmse=0.08879  val_rmse=0.08393 N·m  l_data=0.11556  l_corr=0.00109  |δg|=1.143e-01  ||δM||_F=2.379e-01  |δC·q̇|=1.465e-01  |δτ_f|=6.177e-02  best_ep=47  patience=3/10000
+01:42:08  diag.EDR_A2_long  INFO  epoch   55/250  train_loss=0.11492 (obj=0.11589)  val_loss=0.12130  train_rmse=0.08858  val_rmse=0.08388 N·m  l_data=0.11492  l_corr=0.00097  |δg|=1.157e-01  ||δM||_F=2.158e-01  |δC·q̇|=1.368e-01  |δτ_f|=5.570e-02  best_ep=54  patience=1/10000
+01:42:23  diag.EDR_A2_long  INFO  epoch   60/250  train_loss=0.11388 (obj=0.11477)  val_loss=0.12091  train_rmse=0.08821  val_rmse=0.08376 N·m  l_data=0.11388  l_corr=0.00089  |δg|=1.174e-01  ||δM||_F=1.993e-01  |δC·q̇|=1.291e-01  |δτ_f|=5.176e-02  best_ep=57  patience=3/10000
+01:42:38  diag.EDR_A2_long  INFO  epoch   65/250  train_loss=0.11324 (obj=0.11408)  val_loss=0.12025  train_rmse=0.08793  val_rmse=0.08364 N·m  l_data=0.11324  l_corr=0.00084  |δg|=1.187e-01  ||δM||_F=1.897e-01  |δC·q̇|=1.246e-01  |δτ_f|=4.791e-02  best_ep=62  patience=3/10000
+01:42:53  diag.EDR_A2_long  INFO  epoch   70/250  train_loss=0.11241 (obj=0.11323)  val_loss=0.12009  train_rmse=0.08766  val_rmse=0.08367 N·m  l_data=0.11241  l_corr=0.00083  |δg|=1.201e-01  ||δM||_F=1.829e-01  |δC·q̇|=1.225e-01  |δτ_f|=4.510e-02  best_ep=67  patience=3/10000
+01:43:08  diag.EDR_A2_long  INFO  epoch   75/250  train_loss=0.11200 (obj=0.11282)  val_loss=0.11985  train_rmse=0.08755  val_rmse=0.08352 N·m  l_data=0.11200  l_corr=0.00081  |δg|=1.210e-01  ||δM||_F=1.791e-01  |δC·q̇|=1.215e-01  |δτ_f|=4.360e-02  best_ep=72  patience=3/10000
+01:43:08  edr_strategy  INFO  EDR γ-gate: epoch 76 → γ=1.0000
+01:43:23  diag.EDR_A2_long  INFO  epoch   80/250  train_loss=0.11121 (obj=0.11204)  val_loss=0.11938  train_rmse=0.08737  val_rmse=0.08340 N·m  l_data=0.11121  l_corr=0.00083  |δg|=1.231e-01  ||δM||_F=1.786e-01  |δC·q̇|=1.218e-01  |δτ_f|=4.364e-02  best_ep=80  patience=0/10000
+01:43:38  diag.EDR_A2_long  INFO  epoch   85/250  train_loss=0.11089 (obj=0.11173)  val_loss=0.11922  train_rmse=0.08719  val_rmse=0.08341 N·m  l_data=0.11089  l_corr=0.00084  |δg|=1.238e-01  ||δM||_F=1.814e-01  |δC·q̇|=1.223e-01  |δτ_f|=4.307e-02  best_ep=80  patience=5/10000
+01:43:53  diag.EDR_A2_long  INFO  epoch   90/250  train_loss=0.11028 (obj=0.11112)  val_loss=0.11904  train_rmse=0.08698  val_rmse=0.08340 N·m  l_data=0.11028  l_corr=0.00084  |δg|=1.239e-01  ||δM||_F=1.817e-01  |δC·q̇|=1.229e-01  |δτ_f|=4.267e-02  best_ep=80  patience=10/10000
+01:44:08  diag.EDR_A2_long  INFO  epoch   95/250  train_loss=0.10946 (obj=0.11031)  val_loss=0.11887  train_rmse=0.08669  val_rmse=0.08331 N·m  l_data=0.10946  l_corr=0.00085  |δg|=1.262e-01  ||δM||_F=1.820e-01  |δC·q̇|=1.233e-01  |δτ_f|=4.227e-02  best_ep=92  patience=3/10000
+01:44:23  diag.EDR_A2_long  INFO  epoch  100/250  train_loss=0.10913 (obj=0.10999)  val_loss=0.11876  train_rmse=0.08656  val_rmse=0.08333 N·m  l_data=0.10913  l_corr=0.00085  |δg|=1.257e-01  ||δM||_F=1.831e-01  |δC·q̇|=1.241e-01  |δτ_f|=4.196e-02  best_ep=96  patience=4/10000
+01:44:38  diag.EDR_A2_long  INFO  epoch  105/250  train_loss=0.10860 (obj=0.10945)  val_loss=0.11854  train_rmse=0.08645  val_rmse=0.08327 N·m  l_data=0.10860  l_corr=0.00086  |δg|=1.266e-01  ||δM||_F=1.820e-01  |δC·q̇|=1.238e-01  |δτ_f|=4.130e-02  best_ep=96  patience=9/10000
+01:44:53  diag.EDR_A2_long  INFO  epoch  110/250  train_loss=0.10892 (obj=0.10978)  val_loss=0.11850  train_rmse=0.08645  val_rmse=0.08319 N·m  l_data=0.10892  l_corr=0.00086  |δg|=1.266e-01  ||δM||_F=1.829e-01  |δC·q̇|=1.240e-01  |δτ_f|=4.194e-02  best_ep=96  patience=14/10000
+01:45:08  diag.EDR_A2_long  INFO  epoch  115/250  train_loss=0.10819 (obj=0.10906)  val_loss=0.11852  train_rmse=0.08626  val_rmse=0.08324 N·m  l_data=0.10819  l_corr=0.00087  |δg|=1.272e-01  ||δM||_F=1.852e-01  |δC·q̇|=1.243e-01  |δτ_f|=4.139e-02  best_ep=113  patience=2/10000
+01:45:23  diag.EDR_A2_long  INFO  epoch  120/250  train_loss=0.10795 (obj=0.10882)  val_loss=0.11831  train_rmse=0.08617  val_rmse=0.08322 N·m  l_data=0.10795  l_corr=0.00087  |δg|=1.282e-01  ||δM||_F=1.851e-01  |δC·q̇|=1.247e-01  |δτ_f|=4.111e-02  best_ep=113  patience=7/10000
+01:45:38  diag.EDR_A2_long  INFO  epoch  125/250  train_loss=0.10724 (obj=0.10811)  val_loss=0.11817  train_rmse=0.08593  val_rmse=0.08315 N·m  l_data=0.10724  l_corr=0.00088  |δg|=1.285e-01  ||δM||_F=1.853e-01  |δC·q̇|=1.251e-01  |δτ_f|=4.070e-02  best_ep=121  patience=4/10000
+01:45:52  diag.EDR_A2_long  INFO  epoch  130/250  train_loss=0.10703 (obj=0.10791)  val_loss=0.11805  train_rmse=0.08592  val_rmse=0.08314 N·m  l_data=0.10703  l_corr=0.00088  |δg|=1.292e-01  ||δM||_F=1.853e-01  |δC·q̇|=1.245e-01  |δτ_f|=4.079e-02  best_ep=121  patience=9/10000
+01:46:07  diag.EDR_A2_long  INFO  epoch  135/250  train_loss=0.10702 (obj=0.10790)  val_loss=0.11823  train_rmse=0.08585  val_rmse=0.08319 N·m  l_data=0.10702  l_corr=0.00088  |δg|=1.293e-01  ||δM||_F=1.861e-01  |δC·q̇|=1.247e-01  |δτ_f|=4.117e-02  best_ep=121  patience=14/10000
+01:46:22  diag.EDR_A2_long  INFO  epoch  140/250  train_loss=0.10707 (obj=0.10795)  val_loss=0.11814  train_rmse=0.08584  val_rmse=0.08314 N·m  l_data=0.10707  l_corr=0.00088  |δg|=1.300e-01  ||δM||_F=1.876e-01  |δC·q̇|=1.244e-01  |δτ_f|=4.158e-02  best_ep=121  patience=19/10000
+01:46:37  diag.EDR_A2_long  INFO  epoch  145/250  train_loss=0.10679 (obj=0.10768)  val_loss=0.11795  train_rmse=0.08579  val_rmse=0.08309 N·m  l_data=0.10679  l_corr=0.00089  |δg|=1.300e-01  ||δM||_F=1.865e-01  |δC·q̇|=1.247e-01  |δτ_f|=4.141e-02  best_ep=143  patience=2/10000
+01:46:52  diag.EDR_A2_long  INFO  epoch  150/250  train_loss=0.10646 (obj=0.10734)  val_loss=0.11822  train_rmse=0.08569  val_rmse=0.08315 N·m  l_data=0.10646  l_corr=0.00088  |δg|=1.293e-01  ||δM||_F=1.869e-01  |δC·q̇|=1.246e-01  |δτ_f|=4.200e-02  best_ep=146  patience=4/10000
+01:47:07  diag.EDR_A2_long  INFO  epoch  155/250  train_loss=0.10628 (obj=0.10717)  val_loss=0.11785  train_rmse=0.08558  val_rmse=0.08307 N·m  l_data=0.10628  l_corr=0.00089  |δg|=1.308e-01  ||δM||_F=1.875e-01  |δC·q̇|=1.243e-01  |δτ_f|=4.206e-02  best_ep=146  patience=9/10000
+01:47:22  diag.EDR_A2_long  INFO  epoch  160/250  train_loss=0.10629 (obj=0.10718)  val_loss=0.11782  train_rmse=0.08563  val_rmse=0.08304 N·m  l_data=0.10629  l_corr=0.00089  |δg|=1.312e-01  ||δM||_F=1.868e-01  |δC·q̇|=1.241e-01  |δτ_f|=4.142e-02  best_ep=159  patience=1/10000
+01:47:37  diag.EDR_A2_long  INFO  epoch  165/250  train_loss=0.10603 (obj=0.10693)  val_loss=0.11794  train_rmse=0.08555  val_rmse=0.08306 N·m  l_data=0.10603  l_corr=0.00089  |δg|=1.309e-01  ||δM||_F=1.888e-01  |δC·q̇|=1.240e-01  |δτ_f|=4.181e-02  best_ep=159  patience=6/10000
+01:47:52  diag.EDR_A2_long  INFO  epoch  170/250  train_loss=0.10563 (obj=0.10652)  val_loss=0.11778  train_rmse=0.08541  val_rmse=0.08302 N·m  l_data=0.10563  l_corr=0.00090  |δg|=1.310e-01  ||δM||_F=1.872e-01  |δC·q̇|=1.245e-01  |δτ_f|=4.186e-02  best_ep=159  patience=11/10000
+01:48:07  diag.EDR_A2_long  INFO  epoch  175/250  train_loss=0.10540 (obj=0.10629)  val_loss=0.11789  train_rmse=0.08523  val_rmse=0.08307 N·m  l_data=0.10540  l_corr=0.00089  |δg|=1.302e-01  ||δM||_F=1.882e-01  |δC·q̇|=1.245e-01  |δτ_f|=4.157e-02  best_ep=171  patience=4/10000
+01:48:21  diag.EDR_A2_long  INFO  epoch  180/250  train_loss=0.10577 (obj=0.10666)  val_loss=0.11778  train_rmse=0.08542  val_rmse=0.08296 N·m  l_data=0.10577  l_corr=0.00089  |δg|=1.304e-01  ||δM||_F=1.876e-01  |δC·q̇|=1.238e-01  |δτ_f|=4.185e-02  best_ep=179  patience=1/10000
+01:48:36  diag.EDR_A2_long  INFO  epoch  185/250  train_loss=0.10564 (obj=0.10653)  val_loss=0.11783  train_rmse=0.08533  val_rmse=0.08301 N·m  l_data=0.10564  l_corr=0.00089  |δg|=1.312e-01  ||δM||_F=1.873e-01  |δC·q̇|=1.237e-01  |δτ_f|=4.199e-02  best_ep=179  patience=6/10000
+01:48:51  diag.EDR_A2_long  INFO  epoch  190/250  train_loss=0.10567 (obj=0.10656)  val_loss=0.11775  train_rmse=0.08539  val_rmse=0.08296 N·m  l_data=0.10567  l_corr=0.00089  |δg|=1.318e-01  ||δM||_F=1.877e-01  |δC·q̇|=1.240e-01  |δτ_f|=4.198e-02  best_ep=179  patience=11/10000
+01:49:06  diag.EDR_A2_long  INFO  epoch  195/250  train_loss=0.10540 (obj=0.10629)  val_loss=0.11776  train_rmse=0.08528  val_rmse=0.08300 N·m  l_data=0.10540  l_corr=0.00089  |δg|=1.315e-01  ||δM||_F=1.877e-01  |δC·q̇|=1.238e-01  |δτ_f|=4.184e-02  best_ep=179  patience=16/10000
+01:49:21  diag.EDR_A2_long  INFO  epoch  200/250  train_loss=0.10514 (obj=0.10604)  val_loss=0.11776  train_rmse=0.08519  val_rmse=0.08301 N·m  l_data=0.10514  l_corr=0.00089  |δg|=1.314e-01  ||δM||_F=1.882e-01  |δC·q̇|=1.240e-01  |δτ_f|=4.220e-02  best_ep=179  patience=21/10000
+01:49:36  diag.EDR_A2_long  INFO  epoch  205/250  train_loss=0.10531 (obj=0.10620)  val_loss=0.11778  train_rmse=0.08522  val_rmse=0.08303 N·m  l_data=0.10531  l_corr=0.00090  |δg|=1.320e-01  ||δM||_F=1.890e-01  |δC·q̇|=1.239e-01  |δτ_f|=4.235e-02  best_ep=179  patience=26/10000
+01:49:51  diag.EDR_A2_long  INFO  epoch  210/250  train_loss=0.10508 (obj=0.10598)  val_loss=0.11777  train_rmse=0.08507  val_rmse=0.08299 N·m  l_data=0.10508  l_corr=0.00090  |δg|=1.321e-01  ||δM||_F=1.888e-01  |δC·q̇|=1.239e-01  |δτ_f|=4.275e-02  best_ep=179  patience=31/10000
+01:50:06  diag.EDR_A2_long  INFO  epoch  215/250  train_loss=0.10505 (obj=0.10595)  val_loss=0.11770  train_rmse=0.08514  val_rmse=0.08300 N·m  l_data=0.10505  l_corr=0.00090  |δg|=1.323e-01  ||δM||_F=1.891e-01  |δC·q̇|=1.237e-01  |δτ_f|=4.233e-02  best_ep=179  patience=36/10000
+01:50:20  diag.EDR_A2_long  INFO  epoch  220/250  train_loss=0.10530 (obj=0.10619)  val_loss=0.11772  train_rmse=0.08521  val_rmse=0.08299 N·m  l_data=0.10530  l_corr=0.00089  |δg|=1.312e-01  ||δM||_F=1.885e-01  |δC·q̇|=1.237e-01  |δτ_f|=4.244e-02  best_ep=179  patience=41/10000
+01:50:35  diag.EDR_A2_long  INFO  epoch  225/250  train_loss=0.10526 (obj=0.10615)  val_loss=0.11769  train_rmse=0.08519  val_rmse=0.08298 N·m  l_data=0.10526  l_corr=0.00090  |δg|=1.316e-01  ||δM||_F=1.890e-01  |δC·q̇|=1.238e-01  |δτ_f|=4.263e-02  best_ep=179  patience=46/10000
+01:50:50  diag.EDR_A2_long  INFO  epoch  230/250  train_loss=0.10497 (obj=0.10587)  val_loss=0.11765  train_rmse=0.08508  val_rmse=0.08298 N·m  l_data=0.10497  l_corr=0.00090  |δg|=1.321e-01  ||δM||_F=1.887e-01  |δC·q̇|=1.236e-01  |δτ_f|=4.235e-02  best_ep=179  patience=51/10000
+01:51:05  diag.EDR_A2_long  INFO  epoch  235/250  train_loss=0.10511 (obj=0.10601)  val_loss=0.11771  train_rmse=0.08518  val_rmse=0.08298 N·m  l_data=0.10511  l_corr=0.00090  |δg|=1.321e-01  ||δM||_F=1.886e-01  |δC·q̇|=1.240e-01  |δτ_f|=4.235e-02  best_ep=179  patience=56/10000
+01:51:20  diag.EDR_A2_long  INFO  epoch  240/250  train_loss=0.10492 (obj=0.10582)  val_loss=0.11771  train_rmse=0.08511  val_rmse=0.08298 N·m  l_data=0.10492  l_corr=0.00090  |δg|=1.323e-01  ||δM||_F=1.884e-01  |δC·q̇|=1.238e-01  |δτ_f|=4.261e-02  best_ep=179  patience=61/10000
+01:51:35  diag.EDR_A2_long  INFO  epoch  245/250  train_loss=0.10477 (obj=0.10567)  val_loss=0.11770  train_rmse=0.08506  val_rmse=0.08297 N·m  l_data=0.10477  l_corr=0.00090  |δg|=1.323e-01  ||δM||_F=1.887e-01  |δC·q̇|=1.234e-01  |δτ_f|=4.250e-02  best_ep=179  patience=66/10000
+01:51:50  diag.EDR_A2_long  INFO  epoch  250/250  train_loss=0.10511 (obj=0.10601)  val_loss=0.11771  train_rmse=0.08515  val_rmse=0.08298 N·m  l_data=0.10511  l_corr=0.00090  |δg|=1.322e-01  ||δM||_F=1.886e-01  |δC·q̇|=1.236e-01  |δτ_f|=4.264e-02  best_ep=179  patience=71/10000
+01:51:50  diag.EDR_A2_long  INFO  EMA not selected: best ema_val_rmse=0.08298 ≥ raw best_val_rmse=0.08295 — keeping raw best.
+01:51:53  diag.EDR_A2_long  INFO  Saved to /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/EDR_A2_long/EDR_A2_long_ep250_rmse0.08933_frac0.15_seed0_lr3e-4_wd1e-5_bs512_creg0.01_w48-48_cdo0.3_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_ffmlp_psdFalse_ema0.9_snFalse_20260522_0151  test_rmse_traj_macro=0.08933  (pooled-per-joint=0.09841  rmse_pooled=0.10811)
+01:51:53  diag.EDR_A2_long  INFO  ════════ TRAINING SUMMARY [EDR_A2_long] ════════
+  epochs ran      : 250 / 250
+  model selected   : raw-best-by-val
+  best epoch       : 179
+  test  rmse (N·m) : 0.08933   (trajectory-macro)
+  val   rmse @best : 0.08295
+  train rmse @best : 0.08544
+  gen. gap (test−val@best): +0.00637   |  overfit gap (val−train @best): -0.00248
+═══════════════════════════════════════
+01:51:53  diag.a1  INFO  ==============================================================================
+01:51:53  diag.a1  INFO  A2_long baseline — PhysReg
+01:51:53  diag.a1  INFO  ==============================================================================
+01:51:53  Neural_Networks.loader  INFO  RobotDataset [train]: loaded 139531 samples from /home/san/Desktop/MTP_PINN/Neural_Networks/train_data/run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837/train  (ram)
+01:51:53  Neural_Networks.loader  INFO  RobotDataset [val]: loaded 63765 samples from /home/san/Desktop/MTP_PINN/Neural_Networks/train_data/run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837/val  (ram)
+01:51:53  Neural_Networks.loader  INFO  RobotDataset [test]: loaded 105200 samples from /home/san/Desktop/MTP_PINN/Neural_Networks/train_data/run_abl_q0_qd91_qdd91_tau51_lk_20260515_1837/test  (ram)
+01:51:56  diag.PhysReg_A2_long  INFO  epoch    1/250  train_loss=1.37187 (obj=1.74760)  val_loss=0.55708  train_rmse=0.31593  val_rmse=0.18824 N·m  l_data=1.68995  l_phys=1.38361  α=0.042  best_ep=1  patience=0/10000
+01:52:05  diag.PhysReg_A2_long  INFO  epoch    5/250  train_loss=0.42913 (obj=0.60626)  val_loss=0.18714  train_rmse=0.17268  val_rmse=0.10779 N·m  l_data=0.52277  l_phys=0.40078  α=0.208  best_ep=5  patience=0/10000
+01:52:16  diag.PhysReg_A2_long  INFO  epoch   10/250  train_loss=0.24857 (obj=0.37465)  val_loss=0.15923  train_rmse=0.13009  val_rmse=0.09713 N·m  l_data=0.30102  l_phys=0.17672  α=0.417  best_ep=10  patience=0/10000
+01:52:28  diag.PhysReg_A2_long  INFO  epoch   15/250  train_loss=0.19503 (obj=0.29568)  val_loss=0.14796  train_rmse=0.11472  val_rmse=0.09229 N·m  l_data=0.23623  l_phys=0.11889  α=0.500  best_ep=15  patience=0/10000
+01:52:39  diag.PhysReg_A2_long  INFO  epoch   20/250  train_loss=0.17363 (obj=0.26195)  val_loss=0.14189  train_rmse=0.10816  val_rmse=0.09056 N·m  l_data=0.21049  l_phys=0.10293  α=0.500  best_ep=20  patience=0/10000
+01:52:50  diag.PhysReg_A2_long  INFO  epoch   25/250  train_loss=0.16086 (obj=0.24231)  val_loss=0.13761  train_rmse=0.10398  val_rmse=0.08904 N·m  l_data=0.19469  l_phys=0.09525  α=0.500  best_ep=25  patience=0/10000
+01:53:01  diag.PhysReg_A2_long  INFO  epoch   30/250  train_loss=0.15151 (obj=0.22847)  val_loss=0.13384  train_rmse=0.10089  val_rmse=0.08769 N·m  l_data=0.18332  l_phys=0.09030  α=0.500  best_ep=30  patience=0/10000
+01:53:13  diag.PhysReg_A2_long  INFO  epoch   35/250  train_loss=0.14561 (obj=0.21969)  val_loss=0.13190  train_rmse=0.09881  val_rmse=0.08714 N·m  l_data=0.17617  l_phys=0.08704  α=0.500  best_ep=35  patience=0/10000
+01:53:24  diag.PhysReg_A2_long  INFO  epoch   40/250  train_loss=0.14020 (obj=0.21198)  val_loss=0.12947  train_rmse=0.09685  val_rmse=0.08637 N·m  l_data=0.16924  l_phys=0.08548  α=0.500  best_ep=40  patience=0/10000
+01:53:36  diag.PhysReg_A2_long  INFO  epoch   45/250  train_loss=0.13482 (obj=0.20459)  val_loss=0.12719  train_rmse=0.09499  val_rmse=0.08556 N·m  l_data=0.16272  l_phys=0.08374  α=0.500  best_ep=45  patience=0/10000
+01:53:47  diag.PhysReg_A2_long  INFO  epoch   50/250  train_loss=0.13127 (obj=0.20024)  val_loss=0.12606  train_rmse=0.09370  val_rmse=0.08544 N·m  l_data=0.15841  l_phys=0.08366  α=0.500  best_ep=48  patience=2/10000
+01:53:58  diag.PhysReg_A2_long  INFO  epoch   55/250  train_loss=0.12831 (obj=0.19636)  val_loss=0.12405  train_rmse=0.09262  val_rmse=0.08469 N·m  l_data=0.15463  l_phys=0.08347  α=0.500  best_ep=55  patience=0/10000
+01:54:10  diag.PhysReg_A2_long  INFO  epoch   60/250  train_loss=0.12487 (obj=0.19204)  val_loss=0.12387  train_rmse=0.09128  val_rmse=0.08464 N·m  l_data=0.15038  l_phys=0.08331  α=0.500  best_ep=59  patience=1/10000
+01:54:21  diag.PhysReg_A2_long  INFO  epoch   65/250  train_loss=0.12258 (obj=0.18929)  val_loss=0.12262  train_rmse=0.09051  val_rmse=0.08403 N·m  l_data=0.14784  l_phys=0.08290  α=0.500  best_ep=65  patience=0/10000
+01:54:32  diag.PhysReg_A2_long  INFO  epoch   70/250  train_loss=0.11969 (obj=0.18534)  val_loss=0.12196  train_rmse=0.08932  val_rmse=0.08392 N·m  l_data=0.14390  l_phys=0.08287  α=0.500  best_ep=68  patience=2/10000
+01:54:44  diag.PhysReg_A2_long  INFO  epoch   75/250  train_loss=0.11731 (obj=0.18284)  val_loss=0.12077  train_rmse=0.08856  val_rmse=0.08350 N·m  l_data=0.14115  l_phys=0.08338  α=0.500  best_ep=75  patience=0/10000
+01:54:55  diag.PhysReg_A2_long  INFO  epoch   80/250  train_loss=0.11531 (obj=0.18032)  val_loss=0.12025  train_rmse=0.08770  val_rmse=0.08374 N·m  l_data=0.13865  l_phys=0.08334  α=0.500  best_ep=79  patience=1/10000
+01:55:07  diag.PhysReg_A2_long  INFO  epoch   85/250  train_loss=0.11372 (obj=0.17847)  val_loss=0.11934  train_rmse=0.08712  val_rmse=0.08327 N·m  l_data=0.13663  l_phys=0.08368  α=0.500  best_ep=85  patience=0/10000
+01:55:18  diag.PhysReg_A2_long  INFO  epoch   90/250  train_loss=0.11164 (obj=0.17588)  val_loss=0.11818  train_rmse=0.08644  val_rmse=0.08298 N·m  l_data=0.13433  l_phys=0.08311  α=0.500  best_ep=86  patience=4/10000
+01:55:29  diag.PhysReg_A2_long  INFO  epoch   95/250  train_loss=0.11034 (obj=0.17415)  val_loss=0.11825  train_rmse=0.08570  val_rmse=0.08285 N·m  l_data=0.13239  l_phys=0.08351  α=0.500  best_ep=86  patience=9/10000
+01:55:41  diag.PhysReg_A2_long  INFO  epoch  100/250  train_loss=0.10857 (obj=0.17241)  val_loss=0.11685  train_rmse=0.08507  val_rmse=0.08230 N·m  l_data=0.13037  l_phys=0.08407  α=0.500  best_ep=100  patience=0/10000
+01:55:52  diag.PhysReg_A2_long  INFO  epoch  105/250  train_loss=0.10779 (obj=0.17183)  val_loss=0.11677  train_rmse=0.08477  val_rmse=0.08250 N·m  l_data=0.12935  l_phys=0.08496  α=0.500  best_ep=100  patience=5/10000
+01:56:04  diag.PhysReg_A2_long  INFO  epoch  110/250  train_loss=0.10572 (obj=0.16948)  val_loss=0.11578  train_rmse=0.08400  val_rmse=0.08210 N·m  l_data=0.12694  l_phys=0.08507  α=0.500  best_ep=108  patience=2/10000
+01:56:15  diag.PhysReg_A2_long  INFO  epoch  115/250  train_loss=0.10453 (obj=0.16814)  val_loss=0.11609  train_rmse=0.08355  val_rmse=0.08216 N·m  l_data=0.12553  l_phys=0.08521  α=0.500  best_ep=113  patience=2/10000
+01:56:26  diag.PhysReg_A2_long  INFO  epoch  120/250  train_loss=0.10323 (obj=0.16648)  val_loss=0.11432  train_rmse=0.08301  val_rmse=0.08168 N·m  l_data=0.12396  l_phys=0.08504  α=0.500  best_ep=120  patience=0/10000
+01:56:38  diag.PhysReg_A2_long  INFO  epoch  125/250  train_loss=0.10246 (obj=0.16578)  val_loss=0.11519  train_rmse=0.08263  val_rmse=0.08193 N·m  l_data=0.12275  l_phys=0.08605  α=0.500  best_ep=122  patience=3/10000
+01:56:49  diag.PhysReg_A2_long  INFO  epoch  130/250  train_loss=0.10171 (obj=0.16526)  val_loss=0.11505  train_rmse=0.08235  val_rmse=0.08198 N·m  l_data=0.12208  l_phys=0.08636  α=0.500  best_ep=127  patience=3/10000
+01:57:01  diag.PhysReg_A2_long  INFO  epoch  135/250  train_loss=0.10016 (obj=0.16354)  val_loss=0.11505  train_rmse=0.08175  val_rmse=0.08227 N·m  l_data=0.12021  l_phys=0.08666  α=0.500  best_ep=134  patience=1/10000
+01:57:12  diag.PhysReg_A2_long  INFO  epoch  140/250  train_loss=0.10007 (obj=0.16324)  val_loss=0.11407  train_rmse=0.08164  val_rmse=0.08151 N·m  l_data=0.12000  l_phys=0.08648  α=0.500  best_ep=134  patience=6/10000
+01:57:24  diag.PhysReg_A2_long  INFO  epoch  145/250  train_loss=0.09889 (obj=0.16194)  val_loss=0.11365  train_rmse=0.08110  val_rmse=0.08153 N·m  l_data=0.11838  l_phys=0.08712  α=0.500  best_ep=143  patience=2/10000
+01:57:35  diag.PhysReg_A2_long  INFO  epoch  150/250  train_loss=0.09817 (obj=0.16139)  val_loss=0.11326  train_rmse=0.08092  val_rmse=0.08154 N·m  l_data=0.11770  l_phys=0.08738  α=0.500  best_ep=148  patience=2/10000
+01:57:47  diag.PhysReg_A2_long  INFO  epoch  155/250  train_loss=0.09799 (obj=0.16100)  val_loss=0.11323  train_rmse=0.08085  val_rmse=0.08148 N·m  l_data=0.11745  l_phys=0.08711  α=0.500  best_ep=151  patience=4/10000
+01:57:58  diag.PhysReg_A2_long  INFO  epoch  160/250  train_loss=0.09683 (obj=0.15995)  val_loss=0.11328  train_rmse=0.08021  val_rmse=0.08150 N·m  l_data=0.11590  l_phys=0.08810  α=0.500  best_ep=159  patience=1/10000
+01:58:09  diag.PhysReg_A2_long  INFO  epoch  165/250  train_loss=0.09662 (obj=0.15961)  val_loss=0.11305  train_rmse=0.08018  val_rmse=0.08138 N·m  l_data=0.11571  l_phys=0.08780  α=0.500  best_ep=164  patience=1/10000
+01:58:21  diag.PhysReg_A2_long  INFO  epoch  170/250  train_loss=0.09620 (obj=0.15919)  val_loss=0.11264  train_rmse=0.08006  val_rmse=0.08126 N·m  l_data=0.11530  l_phys=0.08777  α=0.500  best_ep=168  patience=2/10000
+01:58:32  diag.PhysReg_A2_long  INFO  epoch  175/250  train_loss=0.09576 (obj=0.15848)  val_loss=0.11280  train_rmse=0.07987  val_rmse=0.08134 N·m  l_data=0.11473  l_phys=0.08750  α=0.500  best_ep=168  patience=7/10000
+01:58:43  diag.PhysReg_A2_long  INFO  epoch  180/250  train_loss=0.09565 (obj=0.15821)  val_loss=0.11245  train_rmse=0.07975  val_rmse=0.08112 N·m  l_data=0.11447  l_phys=0.08746  α=0.500  best_ep=168  patience=12/10000
+01:58:55  diag.PhysReg_A2_long  INFO  epoch  185/250  train_loss=0.09492 (obj=0.15805)  val_loss=0.11268  train_rmse=0.07961  val_rmse=0.08124 N·m  l_data=0.11387  l_phys=0.08835  α=0.500  best_ep=181  patience=4/10000
+01:59:06  diag.PhysReg_A2_long  INFO  epoch  190/250  train_loss=0.09456 (obj=0.15754)  val_loss=0.11173  train_rmse=0.07945  val_rmse=0.08102 N·m  l_data=0.11351  l_phys=0.08807  α=0.500  best_ep=181  patience=9/10000
+01:59:18  diag.PhysReg_A2_long  INFO  epoch  195/250  train_loss=0.09443 (obj=0.15756)  val_loss=0.11195  train_rmse=0.07941  val_rmse=0.08098 N·m  l_data=0.11333  l_phys=0.08845  α=0.500  best_ep=194  patience=1/10000
+01:59:29  diag.PhysReg_A2_long  INFO  epoch  200/250  train_loss=0.09424 (obj=0.15718)  val_loss=0.11175  train_rmse=0.07924  val_rmse=0.08100 N·m  l_data=0.11292  l_phys=0.08853  α=0.500  best_ep=198  patience=2/10000
+01:59:41  diag.PhysReg_A2_long  INFO  epoch  205/250  train_loss=0.09419 (obj=0.15726)  val_loss=0.11207  train_rmse=0.07935  val_rmse=0.08110 N·m  l_data=0.11311  l_phys=0.08830  α=0.500  best_ep=198  patience=7/10000
+01:59:52  diag.PhysReg_A2_long  INFO  epoch  210/250  train_loss=0.09373 (obj=0.15646)  val_loss=0.11158  train_rmse=0.07896  val_rmse=0.08096 N·m  l_data=0.11229  l_phys=0.08833  α=0.500  best_ep=206  patience=4/10000
+02:00:03  diag.PhysReg_A2_long  INFO  epoch  215/250  train_loss=0.09345 (obj=0.15626)  val_loss=0.11178  train_rmse=0.07887  val_rmse=0.08098 N·m  l_data=0.11179  l_phys=0.08894  α=0.500  best_ep=206  patience=9/10000
+02:00:15  diag.PhysReg_A2_long  INFO  epoch  220/250  train_loss=0.09427 (obj=0.15752)  val_loss=0.11180  train_rmse=0.07934  val_rmse=0.08101 N·m  l_data=0.11296  l_phys=0.08911  α=0.500  best_ep=206  patience=14/10000
+02:00:26  diag.PhysReg_A2_long  INFO  epoch  225/250  train_loss=0.09382 (obj=0.15657)  val_loss=0.11174  train_rmse=0.07903  val_rmse=0.08095 N·m  l_data=0.11225  l_phys=0.08864  α=0.500  best_ep=206  patience=19/10000
+02:00:37  diag.PhysReg_A2_long  INFO  epoch  230/250  train_loss=0.09315 (obj=0.15595)  val_loss=0.11159  train_rmse=0.07886  val_rmse=0.08092 N·m  l_data=0.11168  l_phys=0.08855  α=0.500  best_ep=206  patience=24/10000
+02:00:49  diag.PhysReg_A2_long  INFO  epoch  235/250  train_loss=0.09292 (obj=0.15561)  val_loss=0.11171  train_rmse=0.07860  val_rmse=0.08097 N·m  l_data=0.11125  l_phys=0.08873  α=0.500  best_ep=231  patience=4/10000
+02:01:00  diag.PhysReg_A2_long  INFO  epoch  240/250  train_loss=0.09368 (obj=0.15621)  val_loss=0.11166  train_rmse=0.07888  val_rmse=0.08097 N·m  l_data=0.11206  l_phys=0.08829  α=0.500  best_ep=231  patience=9/10000
+02:01:11  diag.PhysReg_A2_long  INFO  epoch  245/250  train_loss=0.09332 (obj=0.15608)  val_loss=0.11168  train_rmse=0.07872  val_rmse=0.08099 N·m  l_data=0.11168  l_phys=0.08880  α=0.500  best_ep=231  patience=14/10000
+02:01:23  diag.PhysReg_A2_long  INFO  epoch  250/250  train_loss=0.09282 (obj=0.15571)  val_loss=0.11162  train_rmse=0.07865  val_rmse=0.08096 N·m  l_data=0.11114  l_phys=0.08915  α=0.500  best_ep=231  patience=19/10000
+02:01:26  diag.PhysReg_A2_long  INFO  Saved to /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/PhysReg_A2_long/PhysReg_A2_long_ep250_rmse0.09069_frac0.15_seed0_lr3e-4_wd0.005_do0.3_fn0.02_bs512_hl256-512-256_pw0.5_20260522_0201  test_rmse_traj_macro=0.09069  (pooled-per-joint=0.09933  rmse_pooled=0.10893)
+02:01:26  diag.PhysReg_A2_long  INFO  ════════ TRAINING SUMMARY [PhysReg_A2_long] ════════
+  epochs ran      : 250 / 250
+  model selected   : raw-best-by-val
+  best epoch       : 231
+  test  rmse (N·m) : 0.09069   (trajectory-macro)
+  val   rmse @best : 0.08086
+  train rmse @best : 0.07897
+  gen. gap (test−val@best): +0.00983   |  overfit gap (val−train @best): +0.00189
+═══════════════════════════════════════
+02:01:26  diag.a1  INFO  ==============================================================================
+02:01:26  diag.a1  INFO  A1 SUMMARY
+02:01:26  diag.a1  INFO  ==============================================================================
+02:01:26  diag.a1  INFO  [EDR_A2_long]
+02:01:26  diag.a1  INFO    epochs ran:               250
+02:01:26  diag.a1  INFO    best_val:    ep=179  val_rmse=0.08295  (test@same=0.08933)
+02:01:26  diag.a1  INFO    best_test:   ep=144  test_rmse=0.08927
+02:01:26  diag.a1  INFO    last epoch:  val_rmse=0.08298  test_rmse=0.08942
+02:01:26  diag.a1  INFO    best_ema:    ep=245  ema_val=0.08298  (test@same=0.08941)
+02:01:26  diag.a1  INFO  [PhysReg_A2_long]
+02:01:26  diag.a1  INFO    epochs ran:               250
+02:01:26  diag.a1  INFO    best_val:    ep=231  val_rmse=0.08086  (test@same=0.09069)
+02:01:26  diag.a1  INFO    best_test:   ep=231  test_rmse=0.09069
+02:01:26  diag.a1  INFO    last epoch:  val_rmse=0.08096  test_rmse=0.09077
+02:01:26  diag.a1  INFO  ------------------------------------------------------------------------------
+02:01:26  diag.a1  INFO  SELECTION-BIAS DIAGNOSTIC
+02:01:26  diag.a1  INFO  ------------------------------------------------------------------------------
+02:01:26  diag.a1  INFO  [EDR_A2_long]  test@best_val = 0.08933   best_test = 0.08927   selection cost = 0.00005
+02:01:26  diag.a1  INFO  [PhysReg_A2_long]  test@best_val = 0.09069   best_test = 0.09069   selection cost = 0.00000
+02:01:26  diag.a1  INFO  Summary written to /home/san/Desktop/MTP_PINN/Neural_Networks/diagnostics/results/a1_summary.json

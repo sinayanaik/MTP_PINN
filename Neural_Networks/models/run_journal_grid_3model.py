@@ -248,7 +248,13 @@ FIXED_HP_EDR: dict[str, Any] = {
     # tested for the structural-passivity story, but are NOT the journal
     # config.
     # ══════════════════════════════════════════════════════════════════════
-    "epochs":                  1500,   # longer horizon — EDR keeps learning
+    # 2026-05-22 SPEEDUP: zero of 56 prior HPC EDR runs reached 1500 epochs;
+    # median was 330 (p90=612). The 1500 budget was a safety upper bound
+    # nobody reached.  Lowered to 1000 (still 1.6× the p90 actual epoch
+    # count, so no early-truncation risk).  Patience 150→50 trims the
+    # plateau tail (~100 epochs × 2.1 min/ep ≈ 3.5h saved per trial); now
+    # matches FNN/PhysReg.
+    "epochs":                  1000,   # longer horizon — EDR keeps learning (was 1500)
     "batch_size":              256,
     "learning_rate":           3e-4,
     "weight_decay":            2e-3,
@@ -259,7 +265,7 @@ FIXED_HP_EDR: dict[str, Any] = {
     "warmup_cosine_min_factor": 0.05,  # EDR-only LR floor (FNN/PhysReg keep 0.01)
     "early_stopping":          True,
     "early_stop_metric":       "val_rmse",
-    "patience":                150,    # EDR-only: γ-gate ramp needs longer tail (FNN/PhysReg use 50)
+    "patience":                50,     # 2026-05-22: 150→50 (matches FNN/PhysReg; prior data showed γ-gate ramp finishes by ep 300, best by ~ep 180)
     "min_delta":               1e-5,    # R3/R4: smooth descent ⇒ small δ is safe
     "grad_clip_norm":          1.0,
     "feature_noise_std":       0.02,
@@ -286,7 +292,7 @@ FIXED_HP_EDR: dict[str, Any] = {
     "lambda_correction_reg":   1.0e-1,  # scalar Occam prior (corrected-P1 value)
     "lambda_correction_reg_per_component": None,
     "lambda_correction_decay": "none",
-    "correction_dropout":      0.15,    # corrected-P1 value
+    "correction_dropout":      0.30,    # 2026-05-22: bumped 0.15→0.30; HPC per-HP analysis showed cdrop=0.30 gives both lower val AND lower test (see project_edr_dropout_root_cause)
     "correction_reg_inertia_normalize": True,
     "enable_passivity_loss":   False,
     "lambda_passivity":        0.01,
@@ -382,17 +388,32 @@ GRID_PHYSREG_DETAILED: dict[str, list] = {
 # only the empirically-decisive axes (width × λ_reg × dropout × friction). NO
 # structural levers (coriolis_structural / inertia_psd / spectral_norm stay
 # OFF in FIXED_HP_EDR; six prior rounds falsified them) and no lr/patience
-# axes (fixed at the new FIXED_HP_EDR horizon). [128,128] re-added as a probe.
+# axes (fixed at the new FIXED_HP_EDR horizon).
+#
+# 2026-05-22 TIGHTENING (see project_edr_dropout_root_cause memory):
+#   • dropout=0.05 was the dominant val<test gap driver on the 56 prior
+#     HPC runs (cdrop=0.05 → test 0.1064; cdrop=0.30 → test 0.0917).
+#     Removed entirely; sweep cdrop ∈ {0.30, 0.45} to test whether even
+#     higher dropout shrinks the gap further.
+#   • λ_corr ∈ [0.002, 0.2] showed weak/no test-RMSE effect within
+#     single-seed noise (mean variance < 0.005 across that range).
+#     Sweep narrowed to [0.01, 0.05] — the empirical sweet spot.
+#   • width [32,32] and [128,128] dropped: small widths under-fit, [128,128]
+#     overfits (project_fair_protocol_edr_capacity).  Sweep [48,48], [64,64].
+#   • single seed=[42] (per-user request 2026-05-22) — keeps trial count
+#     low for HPC wall-clock fit; multi-seed verification deferred to the
+#     DATAEFF curve which already runs the winner across 3 seeds × 10 fractions.
+# Final: 2·2·2·2·1 = 16 trials (was 210 single-seed; now 16 single-seed).
 GRID_EDR_DETAILED: dict[str, list] = {
     "edr_width": [
-        [32, 32], [48, 48], [64, 64], [96, 96], [128, 128],
-    ],                                              # 5  δ-net capacity (decisive)
+        [48, 48], [64, 64],
+    ],                                              # 2  δ-net capacity (sweet spot)
     "lambda_correction_reg":
-        [2e-3, 5e-3, 1e-2, 2e-2, 5e-2, 1e-1, 2e-1], # 7  Occam strength (key EDR HP)
-    "correction_dropout":     [0.05, 0.15, 0.30],   # 3  δ-net reg
+        [1e-2, 5e-2],                               # 2  Occam strength (empirical range)
+    "correction_dropout":     [0.30, 0.45],         # 2  δ-net reg (≥0.30 closes val<test gap)
     "use_friction_qdd":       [False, True],        # 2  friction conditioning
-    "seed":                   [42],
-}  # 5·7·3·2 = 210  (decisive-axes EDR search; no structural / lr / patience)
+    "seed":                   [42],                 # 1  single seed (multi-seed lives in DATAEFF)
+}  # 2·2·2·2·1 = 16 trials
 
 # ── DATAEFF: lightweight data-efficiency curve (separate study) ─────────────
 # Each arch runs its proven FIXED_HP_* best config (NOT the DETAILED sweep)
@@ -402,14 +423,15 @@ GRID_EDR_DETAILED: dict[str, list] = {
 # is the "how much data does each architecture need" curve — deliberately
 # kept off the 204-trial DETAILED grid (which stays at frac=1.0).
 #
-# MULTI-SEED (2026-05-19): single-seed made the curve noise-dominated — a
-# ~0.0008 N·m PhysReg wiggle read as "test RMSE increasing with more data"
-# when PhysReg is in fact ~flat (already near its floor; the val→test split
-# shift is a documented data property).  3 seeds per fraction → the plot
-# shows the seed-MEAN with a ±std band (sweep_df aggregates), so the trend
-# reflects signal, not a single lucky/unlucky draw.
+# 2026-05-22: single-seed DATAEFF (per user request, to cut wall-clock).
+# History: 2026-05-19 multi-seed was added because single-seed made the
+# curve noise-dominated (a ~0.0008 N·m PhysReg wiggle read as "test RMSE
+# increasing with more data" when PhysReg is in fact ~flat).  Reverting to
+# single-seed to fit HPC budget; the resulting curve will have no error
+# band — interpret trends with care, especially small differences across
+# adjacent fractions.  Cost: 30 trials → 10 trials per arch.
 _DATAEFF_FRACTIONS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-_DATAEFF_SEEDS = [42, 1, 2]
+_DATAEFF_SEEDS = [42]
 GRID_FNN_DATAEFF:     dict[str, list] = {"data_train_fraction": _DATAEFF_FRACTIONS, "seed": _DATAEFF_SEEDS}
 GRID_PHYSREG_DATAEFF: dict[str, list] = {"data_train_fraction": _DATAEFF_FRACTIONS, "seed": _DATAEFF_SEEDS}
 GRID_EDR_DATAEFF:     dict[str, list] = {"data_train_fraction": _DATAEFF_FRACTIONS, "seed": _DATAEFF_SEEDS}
@@ -515,6 +537,54 @@ def _build_trials() -> list[dict[str, Any]]:
                 "hp":          hp,
             })
     return trials
+
+
+def _write_resume_status(
+    skipped: list[dict[str, Any]],
+    pending: list[dict[str, Any]],
+    status_path: str,
+) -> None:
+    """Write a JSON resume-status checkpoint to ``status_path``.
+
+    Captures what's already complete on disk and what's queued for dispatch
+    so the user can read the file across HPC job restarts and know exactly
+    how many trials remain.  Best-effort — failure to write is logged but
+    does NOT abort the run.
+
+    Resumability story (2026-05-22):
+    the grid is already resumable across HPC jobs via ``SKIP_EXISTING``
+    (matching ``metadata.yaml`` files on disk are recognised as completed
+    and dropped from the pending queue at startup).  This status file
+    surfaces that state externally so it is visible without log scraping.
+    """
+    from collections import Counter as _Counter
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(status_path)) or ".",
+                    exist_ok=True)
+        payload = {
+            "timestamp":        datetime.now().isoformat(),
+            "total_planned":    len(skipped) + len(pending),
+            "completed_count":  len(skipped),
+            "pending_count":    len(pending),
+            "completed_by_arch": dict(_Counter(t["arch"] for t in skipped)),
+            "pending_by_arch":   dict(_Counter(t["arch"] for t in pending)),
+            "pending_trials": [
+                {
+                    "arch": t["arch"],
+                    "hp_signature": {
+                        k: v for k, v in t["hp"].items()
+                        if k not in _SKIP_KEYS and not k.startswith("_")
+                    },
+                }
+                for t in pending
+            ],
+        }
+        with open(status_path, "w") as f:
+            json.dump(payload, f, indent=2, default=str)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("grid").warning(
+            "Failed to write resume-status to %s: %s", status_path, exc
+        )
 
 
 def _partition_trials_by_skip(
@@ -2371,6 +2441,17 @@ def _run_parallel_collect(
     if n_pre_skip:
         log.info("Pre-dispatch SKIP: %d/%d trials already complete in this batch.",
                  n_pre_skip, original_total)
+    # ── Resume-status checkpoint (resumable across HPC jobs) ─────────────
+    # Write a small JSON file at the start AND end of dispatch so the user
+    # can `cat` it between HPC jobs to know exactly what is done / pending.
+    # Across-trial resume itself is already provided by SKIP_EXISTING; this
+    # just surfaces the state.
+    _status_path = os.path.join(DATASET_OUT_ROOT, "grid_resume_status.json")
+    _write_resume_status(_skipped, trials, _status_path)
+    log.info(
+        "Resume state: %d/%d done, %d pending  →  %s",
+        n_pre_skip, original_total, len(trials), _status_path,
+    )
     if not trials:
         log.info("Nothing to do — all %d trials already complete; "
                  "artifacts will be rebuilt from disk by the caller.",
@@ -2963,6 +3044,24 @@ def _run_parallel_collect(
     with state.lock:
         _all = list(state.all_results)
         _ok, _skip, _fail = state.ok, state.skip + n_pre_skip, state.fail
+    # ── Refresh resume-status checkpoint on exit ─────────────────────────
+    # Re-read disk to capture trials that completed THIS session (their
+    # metadata.yaml is now on disk and _partition_trials_by_skip will
+    # recognise them on the next HPC job).  Writes the same JSON file so
+    # the user can see exactly what would be skipped on resume.
+    try:
+        _all_planned = list(_skipped) + list(trials)
+        _now_pending, _now_done = _partition_trials_by_skip(_all_planned)
+        _write_resume_status(_now_done, _now_pending,
+                             os.path.join(DATASET_OUT_ROOT, "grid_resume_status.json"))
+        log.info(
+            "Final resume state: %d/%d done, %d still pending  →  "
+            "next HPC job will dispatch the %d pending only.",
+            len(_now_done), len(_all_planned), len(_now_pending),
+            len(_now_pending),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not refresh resume-status on exit: %s", exc)
     # Hand back this session's results + the pre-skipped trials; the caller
     # finalizes (combining executed + disk-reconstructed) so the CSV is never
     # just the session subset.

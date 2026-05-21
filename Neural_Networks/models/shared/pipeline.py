@@ -257,12 +257,19 @@ def run_training(
     _tau_std_train = np.asarray(loaders["train"].dataset.std_tau, dtype=np.float64)
     _tau_std_val = loaders["val"].dataset.std_tau
     _tau_mean_val = loaders["val"].dataset.mean_tau
+    _tau_std_test = loaders["test"].dataset.std_tau
+    _tau_mean_test = loaders["test"].dataset.mean_tau
     _val_trajectories: list[dict] = (
         loaders["val"].dataset.metadata.get("split", {}).get("stats", {}).get("val", {}).get("trajectories", [])
     )
     _test_trajectories: list[dict] = (
         loaders["test"].dataset.metadata.get("split", {}).get("stats", {}).get("test", {}).get("trajectories", [])
     )
+    # Diagnostic-only: evaluate test_rmse every epoch (default off — keeps cost
+    # in the production grid identical).  When True, the test loader is run as
+    # a held-out probe each epoch and the trajectory-macro RMSE is appended to
+    # history["test_rmse"].  Use ONLY for diagnostics — never for selection.
+    _diagnostic_test_eval = bool(hp.get("diagnostic_test_eval", False))
     # The headline RMSE (live val_rmse, early-stop, final val/test) is the
     # trajectory-macro estimator: per-joint RMSE within each trajectory,
     # averaged over joints, then averaged over trajectories.  If the split
@@ -375,6 +382,19 @@ def run_training(
         history["train_rmse"].append(train_rmse_phys)
         history["val_rmse"].append(_val_rmse_phys)
         history["train_loss_obj"].append(train_loss_obj)
+
+        # Diagnostic per-epoch test eval (off by default, no production cost).
+        # Identical estimator to val_rmse — trajectory-macro RMSE in N·m.
+        if _diagnostic_test_eval:
+            _, _t_pred_norm, _t_tgt_norm = job.strategy.eval_epoch(
+                model, loaders["test"], device
+            )
+            _t_pred_phys = _t_pred_norm * _tau_std_test + _tau_mean_test
+            _t_tgt_phys = _t_tgt_norm * _tau_std_test + _tau_mean_test
+            _test_rmse_phys = macro_rmse_numpy(
+                _t_pred_phys, _t_tgt_phys, _test_trajectories
+            )
+            history.setdefault("test_rmse", []).append(_test_rmse_phys)
 
         # ── Non-finite guard (covers FNN/PhysReg/EDR — single chokepoint) ──
         # If the objective or the held-out val metric goes NaN/Inf the run has
@@ -758,10 +778,18 @@ def run_training(
         #                         on the strategy).  Diagnostics only.
         _corr_hist = history.get("correction_magnitudes", [])
         _has_corr = any(x is not None for x in _corr_hist)
+        _test_hist = history.get("test_rmse", [])
+        _has_test = len(_test_hist) > 0
+        _ema_hist = history.get("ema_val_rmse", [])
+        _has_ema = len(_ema_hist) > 0
         header = [
             "epoch", "train_loss", "val_loss",
             "train_rmse", "val_rmse", "train_loss_obj",
         ]
+        if _has_test:
+            header.append("test_rmse")
+        if _has_ema:
+            header.append("ema_val_rmse")
         if _has_corr:
             header += [
                 "mean_abs_delta_g",
@@ -780,6 +808,10 @@ def run_training(
                 f"{history['val_rmse'][i]:.8f}",
                 f"{_obj_hist[i]:.8f}" if i < len(_obj_hist) else "",
             ]
+            if _has_test:
+                row.append(f"{_test_hist[i]:.8f}" if i < len(_test_hist) else "")
+            if _has_ema:
+                row.append(f"{_ema_hist[i]:.8f}" if i < len(_ema_hist) else "")
             if _has_corr:
                 c = _corr_hist[i] if i < len(_corr_hist) else None
                 if c is None:
