@@ -1,0 +1,340 @@
+model_type: EDR
+run_id: EDR_ep466_rmse0.10645_frac1_seed42_lr3e-4_wd0.002_bs256_creg0.02_w32-32_cdo0.05_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_lcdnone_ffmlp_psdFalse_ema0.9_snFalse_20260521_0845
+data_run_dir: /home/sinayan_iitp/MTP_PINN/Neural_Networks/train_data/run_abl_q0_qd91_qdd91_tau51_lk_3to1_20260515_1923
+trained_at: '2026-05-21T08:45:04.251760'
+device: cuda:0
+epochs_trained: 466
+best_val_loss: 0.12190990984249352
+best_val_rmse: 0.08496335948031358
+hyperparams:
+  epochs: 1500
+  batch_size: 256
+  learning_rate: 0.0003
+  weight_decay: 0.002
+  optimizer: adamw
+  lr_scheduler: warmup_cosine
+  warmup_cosine_min_factor: 0.05
+  early_stopping: true
+  early_stop_metric: val_rmse
+  patience: 150
+  min_delta: 1.0e-05
+  grad_clip_norm: 1.0
+  feature_noise_std: 0.02
+  activation: silu
+  gravity_hidden:
+  - 32
+  - 32
+  inertia_hidden:
+  - 32
+  - 32
+  coriolis_hidden:
+  - 32
+  - 32
+  friction_hidden:
+  - 16
+  - 16
+  use_friction_qdd: true
+  use_phys_cond: true
+  coriolis_structural: false
+  coriolis_matrix_form: false
+  inertia_psd: false
+  spectral_norm: false
+  friction_form: mlp
+  correction_gain_ramp_frac: 0.3
+  ema_decay: 0.9
+  joint_loss_weights: null
+  lambda_correction_reg: 0.02
+  lambda_correction_reg_per_component: null
+  lambda_correction_decay: none
+  correction_dropout: 0.05
+  correction_reg_inertia_normalize: true
+  enable_passivity_loss: false
+  lambda_passivity: 0.01
+  data_train_fraction: 1.0
+  data_train_seed: 42
+  stride: 1
+  torch_compile: false
+  torch_compile_mode: default
+  snapshot_every: 0
+  print_every: 2
+  seed: 42
+  _q_mean:
+  - -0.18050342912507386
+  - 0.23447212388505684
+  - 0.03089490430162766
+  - -0.1755557613399164
+  - -0.12575803849106737
+  _q_std:
+  - 0.9713440573118921
+  - 0.34778102833065405
+  - 0.9564433266936387
+  - 0.7461700009780883
+  - 0.8163011871774637
+exhaustive_hyperparams:
+  batch_size: 256
+  epochs: 1500
+  learning_rate: 0.0003
+  optimizer: adamw
+  lr_scheduler: warmup_cosine
+  correction_gain_ramp_frac: 0.3
+  coriolis_structural: false
+  weight_decay: 0.002
+  dropout: 0.0
+  activation: silu
+  hidden_layers: null
+  early_stopping: true
+  early_stop_metric: val_rmse
+  patience: 150
+  min_delta: 1.0e-05
+  grad_clip_norm: 1.0
+  feature_noise_std: 0.02
+  data_train_fraction: 1.0
+  data_train_seed: 42
+  stride: 1
+  seq_len: 50
+  torch_compile: false
+  torch_compile_mode: default
+  snapshot_every: 0
+  seed: 42
+  gravity_hidden:
+  - 32
+  - 32
+  inertia_hidden:
+  - 32
+  - 32
+  coriolis_hidden:
+  - 32
+  - 32
+  friction_hidden:
+  - 16
+  - 16
+  phase2_start_epoch: null
+  phase2_plateau_window: 5
+  phase2_plateau_threshold: 0.005
+  phase2_min_epoch: 3
+  phase2_max_epoch: 25
+  lambda_correction_reg: 0.02
+  lambda_correction_reg_per_component: null
+  lambda_correction_decay: none
+  lambda_correction_decay_min_ratio: 0.3
+  joint_loss_weights: null
+  correction_reg_inertia_normalize: true
+  correction_dropout: 0.05
+  use_friction_qdd: true
+  use_phys_cond: true
+  coriolis_matrix_form: false
+  friction_form: mlp
+  inertia_psd: false
+  ema_decay: 0.9
+  spectral_norm: false
+  enable_passivity_loss: false
+  lambda_passivity: 0.01
+  print_every: 2
+  warmup_cosine_min_factor: 0.05
+physics_sched_config:
+  mode: edr_smooth_gamma_gate
+  correction_gain_ramp_frac: 0.3
+  coriolis_structural: false
+  lambda_correction_reg: 0.02
+  correction_reg_inertia_normalize: true
+  correction_dropout: 0.05
+  enable_passivity_loss: false
+  lambda_passivity: 0.01
+  use_phys_cond: true
+  coriolis_matrix_form: false
+  lambda_correction_reg_per_component: null
+  lambda_correction_decay: none
+  joint_loss_weights: null
+  friction_form: mlp
+  inertia_psd: false
+  spectral_norm: false
+  ema_decay: 0.9
+metrics:
+  mse:
+  - 0.005664704367518425
+  - 0.03797407075762749
+  - 0.012843065895140171
+  - 0.0024619493633508682
+  - 0.013649594970047474
+  rmse:
+  - 0.07526423037052155
+  - 0.19486936926841736
+  - 0.11332724988460541
+  - 0.049618035554885864
+  - 0.11683148145675659
+  nrmse:
+  - 0.0749167874455452
+  - 0.07275154441595078
+  - 0.07443181425333023
+  - 0.10570408403873444
+  - 0.10145344585180283
+  mae:
+  - 0.054749149829149246
+  - 0.14123815298080444
+  - 0.0823875293135643
+  - 0.03405344858765602
+  - 0.08275037258863449
+  max_error:
+  - 0.5586090683937073
+  - 1.4037870168685913
+  - 0.6814640164375305
+  - 0.44473797082901
+  - 0.7468621730804443
+  r2:
+  - 0.859318733215332
+  - 0.857896625995636
+  - 0.9050547480583191
+  - 0.7371979355812073
+  - 0.6683663129806519
+  pearson_r:
+  - 0.9271265840348859
+  - 0.9285623327365422
+  - 0.9514986433945849
+  - 0.865691174453191
+  - 0.8180223698221247
+  explained_variance:
+  - 0.8595689535140991
+  - 0.8621706366539001
+  - 0.9053454995155334
+  - 0.739136815071106
+  - 0.6684633493423462
+  mse_mean: 0.014518676325678825
+  rmse_mean: 0.10998208820819855
+  rmse_macro_mean: 0.10998208820819855
+  mse_pooled: 0.014518966690734865
+  rmse_pooled: 0.12049467494762939
+  r2_overall: 0.8596101099987116
+  nrmse_mean: 0.08585153520107269
+  mae_mean: 0.07903572916984558
+  r2_mean: 0.8055669069290161
+  pearson_r_mean: 0.8981802208882657
+  _n_val: 56246
+  _n_test: 87596
+  rmse_traj_macro: 0.09689858310347439
+val_metrics:
+  mse:
+  - 0.00521915964782238
+  - 0.025948097929358482
+  - 0.008732947520911694
+  - 0.0014271753607317805
+  - 0.008057743310928345
+  rmse:
+  - 0.07224375009536743
+  - 0.1610841304063797
+  - 0.09345024079084396
+  - 0.03777797520160675
+  - 0.08976493030786514
+  nrmse:
+  - 0.07791094481945038
+  - 0.06356476992368698
+  - 0.06285740435123444
+  - 0.08225167542695999
+  - 0.08297555148601532
+  mae:
+  - 0.04983826354146004
+  - 0.10793891549110413
+  - 0.06536633521318436
+  - 0.02676577679812908
+  - 0.06152574345469475
+  max_error:
+  - 0.5192984342575073
+  - 0.8835908770561218
+  - 0.5479530096054077
+  - 0.23326824605464935
+  - 0.6063942313194275
+  r2:
+  - 0.8893756866455078
+  - 0.8945475220680237
+  - 0.9326503276824951
+  - 0.8719039559364319
+  - 0.8049870729446411
+  pearson_r:
+  - 0.9431738786223247
+  - 0.9462833671207124
+  - 0.9663551107767067
+  - 0.9341287166003794
+  - 0.8977354262182543
+  explained_variance:
+  - 0.8893767595291138
+  - 0.8954528570175171
+  - 0.9337323307991028
+  - 0.8722344636917114
+  - 0.8050346970558167
+  mse_mean: 0.009877024218440056
+  rmse_mean: 0.09086419641971588
+  rmse_macro_mean: 0.09086419641971588
+  mse_pooled: 0.00987720465726931
+  rmse_pooled: 0.0993841267872758
+  r2_overall: 0.9014800355732812
+  nrmse_mean: 0.07391206920146942
+  mae_mean: 0.06228701025247574
+  r2_mean: 0.8786929249763489
+  pearson_r_mean: 0.9375352998676755
+  rmse_traj_macro: 0.08496335948031358
+test_metrics:
+  mse:
+  - 0.005950957536697388
+  - 0.045695435255765915
+  - 0.015482407994568348
+  - 0.0031264324206858873
+  - 0.017240481451153755
+  rmse:
+  - 0.07714244723320007
+  - 0.21376490592956543
+  - 0.12442832440137863
+  - 0.055914510041475296
+  - 0.13130301237106323
+  nrmse:
+  - 0.0767863318324089
+  - 0.08115779608488083
+  - 0.08814005553722382
+  - 0.12175081670284271
+  - 0.11731216311454773
+  mae:
+  - 0.05790022015571594
+  - 0.16262033581733704
+  - 0.09331879019737244
+  - 0.03873381391167641
+  - 0.09637993574142456
+  max_error:
+  - 0.5586090683937073
+  - 1.4037870168685913
+  - 0.6814640164375305
+  - 0.44473797082901
+  - 0.7468621730804443
+  r2:
+  - 0.8333425521850586
+  - 0.8372868299484253
+  - 0.8876262307167053
+  - 0.6158384084701538
+  - 0.5707667469978333
+  pearson_r:
+  - 0.9133691067477591
+  - 0.9192163400969144
+  - 0.9433819577413446
+  - 0.8091182658317758
+  - 0.7562858176058564
+  explained_variance:
+  - 0.8341355323791504
+  - 0.8447837233543396
+  - 0.889951765537262
+  - 0.6241521835327148
+  - 0.571213960647583
+  mse_mean: 0.01749914325773716
+  rmse_mean: 0.12051065266132355
+  rmse_macro_mean: 0.12051065266132355
+  mse_pooled: 0.01749947433188633
+  rmse_pooled: 0.13228557869959343
+  r2_overall: 0.833796207529856
+  nrmse_mean: 0.0970294326543808
+  mae_mean: 0.08979061990976334
+  r2_mean: 0.7489721775054932
+  pearson_r_mean: 0.8682742976047301
+  rmse_traj_macro: 0.10644676200200301
+correction_magnitudes_at_best:
+  mean_abs_delta_g: 0.19093058776243663
+  mean_frob_delta_M: 0.2956408078711289
+  mean_abs_delta_C_qd: 0.13501034405887777
+  mean_abs_delta_tau_f: 0.06574475421087923
+torch_compile: false
+save_subdir: EDR
