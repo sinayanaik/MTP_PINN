@@ -1,0 +1,29 @@
+Model: EDRModel
+Params: 13,254
+
+Hyperparameters:
+  n_joints: 5
+  gravity_hidden: [48, 48]
+  inertia_hidden: [48, 48]
+  inertia_in_dim: 20
+  coriolis_hidden: [48, 48]
+  friction_hidden: [24, 24]
+  activation: silu
+  correction_dropout: 0.45
+  use_trig_features: True
+  use_friction_qdd: False
+  use_phys_cond: True
+  coriolis_matrix_form: False
+  coriolis_structural: False
+  friction_form: mlp
+  inertia_psd: False
+  spectral_norm: False
+
+PyTorch repr:
+EDRModel(n_joints=5, γ=0.614)
+  gravity_net:   3,605 params   δg(q)
+  inertia_net:   4,095 params   δM(q)·q̈   [L Lᵀ PSD ⇒ M̃ SPD]
+  coriolis_net:  4,565 params   δC(q,q̇)·q̇  [independent network]
+  friction_net:    989 params   q̇⊙h(|q̇|)   [odd function]
+  ──────────────────────────────────────────
+  total:        13,254 params
