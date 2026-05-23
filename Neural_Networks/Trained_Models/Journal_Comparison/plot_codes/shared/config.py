@@ -95,6 +95,16 @@ class PlotConfig:
     split: str = "test"
     device: str = "auto"          # "auto" | "cpu" | "cuda"
     champion_metric: str = "rmse_traj_macro"
+    # Which run becomes each architecture's "champion" for the inference-backed
+    # figures (06-12, heatmaps, trajectory, headline). ``champion_basis``:
+    #   "test"   -> lowest test RMSE        (default; matches the headline)
+    #   "val"    -> lowest validation RMSE  (no test-set selection leakage)
+    #   "train"  -> lowest train RMSE @ best-val epoch
+    #   "global" -> lowest test RMSE over ALL data fractions (ignores the
+    #               full-data restriction; picks reduced-data winners)
+    # The make_tables champion_selection.csv reports all four side by side.
+    champion_basis: str = "test"
+    champion_full_data_only: bool = True   # restrict champions to frac == 1.0
     n_worst_traj: int = 1
     figures_dir: Path = FIGURES_DIR
     tables_dir: Path = TABLES_DIR
@@ -115,7 +125,7 @@ class PlotConfig:
     savgol_window: int = 7
     savgol_polyorder: int = 2
 
-    # ---- trajectory selection (fig11) ----------------------------------
+    # ---- trajectory selection (fig10) ----------------------------------
     # None  -> auto (plotting.pick_trajectory, an information-rich curve)
     # int   -> index into the split's trajectory list
     # str   -> first trajectory whose geometry name matches

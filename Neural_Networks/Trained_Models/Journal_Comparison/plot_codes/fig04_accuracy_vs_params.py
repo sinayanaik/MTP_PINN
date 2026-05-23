@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""fig04 — Accuracy vs model size (test RMSE vs parameter count, log x).
+"""fig04 — Model size per architecture (champion trainable-parameter count).
 
-Every registry model is a point; the champion of each family is starred.
-EDR occupies the lower-left: more accurate with ~13× fewer parameters than
-the black-box baselines. (Scatter — no Savitzky–Golay; raw values in
-tables/cost_accuracy.csv.)
+One horizontal bar per family = its champion's trainable-parameter count on a
+log axis, annotated with that champion's test RMSE. EDR reaches ~0.0902 N·m with
+~13 k parameters, versus ~70 k (FNN, 0.0972) and ~549 k (Physics-Reg., 0.0896):
+roughly 5× and 41× fewer parameters at comparable accuracy. (Bar chart — no
+Savitzky–Golay; raw values in tables/cost_accuracy.csv.)
 """
 from __future__ import annotations
 
@@ -15,51 +16,68 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 
 from shared import dataio, palette
 from shared.config import default_config, replace
 from shared.figio import save_pdf
-from shared.plotting import arch_proxy_handles, top_legend
 from shared.style import apply_style
 
-CONFIG = replace(default_config(), fig_w=7.4, fig_h=4.8)
+# ============================ TWEAKABLES (edit me) ============================
+FIG_W, FIG_H      = 7.4, 3.4
+DPI_SAVE          = 300
+ARCH_COLORS       = {"fnn": "#4C72B0", "physreg": "#55A868", "edr": "#C44E52"}
+AXES_LABEL_SIZE   = 16.0
+TICK_SIZE         = 14.0
+ANNOT_SIZE        = 13.0           # param-count + RMSE label at each bar end
+X_LABEL           = "Trainable parameters (log scale)"
+BAR_HEIGHT        = 0.55
+BAR_ALPHA         = 0.9
+BAR_BASE          = None           # bar left edge; None = one decade below smallest
+RMSE_FMT          = "RMSE {:.4f}"  # champion accuracy annotation
+GRID_ON           = True
+# =============================================================================
+
+CONFIG = replace(default_config(), fig_w=FIG_W, fig_h=FIG_H, dpi_save=DPI_SAVE,
+                 arch_colors=dict(ARCH_COLORS), axes_label_size=AXES_LABEL_SIZE,
+                 tick_label_size=TICK_SIZE, annot_size=ANNOT_SIZE)
+
+
+def _fmt_params(p: float) -> str:
+    if p >= 1e6:
+        return f"{p / 1e6:.2f}M"
+    if p >= 1e3:
+        return f"{p / 1e3:.1f}k"
+    return f"{int(p)}"
 
 
 def main(cfg=CONFIG):
     apply_style(cfg)
-    recs = dataio.registry_records()
-    champs = dataio.champions(cfg.champion_metric)
+    champs = dataio.champions(cfg)
     archs = palette.ordered_archs(cfg)
+    params = [dataio.param_count(champs[a]["run_dir"]) for a in archs]
+    rmses = [champs[a]["test_rmse"] for a in archs]
 
-    rows = []
-    for r in recs:
-        try:
-            p = dataio.param_count(r["run_dir"])
-        except Exception:  # noqa: BLE001
-            continue
-        rows.append((r["arch"], p, r["test_rmse"]))
+    # Log-scale bars need a positive base; default to one decade below the
+    # smallest model so every bar length is proportional to its order of magnitude.
+    base = BAR_BASE or 10.0 ** (np.floor(np.log10(min(params))) - 1)
 
     fig, ax = plt.subplots(figsize=(cfg.fig_w, cfg.fig_h))
-    for a in archs:
+    for i, (a, p, e) in enumerate(zip(archs, params, rmses)):
         c = palette.color(cfg, a)
-        params = np.array([p for arch, p, _ in rows if arch == a], float)
-        err = np.array([e for arch, _, e in rows if arch == a], float)
-        ax.scatter(params, err, s=46, color=c, alpha=0.45, edgecolor="none",
-                   zorder=palette.zorder(cfg, a))
-        ch = champs[a]
-        ax.plot([dataio.param_count(ch["run_dir"])], [ch["test_rmse"]],
-                marker="*", ms=20, mfc=c, mec="black", mew=0.8, zorder=6)
+        ax.barh(i, p - base, left=base, height=BAR_HEIGHT, color=c,
+                alpha=BAR_ALPHA, edgecolor="black", linewidth=0.8, zorder=3)
+        ax.annotate(f"{_fmt_params(p)}   {RMSE_FMT.format(e)}", (p, i),
+                    textcoords="offset points", xytext=(8, 0), ha="left",
+                    va="center", fontsize=cfg.annot_size, zorder=4)
 
     ax.set_xscale("log")
-    ax.set_xlabel("Trainable parameters")
-    ax.set_ylabel(cfg.rmse_label)
-    ax.grid(True)
-
-    handles = arch_proxy_handles(cfg, archs, kind="patch")
-    handles.append(Line2D([0], [0], marker="*", ls="none", ms=15,
-                          mfc="0.5", mec="black", label="champion"))
-    top_legend(ax, handles, cfg)
+    ax.set_xlim(base, max(params) * 6.0)         # headroom for the end labels
+    ax.set_yticks(range(len(archs)))
+    ax.set_yticklabels([palette.label(cfg, a) for a in archs])
+    ax.invert_yaxis()                            # first arch on top, like a table
+    ax.set_xlabel(X_LABEL)
+    ax.grid(axis="x", visible=GRID_ON)
+    ax.grid(axis="y", visible=False)
     return save_pdf(fig, "fig04_accuracy_vs_params", cfg)
 
 

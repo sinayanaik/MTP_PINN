@@ -130,7 +130,7 @@ def heatmap(ax, matrix, row_labels, col_labels, cfg: PlotConfig, *,
     ax.set_xticklabels(col_labels)
     ax.set_yticks(range(nr))
     ax.set_yticklabels(row_labels)
-    ax.set_aspect("auto")
+    ax.set_aspect("equal")          # square cells -> compact heatmap
     ax.grid(False)
     ax.tick_params(length=0)
 

@@ -1,0 +1,13 @@
+selection_basis,architecture,data_fraction,params,train_rmse,val_rmse,test_rmse,best_val_epoch,run_id
+global,FNN,1,69637,0.0907847,0.0852938,0.0971708,296,BlackBoxFNN_ep346_rmse0.09717_frac1_seed42_lr3e-4_wd1e-4_do0.5_fn0.02_bs512_hl128-256-128_20260520_1753
+global,Physics-Reg.,0.7,549381,0.0750144,0.079841,0.0891965,44,PhysicsRegularizedFNN_ep125_rmse0.08920_frac0.7_seed42_lr3e-4_wd0.005_do0.3_fn0.02_bs512_hl512-512-512_pw1_20260522_0641
+global,EDR,0.3,13374,0.0847531,0.0796957,0.0898632,221,EDR_ep271_rmse0.08986_frac0.3_seed42_lr6e-4_wd0.002_bs1024_creg0.05_w48-48_cdo0.45_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_lcdnone_ffmlp_psdFalse_ema0.9_snFalse_20260522_0704
+full_data_train,FNN,1,539141,0.0334644,0.089552,0.10915,62,BlackBoxFNN_ep125_rmse0.10915_frac1_seed42_lr0.001_wd1e-4_do0.1_fn0.02_bs512_hl512-512-512_20260520_1640
+full_data_train,Physics-Reg.,1,549381,0.03293,0.0827506,0.101328,81,PhysicsRegularizedFNN_ep131_rmse0.10133_frac1_seed42_lr3e-4_wd0.005_do0.1_fn0.02_bs512_hl512-512-512_pw0.05_20260520_1820
+full_data_train,EDR,1,7262,0.0666689,0.0849634,0.106447,316,EDR_ep466_rmse0.10645_frac1_seed42_lr3e-4_wd0.002_bs256_creg0.02_w32-32_cdo0.05_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_lcdnone_ffmlp_psdFalse_ema0.9_snFalse_20260521_0845
+full_data_val,FNN,1,19717,0.0763663,0.0825025,0.100541,359,BlackBoxFNN_ep409_rmse0.10054_frac1_seed42_lr3e-4_wd1e-4_do0.3_fn0.02_bs512_hl128-128_20260520_1829
+full_data_val,Physics-Reg.,1,275461,0.0627295,0.0771702,0.0915589,76,PhysicsRegularizedFNN_ep126_rmse0.09156_frac1_seed42_lr3e-4_wd0.005_do0.3_fn0.02_bs512_hl256-512-256_pw0.25_20260520_1758
+full_data_val,EDR,1,13254,0.0751939,0.078093,0.0919778,414,EDR_ep564_rmse0.09198_frac1_seed42_lr3e-4_wd0.002_bs256_creg0.005_w48-48_cdo0.3_fqddFalse_pcTrue_cstFalse_cmfFalse_gr0.3_lcdnone_ffmlp_psdFalse_ema0.9_snFalse_20260521_2002
+full_data_test,FNN,1,69637,0.0907847,0.0852938,0.0971708,296,BlackBoxFNN_ep346_rmse0.09717_frac1_seed42_lr3e-4_wd1e-4_do0.5_fn0.02_bs512_hl128-256-128_20260520_1753
+full_data_test,Physics-Reg.,1,549381,0.0714153,0.0789465,0.0895622,40,PhysicsRegularizedFNN_ep125_rmse0.08956_frac1_seed42_lr3e-4_wd0.005_do0.3_fn0.02_bs512_hl512-512-512_pw1_20260520_1828
+full_data_test,EDR,1,13374,0.0764052,0.0783424,0.0902437,252,EDR_ep402_rmse0.09024_frac1_seed42_lr3e-4_wd0.002_bs256_creg0.02_w48-48_cdo0.3_fqddTrue_pcTrue_cstFalse_cmfFalse_gr0.3_lcdnone_ffmlp_psdFalse_ema0.9_snFalse_20260521_2040

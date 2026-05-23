@@ -2432,6 +2432,183 @@ def _finalize(
 
 
 # ============================================================================
+# ── DISK-DRIVEN RECONSTRUCTION ──────────────────────────────────────────────
+# Scan every trained run on disk (not just the currently-defined HP grid), so
+# `reconstruct` reports ALL data — including runs whose configs fall outside the
+# active grid (e.g. an earlier, broader HP sweep of the same architecture).
+# ============================================================================
+
+def _iter_disk_runs(out_root: str):
+    """Yield ``(arch_key, run_dir: Path, metadata: dict)`` for every on-disk
+    run with a readable ``metadata.yaml`` whose ``model_type`` matches its
+    architecture sub-directory.  Spans all three arch dirs and all fractions.
+    """
+    import yaml
+    for arch, (model_type, subdir, _help) in _ARCH_META.items():
+        base = Path(out_root) / subdir
+        if not base.is_dir():
+            continue
+        for meta_file in sorted(base.glob("*/metadata.yaml")):
+            try:
+                with open(meta_file) as fh:
+                    m = yaml.safe_load(fh)
+            except Exception:
+                continue
+            if not isinstance(m, dict) or m.get("model_type") != model_type:
+                continue
+            yield arch, meta_file.parent, m
+
+
+def _run_test_rmse(m: dict) -> float | None:
+    t = (m.get("test_metrics") or {}).get("rmse_traj_macro")
+    if t is None:
+        return None
+    t = float(t)
+    return t if t == t else None       # drop NaN
+
+
+def _cfg_key_no_frac(hp: dict) -> tuple:
+    """Config identity ignoring seed AND data fraction (for grouping a
+    data-efficiency curve of one fixed config across fractions)."""
+    skip = {"seed", "data_train_seed", "_grid_seed", "data_train_fraction"}
+    return tuple((k, _hashable(hp[k])) for k in sorted(hp)
+                 if k not in skip and not k.startswith("_"))
+
+
+def _scan_disk_results(out_root: str, sub: str) -> list["_Result"]:
+    """Disk-driven reconstruction (finds EVERY trained run, not just the runs
+    matching the currently-defined HP grid). ``elapsed`` is 0.0 — wall-time is
+    not stored on disk.
+
+    ``detailed`` — every full-data run (frac == 1.0), all configs.
+    ``dataeff``  — the data-efficiency curve: per arch, the single config that
+                   spans the most reduced fractions, reported across *all* its
+                   fractions (so the frac=1.0 endpoint, which lives among the
+                   full-data runs, is included).
+    """
+    log = logging.getLogger("grid")
+    if sub == "dataeff":
+        return _scan_dataeff_disk(out_root)
+
+    out: list[_Result] = []
+    n_other = n_missing = 0
+    for arch, _run_dir, m in _iter_disk_runs(out_root):
+        hp = dict(m.get("hyperparams") or {})
+        try:
+            frac = float(hp.get("data_train_fraction", 1.0))
+        except Exception:  # noqa: BLE001
+            frac = 1.0
+        if frac < 1.0 - 1e-9:          # detailed = full-data only
+            n_other += 1
+            continue
+        test = _run_test_rmse(m)
+        if test is None:
+            n_missing += 1
+            continue
+        out.append(_Result(n=0, arch=arch, config=_short_config(hp),
+                           status="ok", rmse=test, elapsed=0.0, hp=hp))
+    log.info("Disk scan: %d full-data runs kept for 'detailed' "
+             "(%d reduced-fraction, %d without a test metric).",
+             len(out), n_other, n_missing)
+    return out
+
+
+def _scan_dataeff_disk(out_root: str) -> list["_Result"]:
+    """Reconstruct the data-efficiency curve per arch from disk.
+
+    The dataeff sweep is ONE fixed config per arch trained across fractions.
+    Identify it as the fraction-agnostic config covering the most *reduced*
+    fractions, then emit every on-disk run of that config (its 0.1–0.9 points
+    plus the frac=1.0 full-data endpoint, which is stored among the detailed
+    runs).
+    """
+    from collections import defaultdict
+    log = logging.getLogger("grid")
+    by_arch: dict[str, list[tuple]] = defaultdict(list)   # arch -> [(cfg, frac, m)]
+    for arch, _run_dir, m in _iter_disk_runs(out_root):
+        if _run_test_rmse(m) is None:
+            continue
+        hp = m.get("hyperparams") or {}
+        try:
+            frac = float(hp.get("data_train_fraction", 1.0))
+        except Exception:  # noqa: BLE001
+            frac = 1.0
+        by_arch[arch].append((_cfg_key_no_frac(hp), frac, m))
+
+    out: list[_Result] = []
+    for arch, items in by_arch.items():
+        reduced_fracs: dict[tuple, set] = defaultdict(set)
+        for cfg, frac, _m in items:
+            if frac < 1.0 - 1e-9:
+                reduced_fracs[cfg].add(round(frac, 4))
+        if not reduced_fracs:
+            continue
+        # The dataeff config = the one spanning the most reduced fractions.
+        best_cfg = max(reduced_fracs, key=lambda c: len(reduced_fracs[c]))
+        for cfg, _frac, m in items:
+            if cfg != best_cfg:
+                continue
+            hp = dict(m.get("hyperparams") or {})
+            out.append(_Result(n=0, arch=arch, config=_short_config(hp),
+                               status="ok", rmse=_run_test_rmse(m),
+                               elapsed=0.0, hp=hp))
+    log.info("Disk scan (dataeff curve): %d rows across %d archs.",
+             len(out), len({r.arch for r in out}))
+    return out
+
+
+def _rebuild_registry_from_disk(out_root: str, registry_file: str) -> int:
+    """Rebuild ``models_registry.yaml`` from EVERY on-disk run (all archs, all
+    fractions).  The live registry is written per-trial *during training*, so it
+    misses runs trained in other sessions; this makes it complete and
+    idempotent.  Wall-time / sample-count / hardware fields not stored on disk
+    are left empty.  Returns the number of models written.
+    """
+    from datetime import datetime
+    import shutil
+    import yaml
+    log = logging.getLogger("grid")
+    models: list[dict] = []
+    for _arch, run_dir, m in _iter_disk_runs(out_root):
+        models.append({
+            "model_type": m.get("model_type"),
+            "run_id": m.get("run_id", run_dir.name),
+            "run_dir": str(run_dir),
+            "trained_at": m.get("trained_at"),
+            "model_path": str(run_dir / "model.pt"),
+            "training": {
+                "time_seconds": 0.0,                       # not recorded on disk
+                "epochs_ran": m.get("epochs_trained"),
+                "stopped_early": None,
+                "final_train_loss": None,
+                "final_val_loss": m.get("best_val_loss"),
+            },
+            "hardware": {"device": m.get("device")},
+            "data": {"num_train_samples": 0, "num_val_samples": 0,
+                     "num_test_samples": 0},
+            "hyperparams": m.get("hyperparams") or {},
+            "metrics": m.get("metrics") or {},
+            "val_metrics": m.get("val_metrics") or {},
+            "test_metrics": m.get("test_metrics") or {},
+        })
+    models.sort(key=lambda e: str(e.get("trained_at") or ""), reverse=True)
+    if os.path.exists(registry_file):
+        try:
+            shutil.copy2(registry_file, registry_file + ".bak")
+        except Exception:  # noqa: BLE001
+            pass
+    payload = {"total_models": len(models),
+               "last_updated": datetime.now().isoformat(),
+               "models": models}
+    os.makedirs(os.path.dirname(registry_file) or ".", exist_ok=True)
+    with open(registry_file, "w") as f:
+        yaml.dump(payload, f, default_flow_style=False, sort_keys=False)
+    log.info("Rebuilt registry from disk: %d models -> %s",
+             len(models), registry_file)
+    return len(models)
+
+
+# ============================================================================
 # ── PARALLEL RUNNER (dynamic admission, rich dashboard) ──────────────────────
 # ============================================================================
 
@@ -3441,16 +3618,26 @@ def main() -> None:
     # the runs already on disk (idempotent; seconds, not hours).
     if mode == "reconstruct":
         sub = os.environ.get("MTP_GRID_RECONSTRUCT_OF", "detailed").strip().lower()
-        if sub not in _GRID_BY_MODE:
+        if sub not in ("detailed", "dataeff"):
             log.warning("MTP_GRID_RECONSTRUCT_OF=%r invalid; using 'detailed'.", sub)
             sub = "detailed"
         RUN_MODE = sub                       # output files named for the sub-study
-        _ARCH_GRID = dict(_GRID_BY_MODE[sub])
-        trials = _build_trials()
         names = ", ".join(c for c, _ in _result_basenames())
-        log.info("RECONSTRUCT '%s' grid (%d trials) from disk -> %s",
-                 sub, len(trials), names)
-        _finalize([], trials, DATASET_OUT_ROOT, log)
+        # Disk-driven: discover EVERY trained run on disk for this sub-study,
+        # not only the configs in the currently-defined HP grid.
+        results = _scan_disk_results(DATASET_OUT_ROOT, sub)
+        log.info("RECONSTRUCT '%s' from disk: %d runs -> %s",
+                 sub, len(results), names)
+        if results:
+            for i, r in enumerate(
+                sorted(results, key=lambda x: (
+                    x.arch, x.rmse if x.rmse is not None else 9e9)), 1):
+                r.n = i
+            _write_grid_summary(results, DATASET_OUT_ROOT)
+        else:
+            log.warning("No on-disk runs found for sub-study %r.", sub)
+        # Rebuild the model registry from ALL on-disk runs (every arch/fraction).
+        _rebuild_registry_from_disk(DATASET_OUT_ROOT, REGISTRY_FILE)
         log.info("Reconstruction complete (no training performed).")
         return
 

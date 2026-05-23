@@ -3,15 +3,17 @@
 champion / grid scorecards. All tables store **raw, unsmoothed** data
 (Savitzky–Golay is a plot-only display choice).
 
+  champion_selection.csv        winners under global/train/val/test (—, simple)
   headline_metrics.csv          champion scorecard            (—)
   grid_summary.csv              per-arch grid statistics      (fig01)
   grid_runs.csv                 every grid run                (fig01)
   data_efficiency.csv           RMSE/val/gap vs data fraction (fig02, fig03)
-  cost_accuracy.csv             params/time vs RMSE           (fig04, fig05)
-  training_curves.csv           per-epoch champion curves     (fig06, fig07)
-  edr_correction_evolution.csv  EDR δ-term magnitudes/epoch   (fig08)
-  per_joint_metrics.csv         per-joint RMSE/R²/MAE/NRMSE   (fig09, fig10)
-  trajectory_tracking.csv       selected-trajectory samples   (fig11)
+  cost_accuracy.csv             params vs RMSE                (fig04)
+  training_curves.csv           per-epoch champion curves     (fig05, fig06)
+  edr_correction_evolution.csv  EDR δ-term magnitudes/epoch   (fig07)
+  per_joint_metrics.csv         per-joint RMSE/R²/MAE/NRMSE   (fig08, fig09)
+  per_trajectory_rmse.csv       per-test-trajectory RMSE      (fig11)
+  trajectory_tracking.csv       selected-trajectory samples   (fig10)
 """
 from __future__ import annotations
 
@@ -30,9 +32,44 @@ from shared.tableio import save_table
 
 CONFIG = default_config()
 
+# Champion-selection bases reported side by side (the user wants global, train,
+# val and test all compared). Each is (label, basis, full_data_only).
+_SELECTION_BASES = (
+    ("global", "global", False),
+    ("full_data_train", "train", True),
+    ("full_data_val", "val", True),
+    ("full_data_test", "test", True),
+)
+
+
+def _champion_selection(cfg) -> pd.DataFrame:
+    """Per-arch winner under each selection basis: global / train / val / test.
+
+    A scalar scorecard (simple data) -> CSV only, no companion chart. Shows how
+    the "best" model shifts with the criterion and with the data budget.
+    """
+    rows = []
+    for sel_label, basis, fdo in _SELECTION_BASES:
+        champs = dataio.champion_by_basis(basis, full_data_only=fdo)
+        for a in palette.ordered_archs(cfg):
+            r = champs[a]
+            train_rmse, best_ep = dataio.train_at_best(str(r["run_dir"]))
+            rows.append({
+                "selection_basis": sel_label,
+                "architecture": palette.label(cfg, a),
+                "data_fraction": r["data_train_fraction"],
+                "params": dataio.param_count(r["run_dir"]),
+                "train_rmse": train_rmse,
+                "val_rmse": r["val_rmse"],
+                "test_rmse": r["test_rmse"],
+                "best_val_epoch": best_ep,
+                "run_id": r["run_id"],
+            })
+    return pd.DataFrame(rows)
+
 
 def _headline(cfg, res) -> pd.DataFrame:
-    champs = dataio.champions(cfg.champion_metric)
+    champs = dataio.champions(cfg)
     rows = []
     for a in palette.ordered_archs(cfg):
         ch = champs[a]
@@ -48,7 +85,8 @@ def _headline(cfg, res) -> pd.DataFrame:
         for j, name in enumerate(cfg.joint_names):
             row[f"rmse_{name}"] = m["rmse"][j]
         row["params"] = dataio.param_count(ch["run_dir"])
-        row["train_seconds"] = ch["time_seconds"]
+        # Training wall-time was not recorded for these runs; epochs_ran is the
+        # available training-cost proxy.
         row["epochs_ran"] = ch["epochs_ran"]
         row["worst_traj_rmse"] = float(np.max(ptr))
         rows.append(row)
@@ -98,7 +136,7 @@ def _data_efficiency(cfg) -> pd.DataFrame:
 
 def _cost_accuracy(cfg) -> pd.DataFrame:
     champ_ids = {r["run_id"] for r in
-                 dataio.champions(cfg.champion_metric).values()}
+                 dataio.champions(cfg).values()}
     rows = []
     for r in dataio.registry_records():
         try:
@@ -109,8 +147,6 @@ def _cost_accuracy(cfg) -> pd.DataFrame:
             "architecture": palette.label(cfg, r["arch"]),
             "run_id": r["run_id"],
             "params": p,
-            "train_seconds": r["time_seconds"],
-            "train_minutes": r["time_seconds"] / 60.0,
             "test_rmse": r["test_rmse"],
             "is_champion": r["run_id"] in champ_ids,
         })
@@ -119,7 +155,7 @@ def _cost_accuracy(cfg) -> pd.DataFrame:
 
 
 def _training_curves(cfg) -> pd.DataFrame:
-    champs = dataio.champions(cfg.champion_metric)
+    champs = dataio.champions(cfg)
     frames = []
     for a in palette.ordered_archs(cfg):
         h = dataio.load_history(champs[a]["run_dir"])
@@ -134,7 +170,7 @@ def _training_curves(cfg) -> pd.DataFrame:
 
 
 def _edr_corrections(cfg) -> pd.DataFrame:
-    edr = dataio.champions(cfg.champion_metric)["edr"]
+    edr = dataio.champions(cfg)["edr"]
     h = dataio.load_history(edr["run_dir"])
     return h[["epoch", "mean_abs_delta_g", "mean_frob_delta_M",
               "mean_abs_delta_C_qd", "mean_abs_delta_tau_f"]].copy()
@@ -152,6 +188,22 @@ def _per_joint(cfg, res) -> pd.DataFrame:
                 "r2": m["r2"][j],
                 "mae": m["mae"][j],
                 "nrmse": m["nrmse"][j],
+            })
+    return pd.DataFrame(rows)
+
+
+def _per_trajectory(cfg, res) -> pd.DataFrame:
+    """Trajectory-macro RMSE for every test trajectory, per champion (fig11)."""
+    rows = []
+    for a in palette.ordered_archs(cfg):
+        ptr = per_traj_rmse(res[a]["pred"], res[a]["target"], res[a]["traj"])
+        for (s, e, geom), v in zip(res[a]["traj"], ptr):
+            rows.append({
+                "architecture": palette.label(cfg, a),
+                "geometry": geom,
+                "traj_start_idx": int(s),
+                "traj_len": int(e - s),
+                "traj_rmse": v,
             })
     return pd.DataFrame(rows)
 
@@ -179,6 +231,7 @@ def main(cfg=CONFIG) -> list[Path]:
     g = dataio.grid_df()
     g = g[g["status"] == "ok"]
     out = [
+        save_table(_champion_selection(cfg), "champion_selection", cfg),
         save_table(_headline(cfg, res), "headline_metrics", cfg),
         save_table(_grid_summary(cfg, g), "grid_summary", cfg),
         save_table(_grid_runs(cfg, g), "grid_runs", cfg),
@@ -187,6 +240,7 @@ def main(cfg=CONFIG) -> list[Path]:
         save_table(_training_curves(cfg), "training_curves", cfg),
         save_table(_edr_corrections(cfg), "edr_correction_evolution", cfg),
         save_table(_per_joint(cfg, res), "per_joint_metrics", cfg),
+        save_table(_per_trajectory(cfg, res), "per_trajectory_rmse", cfg),
         save_table(_trajectory(cfg, res), "trajectory_tracking", cfg),
     ]
     return out

@@ -61,6 +61,13 @@ def _build_model(ckpt: dict[str, Any]):
     if "edr" not in cls.lower():
         return build_model(ckpt)
 
+    # NOTE: the EDR model was rewritten in the robustness overhaul — the old
+    # two-phase ``set_phase`` curriculum was replaced by a smooth capacity gate
+    # ``set_correction_gain`` (γ), and ``coriolis_structural`` selects whether
+    # δC is derived from δM (no independent net) or an independent net. Both
+    # eval_best_models.build_model and earlier copies of this function predate
+    # that, so EDR is rebuilt here from the checkpoint's full ``hparams``.
+
     hp = ckpt.get("hparams") or {}
     norm_stats = ckpt.get("norm_stats") or {}
     q_mean = q_std = None
@@ -82,11 +89,16 @@ def _build_model(ckpt: dict[str, Any]):
         use_friction_qdd=bool(hp.get("use_friction_qdd", False)),
         use_phys_cond=bool(hp.get("use_phys_cond", False)),
         coriolis_matrix_form=bool(hp.get("coriolis_matrix_form", True)),
+        coriolis_structural=bool(hp.get("coriolis_structural", True)),
         friction_form=str(hp.get("friction_form", "mlp")),
         inertia_psd=bool(hp.get("inertia_psd", False)),
         spectral_norm=bool(hp.get("spectral_norm", False)),
     )
-    model.set_phase(2)
+    # Evaluate at full correction capacity. New model: γ-gate; legacy: two-phase.
+    if hasattr(model, "set_correction_gain"):
+        model.set_correction_gain(1.0)
+    elif hasattr(model, "set_phase"):
+        model.set_phase(2)
     return model
 
 
@@ -209,6 +221,6 @@ def prefetch_all(cfg: PlotConfig) -> dict[str, dict[str, Any]]:
     """Warm the cache for every champion once; return {arch: result}."""
     from .dataio import champions
     out: dict[str, dict[str, Any]] = {}
-    for arch, rec in champions(cfg.champion_metric).items():
+    for arch, rec in champions(cfg).items():
         out[arch] = predict_split(rec, cfg)
     return out
