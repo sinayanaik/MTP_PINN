@@ -8,11 +8,10 @@ champion / grid scorecards. All tables store **raw, unsmoothed** data
   grid_summary.csv              per-arch grid statistics      (fig01)
   grid_runs.csv                 every grid run                (fig01)
   data_efficiency.csv           RMSE/val/gap vs data fraction (fig02, fig03)
-  cost_accuracy.csv             params vs RMSE                (fig04)
+  capability_profile.csv        unexplored-metric radar       (fig04)
   training_curves.csv           per-epoch champion curves     (fig05, fig06)
   edr_correction_evolution.csv  EDR δ-term magnitudes/epoch   (fig07)
   per_joint_metrics.csv         per-joint RMSE/R²/MAE/NRMSE   (fig08, fig09)
-  per_trajectory_rmse.csv       per-test-trajectory RMSE      (fig11)
   trajectory_tracking.csv       selected-trajectory samples   (fig10)
 """
 from __future__ import annotations
@@ -134,24 +133,50 @@ def _data_efficiency(cfg) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _cost_accuracy(cfg) -> pd.DataFrame:
-    champ_ids = {r["run_id"] for r in
-                 dataio.champions(cfg).values()}
+def _capability_profile(cfg, res) -> pd.DataFrame:
+    """Raw + normalised values behind the fig04 capability radar.
+
+    Five per-arch scalars that appear on no other figure (pooled RMSE, R²
+    overall, mean MAE, mean NRMSE, parameter count). Normalisation matches the
+    radar exactly — imported from it so the table can never drift from the plot
+    (ratio-to-best for the accuracy/fit axes, log score for parameters).
+    """
+    import fig04_capability_radar as radar
+
+    champs = dataio.champions(cfg)
+    archs = palette.ordered_archs(cfg)
+    params = {a: float(dataio.param_count(champs[a]["run_dir"])) for a in archs}
+
+    def mean(x):
+        return float(np.mean(np.asarray(x, dtype=float)))
+
+    specs = [
+        ("pooled_rmse", True, "ratio",
+         [res[a]["metrics"]["rmse_pooled"] for a in archs]),
+        ("r2_overall", False, "ratio",
+         [res[a]["metrics"]["r2_overall"] for a in archs]),
+        ("mean_mae", True, "ratio",
+         [mean(res[a]["metrics"]["mae"]) for a in archs]),
+        ("mean_nrmse", True, "ratio",
+         [mean(res[a]["metrics"]["nrmse"]) for a in archs]),
+        ("params", True, "param_log", [params[a] for a in archs]),
+    ]
     rows = []
-    for r in dataio.registry_records():
-        try:
-            p = dataio.param_count(r["run_dir"])
-        except Exception:  # noqa: BLE001
-            continue
-        rows.append({
-            "architecture": palette.label(cfg, r["arch"]),
-            "run_id": r["run_id"],
-            "params": p,
-            "test_rmse": r["test_rmse"],
-            "is_champion": r["run_id"] in champ_ids,
-        })
-    return pd.DataFrame(rows).sort_values(
-        ["architecture", "test_rmse"]).reset_index(drop=True)
+    for axis, lower, scale, raw in specs:
+        raw = np.asarray(raw, dtype=float)
+        if scale == "param_log":
+            score = radar._param_log_score(raw, radar.PARAM_FLOOR)
+        else:
+            score = radar._ratio_to_best(raw, lower)
+        for a, rv, sv in zip(archs, raw, score):
+            rows.append({
+                "architecture": palette.label(cfg, a),
+                "axis": axis,
+                "raw_value": float(rv),
+                "norm_score": float(sv),
+                "lower_is_better": bool(lower),
+            })
+    return pd.DataFrame(rows)
 
 
 def _training_curves(cfg) -> pd.DataFrame:
@@ -192,22 +217,6 @@ def _per_joint(cfg, res) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _per_trajectory(cfg, res) -> pd.DataFrame:
-    """Trajectory-macro RMSE for every test trajectory, per champion (fig11)."""
-    rows = []
-    for a in palette.ordered_archs(cfg):
-        ptr = per_traj_rmse(res[a]["pred"], res[a]["target"], res[a]["traj"])
-        for (s, e, geom), v in zip(res[a]["traj"], ptr):
-            rows.append({
-                "architecture": palette.label(cfg, a),
-                "geometry": geom,
-                "traj_start_idx": int(s),
-                "traj_len": int(e - s),
-                "traj_rmse": v,
-            })
-    return pd.DataFrame(rows)
-
-
 def _trajectory(cfg, res) -> pd.DataFrame:
     s, e, geom = select_trajectory(res["edr"]["traj"], cfg)
     n = e - s
@@ -236,11 +245,10 @@ def main(cfg=CONFIG) -> list[Path]:
         save_table(_grid_summary(cfg, g), "grid_summary", cfg),
         save_table(_grid_runs(cfg, g), "grid_runs", cfg),
         save_table(_data_efficiency(cfg), "data_efficiency", cfg),
-        save_table(_cost_accuracy(cfg), "cost_accuracy", cfg),
+        save_table(_capability_profile(cfg, res), "capability_profile", cfg),
         save_table(_training_curves(cfg), "training_curves", cfg),
         save_table(_edr_corrections(cfg), "edr_correction_evolution", cfg),
         save_table(_per_joint(cfg, res), "per_joint_metrics", cfg),
-        save_table(_per_trajectory(cfg, res), "per_trajectory_rmse", cfg),
         save_table(_trajectory(cfg, res), "trajectory_tracking", cfg),
     ]
     return out

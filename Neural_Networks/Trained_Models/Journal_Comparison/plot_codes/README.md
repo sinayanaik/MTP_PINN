@@ -24,8 +24,8 @@ Times New Roman must be installed for the intended typography.
 
 ```bash
 cd Neural_Networks/Trained_Models/Journal_Comparison/plot_codes
-python run_all.py                       # 11 figures + 11 tables
-python run_all.py --only fig11          # subset of figures (skips tables)
+python run_all.py                       # 10 figures + 10 tables
+python run_all.py --only fig05          # subset of figures (skips tables)
 python run_all.py --no-tables           # figures only
 python make_tables.py                   # tables only
 python fig02_data_efficiency_rmse.py    # any figure standalone

@@ -68,12 +68,17 @@ where FNN degrades. *Table:* `data_efficiency.csv`.
 near zero = generalizes. *Takeaway:* EDR's gap is the smallest at every budget.
 *Table:* `data_efficiency.csv`.
 
-### `fig04_accuracy_vs_params.pdf`
-Horizontal bar per architecture = its champion's trainable-parameter count
-(log x), annotated with that champion's test RMSE. *Data:* `champions()` +
-`param_count()`. *Read:* shorter bar = smaller model. *Takeaway:* EDR reaches
-~best-baseline accuracy with ~40× (vs Physics-Reg.) / ~5× (vs FNN) fewer
-parameters. *Table:* `cost_accuracy.csv`.
+### `fig04_capability_radar.pdf`
+Spider/radar over five per-architecture scalars **no other figure shows**:
+pooled RMSE, R² overall, mean MAE, mean NRMSE, and parameter efficiency. Every
+axis is oriented outward = better; the four accuracy/fit axes use ratio-to-best,
+the parameter axis a log score (it spans ~40× vs <11 % for the others). Each
+axis is annotated with its real best value. *Data:* `champion_results()` +
+`param_count()`. *Read:* larger enclosed area = better all-round; the param axis
+is the differentiator. *Takeaway:* Physics-Reg. edges the accuracy axes but
+collapses toward the centre on size, while EDR nearly matches it everywhere at
+~40× (vs Physics-Reg.) / ~5× (vs FNN) fewer parameters. *Table:*
+`capability_profile.csv`.
 
 ### `fig05_train_val_curves.pdf`
 Per-epoch train (dashed) vs val (solid) RMSE, 3 champions (savgol). *Data:*
@@ -108,12 +113,6 @@ over one selected test trajectory (savgol). Trajectory chosen by
 `trajectory_select` (None=auto / int / geometry name). *Data:* champion
 predictions. *Table:* `trajectory_tracking.csv`.
 
-### `fig11_per_trajectory_rmse_distribution.pdf`
-Violin + points of trajectory-macro RMSE across **every test trajectory**, per
-champion; median bar + worst-trajectory star. *Data:* `per_traj_rmse` over
-champion predictions. *Read:* lower & tighter = more consistent across motions
-(distinct from fig01's spread over grid runs). *Table:* `per_trajectory_rmse.csv`.
-
 ---
 
 ## Tables (`tables/*.csv`, raw data)
@@ -130,13 +129,11 @@ champion predictions. *Read:* lower & tighter = more consistent across motions
   elapsed_sec, data_train_fraction, seed.
 - **`data_efficiency.csv`** — architecture, data_fraction_pct, test_rmse,
   test_rmse_std, n_seeds, val_rmse, gen_gap.
-- **`cost_accuracy.csv`** — architecture, run_id, params, test_rmse,
-  is_champion (all curated runs).
+- **`capability_profile.csv`** — architecture, axis, raw_value, norm_score,
+  lower_is_better (the 5 radar axes × 3 champions; raw + normalised).
 - **`training_curves.csv`** — long form: architecture, epoch, train_rmse,
   val_rmse, overfit_gap (the 3 champions).
 - **`edr_correction_evolution.csv`** — epoch + the 4 EDR δ-term magnitudes.
 - **`per_joint_metrics.csv`** — architecture, joint, rmse, r2, mae, nrmse (3×5).
-- **`per_trajectory_rmse.csv`** — architecture, geometry, traj_start_idx,
-  traj_len, traj_rmse (one row per test trajectory per champion).
 - **`trajectory_tracking.csv`** — geometry, sample, joint, measured, pred_fnn,
   pred_physreg, pred_edr for the selected trajectory.

@@ -1,0 +1,890 @@
+% =====================================================================
+%  Equivariant-Decomposed-Residual (EDR) Networks
+%  Architecture and Mathematical Formulation
+%
+%  Self-contained architectural/methodological report for the EDR model
+%  used in the 5-DOF Kikobot inverse-dynamics study.  Mathematics-first:
+%  derivations, equivariance properties, and proofs of the structural
+%  guarantees.  Contains NO experimental accuracy numbers by design
+%  (parameter counts and layer widths are architectural facts and kept).
+%
+%  Compile:  pdflatex EDR_architecture.tex   (run twice for references)
+% =====================================================================
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+
+% ---- notation shortcuts ---------------------------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\q}{\bm{q}}
+\newcommand{\qd}{\dot{\bm{q}}}
+\newcommand{\qdd}{\ddot{\bm{q}}}
+\newcommand{\tphys}{\bm{\tau}_{\mathrm{phys}}}
+\newcommand{\that}{\hat{\bm{\tau}}}
+\newcommand{\tg}{\bm{\tau}_g}
+\newcommand{\tM}{\bm{\tau}_M}
+\newcommand{\tC}{\bm{\tau}_C}
+\newcommand{\tf}{\bm{\tau}_f}
+\newcommand{\dg}{\delta\bm{g}}
+\newcommand{\dM}{\delta\!M}
+\newcommand{\dC}{\delta C}
+\newcommand{\dtf}{\delta\bm{\tau}_f}
+\newcommand{\MLP}{\mathrm{MLP}}
+\newcommand{\Mmat}{M}
+\newcommand{\Cmat}{C}
+\newcommand{\Mt}{\tilde{M}}
+\newcommand{\Ct}{\tilde{C}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\abs}[1]{\left\lvert #1 \right\rvert}
+\newcommand{\half}{\tfrac{1}{2}}
+\newcommand{\transp}{^{\top}}
+\DeclareMathOperator{\vech}{vech}
+\DeclareMathOperator{\vecop}{vec}
+\DeclareMathOperator{\Symop}{Sym}
+\DeclareMathOperator{\sgn}{sgn}
+\DeclareMathOperator{\softplus}{softplus}
+
+\theoremstyle{definition}
+\newtheorem{property}{Property}
+\theoremstyle{plain}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+
+\title{\textbf{Equivariant--Decomposed--Residual (EDR) Networks}\\[4pt]
+\large Structurally-Constrained Neural Corrections for Robot Inverse Dynamics:\\
+Architecture and Mathematical Formulation}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2.4em}
+
+\begin{abstract}
+\noindent
+The Equivariant--Decomposed--Residual (EDR) network is a grey-box model for robot
+inverse dynamics. It begins from the analytical rigid-body equation of motion and
+adds a \emph{small, structurally constrained} learnable correction to \emph{each}
+of its four physical terms --- gravity, inertia, Coriolis/centripetal, and
+friction. The name states the design: corrections are \textbf{decomposed}
+(one network per physics term, hence interpretable), constrained to be
+\textbf{equivariant} with respect to the symmetry of the term they correct
+(odd-in-velocity friction, velocity-vanishing Coriolis, symmetric inertia,
+configuration-only gravity), and applied as an additive \textbf{residual} on top
+of nominal physics so the model \emph{starts} at the analytical solution. This
+report develops the formulation from Lagrangian mechanics, makes the equivariance
+structure precise, gives the four correction networks with the linear algebra of
+their constructions, and proves the structural guarantees (exact symmetry,
+oddness, velocity-vanishing, passivity, and physics-consistent initialisation).
+It then specifies the smooth capacity-gate curriculum, the composite training
+objective, the optimisation/regularisation strategy, and the parameter budget. No
+experimental accuracy numbers are reported.
+\end{abstract}
+
+% =====================================================================
+\section{Introduction and Motivation}
+% =====================================================================
+Model-based control of a manipulator requires the \emph{inverse-dynamics map}
+from the joint trajectory $(\q,\qd,\qdd)$ to the actuator torques $\bm{\tau}$. The
+classical route evaluates the rigid-body dynamics (RBD) of the robot's URDF model
+with the Recursive Newton--Euler Algorithm (RNEA, e.g.\ Pinocchio) and adds an
+identified friction model, producing a nominal torque $\tphys$. In practice
+$\tphys$ is systematically biased by \emph{model--reality gaps}:
+\begin{itemize}[leftmargin=1.6em,itemsep=1pt]
+  \item inaccurate inertial parameters (link masses, centres of mass, inertia tensors);
+  \item unmodelled cable, gear, and harmonic-drive friction;
+  \item joint flexibility, backlash, and elasticity;
+  \item simplified geometry (CAD $\neq$ as-built hardware).
+\end{itemize}
+The residual $\bm{\tau}_{\mathrm{meas}}-\tphys$ is therefore small but
+\emph{structured}. Three modelling paradigms address it:
+\begin{enumerate}[leftmargin=2em,itemsep=2pt]
+  \item \textbf{Black-box network}: $\that=f_\theta(\tilde{\bm{x}})$ maps
+  normalised kinematics $\tilde{\bm{x}}\in\R^{3n}$ directly to torque. Maximum
+  capacity, no physics; must relearn the entire rigid-body structure from data.
+  \item \textbf{Physics-regularised network}: an unstructured MLP that
+  \emph{receives} the analytical decomposition as additional inputs and/or is
+  \emph{penalised} for departing from $\tphys$. Physics \emph{informs} the
+  network but is not enforced; the map remains a free regressor.
+  \item \textbf{EDR (this work)}: physics is built into the \emph{architecture}.
+  Each analytical term carries its own small correction network whose output is
+  constrained, by construction, to share that term's physical symmetry.
+\end{enumerate}
+EDR is the natural endpoint of injecting physics into a learner: from \emph{loss}
+and \emph{input} (physics-regularised) to \emph{structure} (EDR). The three
+letters of the name encode the contribution:
+\begin{description}[leftmargin=2.4em,style=nextline,itemsep=1pt]
+  \item[\textbf{E}quivariant] each correction respects the symmetry group of its
+  physics term (Section~\ref{sec:equivariance}); the constraints hold exactly for
+  \emph{every} weight configuration, not approximately and not only on the
+  training distribution.
+  \item[\textbf{D}ecomposed] one network per physical term, so the learned
+  correction is interpretable component-by-component (which physics term is wrong,
+  and by how much).
+  \item[\textbf{R}esidual] corrections are additive on top of nominal physics and
+  near-zero at initialisation, so the model starts at the validated analytical
+  solution and only refines it.
+\end{description}
+The consequences --- developed and justified below --- are an order-of-magnitude
+smaller parameter count, exact physical consistency, interpretability, and a
+strong inductive bias that aids data efficiency and generalisation.
+
+\paragraph{Notation.}
+Table~\ref{tab:notation} fixes notation: $n$ is the number of active joints
+($n=5$ for the Kikobot), a tilde ($\tilde{\cdot}$) denotes a $z$-normalised
+quantity, $\odot$ is the element-wise (Hadamard) product, $\bm e_i$ is the $i$-th
+standard basis vector, and a $\delta$ prefix denotes a learnable correction.
+
+\begin{table}[t]
+\centering\small
+\renewcommand{\arraystretch}{1.18}
+\begin{tabular}{@{}l l@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$n$ & number of active joints ($n=5$)\\
+$\q,\qd,\qdd\in\R^{n}$ & joint position, velocity, acceleration\\
+$\Mmat(\q)\in\R^{n\times n}$ & analytical joint-space inertia matrix (SPD)\\
+$\Cmat(\q,\qd)\in\R^{n\times n}$ & analytical Coriolis/centripetal matrix\\
+$\bm{g}(\q)\in\R^{n}$ & analytical gravity torque, $\bm g=\partial V/\partial\q$\\
+$V(\q)$ & gravitational potential energy\\
+$c_{ijk}(\q)$ & Christoffel symbol of the first kind\\
+$\tg,\tM,\tC,\tf\in\R^{n}$ & nominal components $\bm g$, $\Mmat\qdd$, $\Cmat\qd$, friction\\
+$\tphys=\tg+\tM+\tC+\tf$ & nominal analytical torque\\
+$\that$ & EDR-predicted torque\\
+$\dg,\dM,\dC,\dtf$ & learnable corrections to $\bm g$, $\Mmat$, $\Cmat$, $\tf$\\
+$\Mt=\Mmat+\dM,\ \Ct=\Cmat+\dC$ & corrected inertia / Coriolis\\
+$\gamma\in[0,1]$ & smooth capacity gate on the inertia$+$Coriolis correction\\
+$\Symop(n)$ & vector space of symmetric $n\times n$ matrices\\
+$\odot$ & element-wise (Hadamard) product\\
+\bottomrule
+\end{tabular}
+\caption{Notation.}
+\label{tab:notation}
+\end{table}
+
+% =====================================================================
+\section{Lagrangian Mechanics and the Structure to Preserve}
+% =====================================================================
+\label{sec:lagrangian}
+EDR's constraints are not heuristics; they are the exact symmetries of the
+manipulator equation. We derive them so the corrections can be designed to inherit
+them.
+
+\subsection{The manipulator equation}
+For a rigid serial chain the Lagrangian is the kinetic minus potential energy,
+\begin{equation}
+\mathcal{L}(\q,\qd)=\half\,\qd\transp \Mmat(\q)\,\qd - V(\q),
+\end{equation}
+with $\Mmat(\q)\in\Symop(n)$ the configuration-dependent inertia matrix. The
+Euler--Lagrange equations
+$\frac{d}{dt}\!\big(\partial\mathcal L/\partial\qd\big)-\partial\mathcal L/\partial\q=\bm{\tau}$
+give, after expanding $\frac{d}{dt}(\Mmat\qd)=\Mmat\qdd+\dot{\Mmat}\qd$,
+\begin{equation}
+\Mmat(\q)\qdd+\Big(\dot{\Mmat}(\q)\qd-\half\,\nabla_{\q}\!\big(\qd\transp\Mmat\qd\big)\Big)+\nabla_{\q}V(\q)=\bm{\tau}.
+\label{eq:el}
+\end{equation}
+Identifying the velocity-quadratic bracket as $\Cmat(\q,\qd)\qd$ and the
+potential gradient as $\bm g(\q)=\nabla_{\q} V$, and appending a dissipative
+friction torque $\tf(\qd)$ that is outside the conservative Lagrangian, yields the
+standard form
+\begin{equation}
+\boxed{\;\bm{\tau}=\Mmat(\q)\,\qdd+\Cmat(\q,\qd)\,\qd+\bm g(\q)+\tf(\qd)\;}
+\label{eq:rbd}
+\end{equation}
+with the four physically distinct components
+$\tM=\Mmat\qdd$, $\tC=\Cmat\qd$, $\tg=\bm g$, $\tf$, summing to $\tphys$.
+
+\subsection{Christoffel symbols and the inertia--Coriolis link}
+Writing the Coriolis term componentwise gives the Christoffel symbols of the
+first kind,
+\begin{equation}
+\Cmat_{ij}(\q,\qd)=\sum_{k=1}^{n}c_{ijk}(\q)\,\dot q_k,
+\qquad
+c_{ijk}=\half\!\left(\frac{\partial \Mmat_{ij}}{\partial q_k}
++\frac{\partial \Mmat_{ik}}{\partial q_j}
+-\frac{\partial \Mmat_{jk}}{\partial q_i}\right).
+\label{eq:christoffel-nom}
+\end{equation}
+Equation~\eqref{eq:christoffel-nom} shows that $\Cmat$ is \emph{not independent}
+of $\Mmat$: it is fully determined by the spatial derivatives of the inertia
+matrix. A model that learns $\Mmat$ and $\Cmat$ independently can violate this
+coupling; EDR offers a mode (Section~\ref{sec:coriolis}) that preserves it
+exactly.
+
+\subsection{The five structural properties}
+Equation~\eqref{eq:rbd} possesses five properties that any physically valid model
+must respect.
+\begin{property}[Inertia symmetry / SPD]\label{p:spd}
+$\Mmat(\q)=\Mmat(\q)\transp$ and $\bm x\transp\Mmat(\q)\bm x>0$ for all
+$\bm x\neq\bm 0$.
+\end{property}
+\begin{property}[Gravity depends only on $\q$]\label{p:grav}
+$\bm g=\nabla_{\q} V(\q)$ is independent of $\qd,\qdd$.
+\end{property}
+\begin{property}[Coriolis vanishes at rest, quadratic in velocity]\label{p:cor}
+$\Cmat(\q,\bm 0)\bm 0=\bm 0$; moreover $\tC$ is a homogeneous quadratic form in
+$\qd$.
+\end{property}
+\begin{property}[Friction is odd in velocity]\label{p:fric}
+$\tf(-\qd)=-\tf(\qd)$ (reversing motion reverses the dissipative torque).
+\end{property}
+\begin{property}[Passivity / skew-symmetry]\label{p:pass}
+$N(\q,\qd):=\dot{\Mmat}-2\Cmat$ is skew-symmetric: $N=-N\transp$.
+\end{property}
+Property~\ref{p:pass} is the dynamical fingerprint of energy conservation and is a
+prerequisite for Lyapunov-based control stability. It follows from
+\eqref{eq:christoffel-nom}:
+\begin{lemma}\label{lem:skew}
+If $\Cmat$ is built from $\Mmat$ via \eqref{eq:christoffel-nom}, then
+$\dot{\Mmat}-2\Cmat$ is skew-symmetric.
+\end{lemma}
+\begin{proof}
+With $\dot{\Mmat}_{ij}=\sum_k(\partial\Mmat_{ij}/\partial q_k)\dot q_k$ and
+$2\Cmat_{ij}=\sum_k(\partial_k\Mmat_{ij}+\partial_j\Mmat_{ik}-\partial_i\Mmat_{jk})\dot q_k$,
+\begin{equation*}
+N_{ij}=\dot{\Mmat}_{ij}-2\Cmat_{ij}
+=\sum_k\big(\partial_i\Mmat_{jk}-\partial_j\Mmat_{ik}\big)\dot q_k .
+\end{equation*}
+Swapping $i\leftrightarrow j$ gives $N_{ji}=\sum_k(\partial_j\Mmat_{ik}-\partial_i\Mmat_{jk})\dot q_k=-N_{ij}$.
+\end{proof}
+EDR's design principle: \emph{every correction inherits the property of the term
+it corrects}, so the corrected model satisfies
+Properties~\ref{p:spd}--\ref{p:pass}.
+
+% =====================================================================
+\section{Equivariance: the Symmetries Each Correction Preserves}
+% =====================================================================
+\label{sec:equivariance}
+The properties above can be phrased as equivariance under two group actions, which
+is what the architecture enforces.
+
+\paragraph{Time-reversal ($\mathbb{Z}_2$) parity.}
+Consider the involution $T:\qd\mapsto-\qd$ (with $\q,\qdd$ fixed), the kinematic
+signature of reversing the direction of motion. A torque term $\bm t$ is
+\emph{$T$-even} if $\bm t(T\!\cdot)=\bm t(\cdot)$ and \emph{$T$-odd} if
+$\bm t(T\!\cdot)=-\bm t(\cdot)$. From \eqref{eq:rbd}:
+\begin{equation}
+\underbrace{\tM=\Mmat\qdd}_{T\text{-even}},\quad
+\underbrace{\tC=\Cmat\qd}_{T\text{-even}},\quad
+\underbrace{\tg=\bm g(\q)}_{T\text{-even}},\quad
+\underbrace{\tf(\qd)}_{T\text{-odd}} .
+\end{equation}
+$\tC$ is $T$-even because $\Cmat$ is odd in $\qd$ (linear, vanishing at $\qd=0$)
+and $\qd$ is odd, so their product is even. The conservative terms are $T$-even;
+only dissipation is $T$-odd. EDR requires each correction to carry the parity of
+its term: $\dg,\ \dM\qdd$ are $T$-even by construction (independent of $\qd$, or
+multiplied by the even $\qdd$); $\dtf$ is forced $T$-odd exactly
+(Section~\ref{sec:friction}); and $\dC\qd$ is forced to vanish at $\qd=\bm 0$ in
+all modes, and to be exactly the $T$-even quadratic form in the structural mode.
+
+\paragraph{Transpose ($O(n)$-type) symmetry.}
+The inertia matrix lives in the symmetric subspace $\Symop(n)\subset\R^{n\times n}$,
+invariant under transposition. The correction $\dM$ is constrained to
+$\Symop(n)$ exactly (Section~\ref{sec:inertia}), i.e.\ equivariant under the
+transpose action $X\mapsto X\transp$ with $\dM\mapsto\dM$.
+
+\paragraph{Rest invariance.}
+Both Coriolis and friction must satisfy $\bm t(\q,\bm 0)=\bm 0$ (no torque at
+rest, ignoring static gravity). EDR enforces this with a multiplicative velocity
+factor (Section~\ref{sec:coriolis}, \ref{sec:friction}), which is exact for any
+network weights.
+
+These are the equivariances meant by the ``E'' in EDR: they are baked into the
+maps, so no parameter setting can break them.
+
+% =====================================================================
+\section{Data Interface and Normalisation}
+% =====================================================================
+\label{sec:data}
+EDR consumes two tensors per sample, as produced by the data loader.
+
+\paragraph{Kinematic features.}
+\begin{equation}
+\tilde{\bm{x}}=\big[\,\tilde{\q}\transp,\;\tilde{\qd}\transp,\;\tilde{\qdd}\transp\,\big]\transp\in\R^{3n},
+\quad
+\tilde{\q}=\frac{\q-\bm\mu_q}{\bm\sigma_q},\;
+\tilde{\qd}=\frac{\qd-\bm\mu_{\dot q}}{\bm\sigma_{\dot q}},\;
+\tilde{\qdd}=\frac{\qdd-\bm\mu_{\ddot q}}{\bm\sigma_{\ddot q}},
+\end{equation}
+with per-joint statistics estimated on the training split.
+
+\paragraph{Decomposed physics.}
+The analytical decomposition is supplied as a $4n$-vector
+\begin{equation}
+\bm p=\big[\,\tilde\tg\transp,\;\tilde\tM\transp,\;\tilde\tC\transp,\;\tilde\tf\transp\,\big]\transp\in\R^{4n},
+\qquad
+\tilde{\bm\tau}_x=\frac{\bm\tau_x-\bm\mu_\tau/4}{\bm\sigma_\tau},\;\; x\in\{g,M,C,f\},
+\label{eq:phys-norm}
+\end{equation}
+each component normalised by the \emph{same} torque statistics
+$(\bm\mu_\tau,\bm\sigma_\tau)$ used for the target, with the mean split evenly
+across the four additive parts.
+
+\begin{proposition}[Additivity in normalised space]\label{prop:additive}
+With the target normalised as $\tilde{\bm\tau}=(\bm\tau-\bm\mu_\tau)/\bm\sigma_\tau$,
+$\sum_{x}\tilde{\bm\tau}_x=\tilde{\bm\tau}$.
+\end{proposition}
+\begin{proof}
+$\sum_x\tilde{\bm\tau}_x=\big(\sum_x\bm\tau_x-4\cdot\bm\mu_\tau/4\big)/\bm\sigma_\tau=(\bm\tau-\bm\mu_\tau)/\bm\sigma_\tau=\tilde{\bm\tau}$, using $\sum_x\bm\tau_x=\bm\tau$.
+\end{proof}
+Proposition~\ref{prop:additive} is what lets EDR assemble its prediction directly
+in normalised coordinates (Section~\ref{sec:model}) and compare to the normalised
+target with no re-scaling; the physical prediction is recovered as
+$\that=\tilde{\that}\odot\bm\sigma_\tau+\bm\mu_\tau$.
+
+% =====================================================================
+\section{The EDR Decomposition}
+% =====================================================================
+\label{sec:model}
+EDR corrects each analytical component with its own learned term:
+\begin{equation}
+\boxed{\;
+\that=
+\underbrace{\big(\tg+\dg(\q)\big)}_{\text{gravity}}
++\underbrace{\big(\tM+\gamma\,\dM(\q)\,\qdd\big)}_{\text{inertia}}
++\underbrace{\big(\tC+\gamma\,\dC(\q,\qd)\,\qd\big)}_{\text{Coriolis}}
++\underbrace{\big(\tf+\dtf(\qd)\big)}_{\text{friction}}
+\;}
+\label{eq:edr}
+\end{equation}
+equivalently, a \emph{structured residual} on nominal physics,
+\begin{equation}
+\that=\tphys+\dg(\q)+\gamma\,\dM(\q)\,\qdd+\gamma\,\dC(\q,\qd)\,\qd+\dtf(\qd).
+\label{eq:edr-residual}
+\end{equation}
+All quantities are in normalised space (Section~\ref{sec:data}). Two model-level
+mechanisms appear: \emph{near-zero initialisation} so that $\that\approx\tphys$ at
+the start (Section~\ref{sec:init}), and the \emph{capacity gate}
+$\gamma\in[0,1]$, which multiplies only the inertia and Coriolis corrections (the
+two highest-capacity, $O(n^2)$ terms) and is annealed $0\to1$ over early training
+(Section~\ref{sec:curriculum}); $\gamma=1$ at inference. Algorithm~\ref{alg:fwd}
+summarises the forward pass.
+
+\begin{table}[t]
+\centering
+\fbox{\begin{minipage}{0.93\textwidth}\small
+\textbf{Algorithm~1 \;(\refstepcounter{equation}EDR forward pass)}\label{alg:fwd}\\[2pt]
+\textbf{Input:} normalised $\tilde{\bm x}\!\to\!(\q,\qd,\qdd)$; physics
+$\bm p\!\to\!(\tg,\tM,\tC,\tf)$; gate $\gamma$.\\
+1. Build features: $\q_{\mathrm{raw}}=\tilde{\q}\odot\bm\sigma_q+\bm\mu_q$;
+$\bm z_{\mathrm{cfg}}=[\tilde\q,\sin\q_{\mathrm{raw}},\cos\q_{\mathrm{raw}}]$;
+velocity products $\{\dot q_j\dot q_k\}_{j\le k}$; append physics slices
+(Section~\ref{sec:features}).\\
+2. $\dg=\MLP_g(\bm z_g)$.\\
+3. $\dM=\mathrm{scatter}_{\Symop}(\MLP_M(\bm z_M))\in\Symop(n)$; \;$\dM\qdd$.\\
+4. $\dC\qd=\qd\odot\MLP_C(\bm z_C)$ \;(or matrix / Christoffel form,
+Section~\ref{sec:coriolis}).\\
+5. $\dtf=\qd\odot h_\phi(\,\abs{\qd},[\abs{\qdd}],[\abs{\tf}]\,)$ \;(or Stribeck
+form).\\
+6. $\that=(\tg+\dg)+(\tM+\gamma\,\dM\qdd)+(\tC+\gamma\,\dC\qd)+(\tf+\dtf)$.\\
+\textbf{Return} $\that$ (and $\{\dg,\dM,\dC\qd,\dtf\}$ for the regulariser).
+\end{minipage}}
+\end{table}
+
+% =====================================================================
+\section{The Four Correction Networks}
+% =====================================================================
+\subsection{Shared building block: the near-zero-initialised MLP}
+\label{sec:mlp}
+Each correction is produced by a small MLP with $L$ layers, shared activation
+$\phi$ (SiLU, $\phi(x)=x\,\sigma(x)$), Xavier-normal hidden weights, zero hidden
+biases, and dropout rate $p$ after each hidden activation:
+\begin{equation}
+\MLP(\bm z)=W^{(L)}\phi\!\big(\cdots\phi(W^{(1)}\bm z+\bm b^{(1)})\cdots\big)+\bm b^{(L)},
+\qquad
+W^{(L)}\!\sim\!\mathcal N(0,\sigma_0^2),\;\bm b^{(L)}=\bm 0,
+\label{eq:mlp}
+\end{equation}
+with the final layer initialised \emph{near} zero, $\sigma_0=10^{-4}$. The reason
+the final layer is near-zero rather than exactly zero is analysed in
+Section~\ref{sec:init}. Optional spectral normalisation caps the Lipschitz
+constant of the hidden layers (a generalisation regulariser) while leaving the
+final layer --- hence all structural constructions --- untouched.
+
+\subsection{Gravity correction \texorpdfstring{$\dg(\q)$}{dg(q)}}
+\label{sec:gravity}
+Gravity is the gradient of a configuration potential (Property~\ref{p:grav}), so
+$\dg$ is a free MLP of configuration features only:
+\begin{equation}
+\dg(\q)=\MLP_g\big(\tilde\q,\ \sin\q_{\mathrm{raw}},\ \cos\q_{\mathrm{raw}}\big)\in\R^{n}.
+\label{eq:dg}
+\end{equation}
+The trigonometric augmentation supplies the correct functional basis: gravity
+torques are sums of products of $\sin/\cos$ of joint angles, so feeding
+$\sin\q_{\mathrm{raw}},\cos\q_{\mathrm{raw}}$ removes the need for the MLP to
+approximate periodic functions from $\tilde\q$ alone. No further constraint is
+needed --- $\dg$ is a free additive vector, automatically $T$-even and
+$\qd,\qdd$-independent, so the corrected gravity $\tg+\dg$ keeps
+Property~\ref{p:grav}.
+
+\subsection{Inertia correction \texorpdfstring{$\dM(\q)\,\qdd$}{dM(q) qddot}}
+\label{sec:inertia}
+The correction must lie in $\Symop(n)$ (Property~\ref{p:spd}). The MLP emits the
+$m:=n(n+1)/2$ free coordinates of a symmetric matrix, which are scattered into
+both triangles.
+
+\paragraph{Symmetric scatter (exact symmetry).}
+Let $\mathcal S=\{(i,j):1\le j\le i\le n\}$ index the lower triangle,
+$\abs{\mathcal S}=m$, and define the symmetric basis matrices
+\begin{equation}
+E^{(i,j)}=
+\begin{cases}
+\bm e_i\bm e_i\transp, & i=j,\\[2pt]
+\bm e_i\bm e_j\transp+\bm e_j\bm e_i\transp, & i>j.
+\end{cases}
+\end{equation}
+With MLP output $\bm c(\q)=\MLP_M(\bm z_M)\in\R^{m}$, the correction is
+\begin{equation}
+\dM(\q)=\sum_{(i,j)\in\mathcal S}c_{(i,j)}(\q)\,E^{(i,j)},
+\qquad\Longrightarrow\qquad \dM=\dM\transp.
+\label{eq:dM-scatter}
+\end{equation}
+The map $\bm c\mapsto\dM$ is a linear isomorphism $\R^m\xrightarrow{\sim}\Symop(n)$;
+equivalently $\vecop(\dM)=D_n\,\bm c$ with $D_n$ the $n^2\times m$ duplication
+matrix. The torque contribution is the matrix--vector product $\dM(\q)\,\qdd$.
+
+\begin{proposition}[Exact symmetry]\label{prop:sym}
+$\dM(\q)\in\Symop(n)$ for every $\bm c\in\R^m$ and every $\q$.
+\end{proposition}
+\begin{proof}
+Each $E^{(i,j)}$ is symmetric, and $\Symop(n)$ is a linear subspace closed under
+real linear combinations; hence the sum \eqref{eq:dM-scatter} is symmetric.
+\end{proof}
+
+\paragraph{Why not a Cholesky ($LL\transp$) factor?}
+A common SPD parametrisation sets $\dM=L(\q)L(\q)\transp$ with $L$
+lower-triangular. EDR uses the additive scatter \eqref{eq:dM-scatter} as default
+for two reasons. First, $LL\transp\succeq0$ forces the correction to be
+positive-semidefinite, i.e.\ it can only \emph{increase} effective inertia; but
+the URDF often \emph{over}-estimates inertia, so the data demand indefinite
+corrections that also reduce it. The additive scatter spans all of $\Symop(n)$,
+including indefinite directions. Second, $LL\transp$ creates a gradient deadlock
+at zero initialisation, formalised next. (When a guaranteed-SPD correction is
+desired --- e.g.\ for control-theoretic use --- EDR offers the $LL\transp$ mode;
+then $\Mt=\Mmat+\dM\succ0$ since $\Mmat\succ0$.)
+
+\begin{proposition}[Gradient deadlock of exact-zero $LL\transp$]\label{prop:deadlock}
+For $\dM=LL\transp$ with $L$ produced by a linear final layer initialised to
+exactly zero, the gradient of any loss w.r.t.\ that layer is zero at
+initialisation, so $L$ never leaves $\bm 0$. The additive scatter
+\eqref{eq:dM-scatter} does not suffer this.
+\end{proposition}
+\begin{proof}
+For $Y=LL\transp\qdd$, $\partial Y/\partial L_{ab}=E_{ab}L\transp\qdd+L E_{ab}\transp\qdd$
+(with $E_{ab}=\bm e_a\bm e_b\transp$), which vanishes at $L=0$; by the chain rule
+the final-layer weights producing $L$ receive zero gradient and remain zero.
+For the scatter, $\partial(\dM\qdd)/\partial c_{(i,j)}=E^{(i,j)}\qdd$, independent
+of $\bm c$ and generically non-zero, so gradients flow from the first step.
+\end{proof}
+Proposition~\ref{prop:deadlock} is why the shared MLP uses a \emph{near}-zero
+($\sigma_0=10^{-4}$) rather than exactly-zero final layer: it keeps the $LL\transp$
+mode trainable and yields $\dM=O(\sigma_0^2)\approx0$ at init regardless of mode.
+
+\subsection{Coriolis correction \texorpdfstring{$\dC(\q,\qd)\,\qd$}{dC(q,qdot) qdot}}
+\label{sec:coriolis}
+The correction must vanish at rest (Property~\ref{p:cor}). EDR provides three
+constructions, all enforcing this exactly; they differ in how much of the
+quadratic/passive structure they additionally guarantee.
+
+\paragraph{(a) Element-wise velocity gating (per-joint vanishing).}
+\begin{equation}
+\dC(\q,\qd)\,\qd=\qd\odot\MLP_C(\bm z_C)\in\R^{n}.
+\label{eq:cor-elem}
+\end{equation}
+The Hadamard factor $\qd$ forces joint $i$'s correction to vanish whenever
+$\dot q_i=0$. Because the multiplier is $\qd$ itself, the constraint
+$\dC(\q,\bm 0)\bm 0=\bm 0$ holds for \emph{any} MLP output. The feature vector
+$\bm z_C$ contains the velocity products $\{\dot q_j\dot q_k\}_{j\le k}$ (the upper
+triangle of $\qd\qd\transp$), the natural basis of the quadratic Coriolis form
+$(\tC)_i=\sum_{jk}\Gamma_{ijk}(\q)\,\dot q_j\dot q_k$.
+
+\paragraph{(b) Matrix form (whole-vector vanishing, cross-joint coupling).}
+\begin{equation}
+\dC(\q,\qd)\,\qd=B(\q,\qd)\,\qd,
+\qquad B=\mathrm{reshape}_{n\times n}\!\big(\MLP_C(\bm z_C)\big).
+\label{eq:cor-mat}
+\end{equation}
+Since $B\bm 0=\bm 0$ for every $B$, the correction vanishes iff the \emph{whole}
+velocity vector is zero, while allowing joint $i$'s correction to be non-zero when
+$\dot q_i=0$ provided another joint moves --- the physically correct coupling that
+\eqref{eq:cor-elem} cannot express.
+
+\paragraph{(c) Structural / Christoffel form (passive by construction).}
+The Coriolis correction is \emph{derived from} $\dM$ rather than learned
+independently, using \eqref{eq:christoffel-nom} applied to the correction:
+\begin{equation}
+\delta c_{ijk}(\q)=\half\!\left(\frac{\partial\dM_{ij}}{\partial q_k}+\frac{\partial\dM_{ik}}{\partial q_j}-\frac{\partial\dM_{jk}}{\partial q_i}\right),
+\qquad
+\big(\dC\,\qd\big)_i=\sum_{j,k}\delta c_{ijk}\,\dot q_j\dot q_k .
+\label{eq:christoffel}
+\end{equation}
+The Jacobian $\partial\dM/\partial\q$ is evaluated through the \emph{same} feature
+map $\dM$ consumes (so the two $\dM$ call-sites cannot drift), in practice via
+reverse-mode automatic differentiation vectorised over the batch
+($\texttt{vmap}\circ\texttt{jacrev}$ over the small $\dM$-MLP). This form adds
+\emph{zero} parameters and yields exact passivity:
+\begin{proposition}[Exact passivity of the corrected model]\label{prop:passive}
+If $\dC$ is built from $\dM$ via \eqref{eq:christoffel}, then
+$\dot{\Mt}-2\Ct$ is skew-symmetric, where $\Mt=\Mmat+\dM$, $\Ct=\Cmat+\dC$.
+\end{proposition}
+\begin{proof}
+By Lemma~\ref{lem:skew} the nominal $\dot{\Mmat}-2\Cmat$ is skew. The map
+$\Mmat\mapsto\Cmat$ in \eqref{eq:christoffel-nom} and the operator
+$\Mmat\mapsto\dot{\Mmat}-2\Cmat$ are linear in $\Mmat$; applying the same
+construction to $\dM$ gives $\dot{\dM}-2\dC$ skew. The sum of skew matrices is
+skew, so $\dot{\Mt}-2\Ct=(\dot{\Mmat}-2\Cmat)+(\dot{\dM}-2\dC)$ is skew.
+\end{proof}
+Form~(c) thus makes Property~\ref{p:pass} hold \emph{exactly}, with no soft
+penalty, and removes the independent (high-capacity) $\dC$ network. Forms (a)/(b)
+guarantee only velocity-vanishing; passivity for them, if desired, is encouraged
+by the soft stability loss of Section~\ref{sec:loss}.
+
+\subsection{Friction correction \texorpdfstring{$\dtf(\qd)$}{dtau_f(qdot)}}
+\label{sec:friction}
+Friction is odd in velocity (Property~\ref{p:fric}). EDR enforces oddness with the
+\emph{product trick}: an odd factor times an even function. Define the smooth even
+magnitude $\abs{\qd}_\varepsilon=\sqrt{\qd\odot\qd+\varepsilon}$
+($\varepsilon=10^{-6}$), differentiable at $\qd=0$ with vanishing derivative
+there (matching stick--slip behaviour).
+
+\paragraph{(a) MLP form.}
+\begin{equation}
+\dtf(\qd)=\qd\odot h_\phi\!\big(\abs{\qd}_\varepsilon,\,[\,\abs{\qdd}_\varepsilon\,],\,[\,\abs{\tf}_\varepsilon\,]\big),
+\label{eq:fric-mlp}
+\end{equation}
+where $h_\phi$ is an MLP whose inputs are all even in $\qd$. Optional channels feed
+the acceleration magnitude (stiction/transition effects) and the analytical
+friction magnitude $\abs{\tf}_\varepsilon$ (physics conditioning; $\tf$ is odd, so
+$\abs{\tf}_\varepsilon$ is even and preserves the parity).
+
+\begin{proposition}[Exact oddness]\label{prop:odd}
+$\dtf(-\qd)=-\dtf(\qd)$ for every $\phi$.
+\end{proposition}
+\begin{proof}
+$\abs{-\qd}_\varepsilon=\abs{\qd}_\varepsilon$ (even argument), so
+$h_\phi$ is unchanged; the prefactor $\qd$ flips sign:
+$\dtf(-\qd)=(-\qd)\odot h_\phi(\abs{\qd}_\varepsilon)=-\dtf(\qd)$. The optional
+channels $\abs{\qdd}_\varepsilon,\abs{\tf}_\varepsilon$ are even and do not affect
+the argument.
+\end{proof}
+
+\paragraph{(b) Stribeck form.}
+A structured Coulomb $+$ Stribeck $+$ viscous law, with the four per-joint
+parameters $(F_c,F_s,v_s,F_v)$ emitted by the MLP:
+\begin{equation}
+\dtf(\qd)=\sgn_s(\qd)\odot\Big[F_c+F_s\,e^{-(\abs{\qd}_\varepsilon/v_s)^2}\Big]+F_v\odot\qd,
+\quad
+\sgn_s(\qd)=\frac{\qd}{\abs{\qd}_\varepsilon},\;\;
+v_s=\softplus(\cdot)+10^{-3}.
+\label{eq:fric-stribeck}
+\end{equation}
+Here $\sgn_s$ is exactly odd, the bracket is even, and $F_v\odot\qd$ is odd, so
+$\dtf$ is exactly odd (Proposition~\ref{prop:odd} extends verbatim) while
+expressing the Coulomb offset and the Stribeck friction dip that the pure-MLP form
+cannot. The $\softplus$ keeps $v_s>0$.
+
+% =====================================================================
+\section{Input Feature Construction}
+% =====================================================================
+\label{sec:features}
+A single feature-builder assembles physics-informed inputs shared by the four
+networks.
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt]
+  \item \textbf{Trigonometric features:} raw angles
+  $\q_{\mathrm{raw}}=\tilde\q\odot\bm\sigma_q+\bm\mu_q$ are reconstructed and the
+  configuration block becomes
+  $\bm z_{\mathrm{cfg}}=[\tilde\q,\sin\q_{\mathrm{raw}},\cos\q_{\mathrm{raw}}]\in\R^{3n}$,
+  the correct basis for the periodic gravity/inertia dependence.
+  \item \textbf{Velocity products:} the upper triangle of $\qd\qd\transp$,
+  $\{\dot q_j\dot q_k:j\le k\}\in\R^{n(n+1)/2}$, the quadratic basis for Coriolis.
+  \item \textbf{Physics conditioning:} the matching analytical component is
+  threaded into each network --- $\dg$ also sees $\tilde\tg$, $\dM$ sees
+  $\tilde\tM$, $\dC$ sees $\tilde\tC$, friction sees $\abs{\tilde\tf}_\varepsilon$
+  (an even channel). This delivers the same analytical information the
+  physics-regularised baseline gets, but to the correct structural sub-module.
+\end{itemize}
+With physics conditioning enabled, the per-network input dimensions for $n=5$ are
+\begin{gather}
+\dim\bm z_g=\dim\bm z_M=3n+n=20,\qquad \dim\bm z_f=n+n+n=15,\notag\\[2pt]
+\dim\bm z_C=\underbrace{3n}_{\tilde\q,\sin,\cos}+\underbrace{n}_{\qd}+\underbrace{\tfrac{n(n+1)}{2}}_{\dot q_j\dot q_k}+\underbrace{n}_{\tilde\tC}=40 .\notag
+\end{gather}
+Without physics conditioning $\dim\bm z_C=35$ and
+$\dim\bm z_g=\dim\bm z_M=15$, $\dim\bm z_f=5$.
+
+% =====================================================================
+\section{Curriculum Learning: from Two-Phase to a Smooth Gate}
+% =====================================================================
+\label{sec:curriculum}
+The inertia and Coriolis corrections carry $O(n^2)$ effective capacity. If given
+full strength from the first epoch, the $\dM\qdd$ term has enough freedom to
+partially absorb the large \emph{gravity} and \emph{friction} residuals, which
+would corrupt the decomposition's interpretability. EDR therefore introduces the
+easy ($\dg,\dtf$) corrections first and the hard ($\dM,\dC$) corrections later.
+
+\paragraph{Two-phase curriculum (original).}
+Phase~1 trains only $\dg,\dtf$ ($\dM,\dC$ frozen); Phase~2 unfreezes all four. The
+transition is triggered adaptively when the validation RMSE plateaus,
+\begin{equation}
+\frac{\mathrm{RMSE}_{t-W}-\mathrm{RMSE}_t}{\mathrm{RMSE}_{t-W}}<\theta
+\;\Longrightarrow\;\text{enter Phase~2},
+\label{eq:plateau}
+\end{equation}
+with smoothing window $W$, threshold $\theta$, a minimum epoch (noise guard) and a
+maximum epoch (safety cap). At transition the optimiser unfreezes $\dM,\dC$,
+equalises learning rates, and clears stale Adam state.
+
+\paragraph{Smooth capacity gate (current).}
+The hard freeze/unfreeze injects an optimiser discontinuity. EDR replaces it with
+a scalar gate $\gamma\in[0,1]$ that multiplies the inertia$+$Coriolis
+contribution in \eqref{eq:edr} and is cosine-ramped from $0$ to $1$ over the first
+fraction $\rho$ of the epoch budget $E$:
+\begin{equation}
+\gamma(e)=
+\begin{cases}
+\half\!\left(1-\cos\dfrac{\pi(e-1)}{\lceil\rho E\rceil}\right), & 1\le e\le\lceil\rho E\rceil,\\[8pt]
+1, & e>\lceil\rho E\rceil.
+\end{cases}
+\label{eq:gamma}
+\end{equation}
+All parameters now train from epoch~1 under a single optimiser group: Adam
+momentum stays continuous, there is no learning-rate jump, and the validation
+curve descends smoothly over a long horizon. The gate achieves the curriculum's
+goal --- gravity/friction absorb the easy residuals while $\dM,\dC$ are still
+near-silent --- without the discontinuity. At inference $\gamma=1$.
+
+% =====================================================================
+\section{Initialisation at the Physics Baseline}
+% =====================================================================
+\label{sec:init}
+\begin{proposition}[Physics-consistent start]\label{prop:init}
+With every final layer initialised to $W^{(L)}\!\sim\!\mathcal N(0,\sigma_0^2)$,
+$\bm b^{(L)}=\bm 0$ ($\sigma_0=10^{-4}$), all corrections are $O(\sigma_0)$ (the
+inertia matrix $O(\sigma_0)$, hence its torque contribution $O(\sigma_0)$), so
+$\that=\tphys+O(\sigma_0)\approx\tphys$ at initialisation.
+\end{proposition}
+The model therefore \emph{starts} at the validated analytical solution and
+training can only refine it; there is no cold-start regression of the rigid-body
+structure. The exactly-zero alternative is rejected because it deadlocks the
+$LL\transp$ inertia branch (Proposition~\ref{prop:deadlock}); $\sigma_0=10^{-4}$
+gives correction magnitudes negligible against the $O(1)$ physics baseline while
+keeping gradients alive from the first step.
+
+% =====================================================================
+\section{Structural Guarantees (Summary)}
+% =====================================================================
+For \emph{every} parameter configuration, by construction:
+\begin{enumerate}[leftmargin=2em,itemsep=1pt]
+  \item $\that=\tphys$ to $O(10^{-4})$ at init (Prop.~\ref{prop:init}).
+  \item $\dM=\dM\transp$ (Prop.~\ref{prop:sym}); in $LL\transp$ mode $\Mt\succ0$.
+  \item $\dC(\q,\qd)\qd\to\bm 0$ as $\qd\to\bm 0$ (all three Coriolis modes).
+  \item $\dg$ is independent of $\qd,\qdd$ (gravity stays $T$-even).
+  \item $\dtf(-\qd)=-\dtf(\qd)$ (Prop.~\ref{prop:odd}; both friction forms).
+  \item $\dot{\Mt}-2\Ct$ skew-symmetric in the structural Coriolis mode
+  (Prop.~\ref{prop:passive}).
+\end{enumerate}
+
+% =====================================================================
+\section{Training Objective and Optimisation}
+% =====================================================================
+\label{sec:loss}
+\subsection{Composite loss}
+EDR minimises a data term, a per-component correction-magnitude regulariser, and
+an optional stability term:
+\begin{equation}
+\mathcal L=\mathcal L_{\mathrm{data}}
++\sum_{x\in\{g,M,C,f\}}\lambda_x\,\mathcal L^{(x)}_{\mathrm{corr}}
++\lambda_{\mathrm{stab}}\,\mathcal L_{\mathrm{stab}} .
+\label{eq:loss}
+\end{equation}
+
+\paragraph{Data term.}
+A per-joint weighted error in normalised space (matching the trajectory
+macro-RMSE used for early stopping),
+\begin{equation}
+\mathcal L_{\mathrm{data}}=\frac{1}{Bn}\sum_{b=1}^{B}\sum_{i=1}^{n}w_i\big(\tilde{\hat\tau}_{b,i}-\tilde\tau_{b,i}\big)^2,
+\qquad \tfrac1n\sum_i w_i=1,
+\label{eq:ldata}
+\end{equation}
+with mean-normalised per-joint weights $w_i$ (uniform $w_i=1$ in the reference
+model; a Huber variant with $\delta=0.5$ is available for outlier robustness).
+
+\paragraph{Correction regulariser (Occam's razor).}
+Each correction is penalised so the model prefers nominal physics unless the data
+strongly disagree:
+\begin{equation}
+\mathcal L^{(g)}_{\mathrm{corr}}=\overline{\norm{\dg}^2},\quad
+\mathcal L^{(M)}_{\mathrm{corr}}=\frac{\overline{\norm{\dM}_F^2}}{n},\quad
+\mathcal L^{(C)}_{\mathrm{corr}}=\overline{\norm{\dC\,\qd}^2},\quad
+\mathcal L^{(f)}_{\mathrm{corr}}=\overline{\norm{\dtf}^2},
+\label{eq:lcorr}
+\end{equation}
+where $\overline{(\cdot)}$ is the batch mean and the Frobenius inertia term is
+scaled by $1/n$ for per-element parity with the vector terms. Per-component
+weights $\lambda_x$ are essential: the $O(n^2)$ matrix corrections $\dM,\dC$ have
+far more effective capacity than the $O(n)$ vectors $\dg,\dtf$ and require stronger
+penalties, lest they memorise; the weights may optionally be cosine-decayed over
+training (strong Occam early, relaxed late).
+
+\paragraph{Stability term (optional).}
+A soft skew-symmetry penalty enforcing Property~\ref{p:pass} when forms (a)/(b)
+are used,
+\begin{equation}
+\mathcal L_{\mathrm{stab}}=\overline{\norm{S+S\transp}_F^2},\qquad S=\dot{\Mt}-2\Ct,
+\end{equation}
+computed on a random subminibatch (the Jacobian $\dot{\Mt}$ is moderately
+expensive). It is redundant --- and disabled --- under the structural Coriolis
+mode, where passivity already holds exactly (Prop.~\ref{prop:passive}).
+
+\subsection{Optimisation and regularisation strategy}
+A single-group AdamW optimiser (the smooth gate removes the need for the two
+parameter groups of the two-phase scheme) is used with a warm-up$+$cosine
+learning-rate schedule (cosine annealing with warm restarts in the original
+setup), gradient-norm clipping, and \textbf{float32 throughout} --- mixed
+precision is disabled because the structural-Coriolis Jacobian is unreliable in
+float16. Generalisation rests on several mild, complementary regularisers acting
+at different layers: weight decay, the correction-magnitude penalty
+\eqref{eq:lcorr}, dropout in the $\delta$-net hidden layers, small input
+feature-noise augmentation, and early stopping on the validation macro-RMSE; an
+exponential moving average (EMA) of the weights may be maintained for model
+selection. The design philosophy is that several gentle regularisers keep the
+training and validation curves descending in lockstep, avoiding the post-peak
+overfitting a single strong penalty would invite.
+
+% =====================================================================
+\section{Reference Configuration and Parameter Budget}
+% =====================================================================
+Table~\ref{tab:config} lists the architectural hyper-parameters of the EDR model
+used in the study, and Table~\ref{tab:params} its per-component parameter budget;
+these are architectural facts, not results. The budget scales with the hidden
+widths --- a smaller $[32,32]/[16,16]$ variant totals $\approx5.4$k parameters ---
+but every parameter is structurally constrained.
+
+\begin{table}[t]
+\centering\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}l l@{\hspace{2.4em}}l l@{}}
+\toprule
+Setting & Value & Setting & Value\\
+\midrule
+Joints $n$ & $5$ & Activation $\phi$ & SiLU\\
+$\dg/\dM/\dC$ hidden & $[48,48]$ & Friction hidden & $[24,24]$\\
+Trig features ($\sin/\cos$) & enabled & Physics conditioning & enabled\\
+Inertia mode & symmetric scatter & Coriolis mode & element-wise\\
+Friction form & MLP ($+\,\abs{\qdd}$) & Final-layer init $\sigma_0$ & $10^{-4}$\\
+Correction dropout $p$ & $0.30$ & Gate ramp fraction $\rho$ & $0.30$\\
+Optimiser & AdamW (single group) & LR schedule & warm-up cosine\\
+Grad-clip norm & $1.0$ & Precision & float32\\
+Weight EMA & enabled & Early stop metric & val macro-RMSE\\
+\bottomrule
+\end{tabular}
+\caption{Reference EDR architecture configuration.}
+\label{tab:config}
+\end{table}
+
+\begin{table}[t]
+\centering\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}l l c c@{}}
+\toprule
+Network & Output / structure & Input dim & Parameters\\
+\midrule
+Gravity $\dg(\q)$ & $\R^{n}$, free MLP & $20$ & $3{,}605$\\
+Inertia $\dM(\q)$ & $m=n(n{+}1)/2=15$ entries $\to\Symop(n)$ & $20$ & $4{,}095$\\
+Coriolis $\dC(\q,\qd)\qd$ & $\qd\odot\MLP_C$ (element-wise) & $40$ & $4{,}565$\\
+Friction $\dtf(\qd)$ & $\qd\odot h_\phi(\abs{\qd},\abs{\qdd},\abs{\tf})$ & $15$ & $1{,}109$\\
+\midrule
+\textbf{Total} & & & $\bm{13{,}374}$\\
+\bottomrule
+\end{tabular}
+\caption{Per-component parameter budget of the reference EDR model.}
+\label{tab:params}
+\end{table}
+
+\begin{table}[t]
+\centering\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}l c c@{}}
+\toprule
+Model & Trainable parameters & Physics use\\
+\midrule
+Black-box FNN & $\sim\!70$k & none\\
+Physics-regularised FNN & $\sim\!549$k & additive (input/penalty)\\
+\textbf{EDR (this work)} & $\bm{\sim\!13}$\textbf{k} & structural (architectural)\\
+\bottomrule
+\end{tabular}
+\caption{Parameter/physics comparison of the three modelling paradigms (orders of
+magnitude; EDR is $\sim\!5\times$ smaller than the black box and $\sim\!41\times$
+smaller than the physics-regularised baseline).}
+\label{tab:compare}
+\end{table}
+
+% =====================================================================
+\section{Benefits over the Baselines}
+% =====================================================================
+\paragraph{Versus the black-box network.}
+The black box must rediscover the entire rigid-body structure from data: SPD
+inertia, velocity-quadratic Coriolis, configuration-only gravity, and odd friction
+are nowhere encoded and hold, at best, approximately and only on the training
+distribution. EDR encodes all of these exactly and for free, spending its few
+parameters on the small residual rather than on relearning physics. This yields
+far fewer parameters, a strong inductive bias for data efficiency and
+generalisation, physically plausible off-distribution behaviour (the analytical
+backbone dominates and the correction is bounded), and component-level
+interpretability a monolithic MLP cannot offer.
+
+\paragraph{Versus the physics-regularised network.}
+The physics-regularised model \emph{feeds} the analytical decomposition to an
+unstructured MLP and/or penalises departure from $\tphys$; physics is a hint, not
+a constraint, so nothing prevents the learned function from violating symmetry,
+oddness, or velocity-vanishing, and the model stays large because it carries a
+full input-to-output regressor. EDR makes physics \emph{architectural}:
+\begin{itemize}[leftmargin=1.5em,itemsep=2pt]
+  \item \textbf{Exact structure, not soft hints} --- symmetry, oddness,
+  velocity-vanishing, and (structural mode) passivity hold for every weight and
+  cannot be traded away to lower the training loss
+  (Props.~\ref{prop:sym},~\ref{prop:passive},~\ref{prop:odd}).
+  \item \textbf{Parameter efficiency} (Table~\ref{tab:compare}) --- the
+  corrections are tiny because each models only a small structured residual; the
+  analytical terms carry the bulk of the prediction at zero parameters.
+  \item \textbf{Interpretability} --- the four correction magnitudes
+  $\big(\norm{\dg},\norm{\dM}_F,\norm{\dC\qd},\norm{\dtf}\big)$ reveal which
+  physical term the URDF/friction model gets wrong and by how much.
+  \item \textbf{Safe, monotone refinement} --- zero-init plus the Occam
+  regulariser means EDR starts at the validated physics model and departs only
+  where the data demand.
+  \item \textbf{Deployability} --- in the structural mode $(\Mt,\Ct)$ remain a
+  valid, passive rigid-body pair, suitable for model-based control with stability
+  guarantees.
+\end{itemize}
+
+% =====================================================================
+\section{Empirical Evaluation}
+% =====================================================================
+A quantitative comparison of EDR against the black-box and physics-regularised
+baselines --- accuracy, parameter and data efficiency, generalisation, and
+per-joint behaviour --- is reported separately and is intentionally omitted
+here.\footnote{Results, tables, and figures to be inserted by the author.}
+
+% =====================================================================
+\section{Conclusion}
+% =====================================================================
+EDR carries physics from the \emph{input} and \emph{loss} of a learner into its
+\emph{structure}. Each analytical torque component is refined by a tiny network
+that is equivariant to the component's symmetry, near-zero at initialisation, and
+penalised toward silence. The manipulator equation's exact symmetries --- inertia
+symmetry, configuration-only gravity, velocity-vanishing quadratic Coriolis, odd
+friction, and passivity --- are preserved by construction rather than merely
+encouraged, giving a compact, interpretable, and physically consistent model whose
+inductive bias is exact.
+
+\end{document}

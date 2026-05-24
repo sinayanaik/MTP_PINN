@@ -4,7 +4,7 @@
 Usage (from anywhere)::
 
     python run_all.py                       # all figures
-    python run_all.py --only fig03 fig11    # a subset
+    python run_all.py --only fig03 fig05    # a subset
     python run_all.py --config-override fig_w=8 dpi_save=600
 
 Champion predictions are computed once up front and cached, so the ~10
@@ -43,7 +43,7 @@ def _coerce(v: str):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--only", nargs="*", default=None,
-                    help="figure stems to run (e.g. fig03 fig11)")
+                    help="figure stems to run (e.g. fig03 fig05)")
     ap.add_argument("--config-override", nargs="*", default=[],
                     metavar="KEY=VAL", help="override PlotConfig fields")
     ap.add_argument("--no-prefetch", action="store_true",
