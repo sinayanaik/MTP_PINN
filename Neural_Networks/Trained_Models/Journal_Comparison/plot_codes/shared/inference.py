@@ -224,3 +224,174 @@ def prefetch_all(cfg: PlotConfig) -> dict[str, dict[str, Any]]:
     for arch, rec in champions(cfg).items():
         out[arch] = predict_split(rec, cfg)
     return out
+
+
+# ---------------------------------------------------------------------------
+# inference cost measurement (FLOPs)
+# ---------------------------------------------------------------------------
+
+
+def _benchmark_cache_path(cfg: PlotConfig) -> Path:
+    return Path(cfg.cache_dir) / "inference_benchmark.json"
+
+
+def benchmark_inference(
+    cfg: PlotConfig,
+    *,
+    force: bool = False,
+) -> dict[str, float]:
+    """Measure per-sample FLOPs for each champion model.
+
+    Uses ``torch.utils.flop_counter.FlopCounterMode`` to count the actual
+    floating-point operations in a single forward pass.  FLOPs are the
+    hardware-independent measure of computational cost — they reflect the
+    true work the model does, not PyTorch kernel-launch overhead (which
+    penalises structured architectures like EDR that dispatch many small
+    sub-networks sequentially).
+
+    Returns ``{arch: flops_per_sample}``.
+    Cached to ``<cache_dir>/inference_benchmark.json``.
+    """
+    import json as _json
+    cache = _benchmark_cache_path(cfg)
+    if cache.exists() and not force:
+        with cache.open() as f:
+            data = _json.load(f)
+        from .dataio import champions
+        champs = champions(cfg)
+        if all(a in data for a in champs):
+            return data
+
+    from .dataio import champions, resolve_dataset_dir
+
+    champs = champions(cfg)
+    device = torch.device("cpu")  # FLOPs don't depend on device
+    results: dict[str, float] = {}
+
+    for arch, rec in champs.items():
+        model_path = Path(rec["model_path"])
+        if not model_path.exists():
+            results[arch] = float("nan")
+            continue
+
+        ckpt = torch.load(model_path, map_location=device, weights_only=False)
+        norm = _load_norm(ckpt, resolve_dataset_dir(rec))
+
+        dataset_dir = resolve_dataset_dir(rec)
+        split_dir = dataset_dir / cfg.split
+        q = _load_csv(split_dir, CSV_FILTERED_Q)
+        qd = _load_csv(split_dir, CSV_FILTERED_QD)
+        qdd = _load_csv(split_dir, CSV_FILTERED_QDD)
+        physics_raw = _load_csv(split_dir, CSV_FILTERED_TAU_DECOMPOSED)
+        features, physics = _make_inputs(norm, q, qd, qdd, physics_raw)
+
+        # Single sample for per-sample FLOP count
+        feat_t = torch.from_numpy(features[:1])
+        phys_t = torch.from_numpy(physics[:1])
+
+        model = _build_model(ckpt).to(device)
+        state = ckpt.get("model_state") or ckpt
+        if any(k.startswith("_orig_mod.") for k in state):
+            state = {k.replace("_orig_mod.", "", 1): v for k, v in state.items()}
+        model.load_state_dict(state, strict=True)
+        model.eval()
+
+        from torch.utils.flop_counter import FlopCounterMode
+        with torch.no_grad():
+            with FlopCounterMode(display=False) as fcm:
+                model(feat_t, phys_t)
+        flops = fcm.get_total_flops()
+        results[arch] = float(flops)
+        print(f"  {arch:>10s}: {flops:>10,} FLOPs/sample")
+
+    # Cache
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    with cache.open("w") as f:
+        _json.dump(results, f, indent=2)
+
+    return results
+
+
+def benchmark_inference_time(
+    cfg: PlotConfig,
+    *,
+    force: bool = False,
+    n_warmup: int = 50,
+    n_timed: int = 200,
+) -> dict[str, float]:
+    """Measure real wall-clock per-sample inference time (seconds) for each champion.
+
+    Uses CPU timing with warm-up passes to get stable measurements.
+    Returns ``{arch: seconds_per_sample}``.
+    Cached to ``<cache_dir>/inference_time.json``.
+    """
+    import json as _json
+    import time
+
+    cache = Path(cfg.cache_dir) / "inference_time.json"
+    if cache.exists() and not force:
+        with cache.open() as f:
+            data = _json.load(f)
+        from .dataio import champions
+        champs = champions(cfg)
+        if all(a in data for a in champs):
+            return data
+
+    from .dataio import champions, resolve_dataset_dir
+
+    champs = champions(cfg)
+    device = torch.device("cpu")
+    results: dict[str, float] = {}
+
+    for arch, rec in champs.items():
+        model_path = Path(rec["model_path"])
+        if not model_path.exists():
+            results[arch] = float("nan")
+            continue
+
+        ckpt = torch.load(model_path, map_location=device, weights_only=False)
+        norm = _load_norm(ckpt, resolve_dataset_dir(rec))
+
+        dataset_dir = resolve_dataset_dir(rec)
+        split_dir = dataset_dir / cfg.split
+        q = _load_csv(split_dir, CSV_FILTERED_Q)
+        qd = _load_csv(split_dir, CSV_FILTERED_QD)
+        qdd = _load_csv(split_dir, CSV_FILTERED_QDD)
+        physics_raw = _load_csv(split_dir, CSV_FILTERED_TAU_DECOMPOSED)
+        features, physics = _make_inputs(norm, q, qd, qdd, physics_raw)
+
+        # Single sample
+        feat_t = torch.from_numpy(features[:1])
+        phys_t = torch.from_numpy(physics[:1])
+
+        model = _build_model(ckpt).to(device)
+        state = ckpt.get("model_state") or ckpt
+        if any(k.startswith("_orig_mod.") for k in state):
+            state = {k.replace("_orig_mod.", "", 1): v for k, v in state.items()}
+        model.load_state_dict(state, strict=True)
+        model.eval()
+
+        # Warm-up
+        with torch.no_grad():
+            for _ in range(n_warmup):
+                model(feat_t, phys_t)
+
+        # Timed runs
+        with torch.no_grad():
+            t0 = time.perf_counter()
+            for _ in range(n_timed):
+                model(feat_t, phys_t)
+            t1 = time.perf_counter()
+
+        per_sample = (t1 - t0) / n_timed
+        results[arch] = per_sample
+        print(f"  {arch:>10s}: {per_sample*1e6:.1f} µs/sample")
+
+    # Cache
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    with cache.open("w") as f:
+        _json.dump(results, f, indent=2)
+
+    return results
+
+

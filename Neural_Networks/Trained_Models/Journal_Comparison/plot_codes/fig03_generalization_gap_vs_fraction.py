@@ -34,7 +34,7 @@ TICK_SIZE         = 14.0
 LEGEND_SIZE       = 14.0
 LEGEND_ANCHOR_Y   = 1.02
 X_LABEL           = "Training data used (%)"
-Y_LABEL           = "Generalization gap: test − val RMSE (N·m)"
+Y_LABEL           = "Generalization Gap (N·m)"
 ZERO_LINE_COLOR   = "#888888"        # reference line at gap = 0
 ZERO_LINE_LW      = 1.4
 BAND_ALPHA        = 0.15

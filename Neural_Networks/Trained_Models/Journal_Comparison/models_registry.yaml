@@ -1,5 +1,5 @@
 total_models: 207
-last_updated: '2026-05-22T14:32:11.188282'
+last_updated: '2026-05-25T00:58:30.006385'
 models:
 - model_type: BlackBoxFNN
   run_id: BlackBoxFNN_ep514_rmse0.09836_frac0.7_seed42_lr3e-4_wd1e-4_do0.5_fn0.02_bs512_hl128-256-128_20260522_0803

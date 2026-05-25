@@ -76,8 +76,7 @@ def _headline(cfg, res) -> pd.DataFrame:
         ptr = per_traj_rmse(res[a]["pred"], res[a]["target"], res[a]["traj"])
         row = {
             "architecture": palette.label(cfg, a),
-            "test_rmse_traj_macro": ch["test_rmse"],
-            "test_rmse_pooled": m["rmse_pooled"],
+            "test_rmse": ch["test_rmse"],
             "r2_overall": m["r2_overall"],
             "r2_mean": m["r2_mean"],
         }
@@ -136,23 +135,25 @@ def _data_efficiency(cfg) -> pd.DataFrame:
 def _capability_profile(cfg, res) -> pd.DataFrame:
     """Raw + normalised values behind the fig04 capability radar.
 
-    Five per-arch scalars that appear on no other figure (pooled RMSE, R²
-    overall, mean MAE, mean NRMSE, parameter count). Normalisation matches the
-    radar exactly — imported from it so the table can never drift from the plot
-    (ratio-to-best for the accuracy/fit axes, log score for parameters).
+    Six per-arch scalars: RMSE, R² overall, mean MAE, mean NRMSE,
+    parameter count, and real inference time.  Normalisation matches
+    the radar exactly.
     """
     import fig04_capability_radar as radar
+    from shared.inference import benchmark_inference_time
 
     champs = dataio.champions(cfg)
     archs = palette.ordered_archs(cfg)
     params = {a: float(dataio.param_count(champs[a]["run_dir"])) for a in archs}
+    traj_rmse = {a: champs[a]["test_rmse"] for a in archs}
+    inf_time = benchmark_inference_time(cfg)
 
     def mean(x):
         return float(np.mean(np.asarray(x, dtype=float)))
 
     specs = [
-        ("pooled_rmse", True, "ratio",
-         [res[a]["metrics"]["rmse_pooled"] for a in archs]),
+        ("test_rmse", True, "ratio",
+         [traj_rmse[a] for a in archs]),
         ("r2_overall", False, "ratio",
          [res[a]["metrics"]["r2_overall"] for a in archs]),
         ("mean_mae", True, "ratio",
@@ -160,12 +161,18 @@ def _capability_profile(cfg, res) -> pd.DataFrame:
         ("mean_nrmse", True, "ratio",
          [mean(res[a]["metrics"]["nrmse"]) for a in archs]),
         ("params", True, "param_log", [params[a] for a in archs]),
+        ("inference_time_s", True, "inftime_log",
+         [inf_time.get(a, float("nan")) for a in archs]),
     ]
     rows = []
     for axis, lower, scale, raw in specs:
         raw = np.asarray(raw, dtype=float)
-        if scale == "param_log":
-            score = radar._param_log_score(raw, radar.PARAM_FLOOR)
+        if scale in ("param_log", "inftime_log"):
+            floor = getattr(radar, {
+                "param_log": "PARAM_FLOOR",
+                "inftime_log": "INFTIME_FLOOR",
+            }[scale])
+            score = radar._log_score(raw, floor)
         else:
             score = radar._ratio_to_best(raw, lower)
         for a, rv, sv in zip(archs, raw, score):

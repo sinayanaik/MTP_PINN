@@ -37,13 +37,14 @@ TRUTH_LINE_W      = 2.0
 PRED_ALPHA        = 0.9
 AXES_LABEL_SIZE   = 16.0
 TICK_SIZE         = 14.0
-LEGEND_SIZE       = 14.0
+LEGEND_SIZE       = 16.0            # ← increased from 14
 LEGEND_ANCHOR_Y   = 1.02
 TRAJECTORY_SELECT = None             # None=auto | int index | geometry name
 SAVGOL_ENABLED    = True
-SAVGOL_WINDOW     = 7
-SAVGOL_POLYORDER  = 2
+SAVGOL_WINDOW     = 31               # ← increased from 7 for much heavier smoothing
+SAVGOL_POLYORDER  = 3                # ← increased from 2 for smoother curves
 GRID_ON           = True
+SAMPLING_HZ       = 300.0            # robot feedback sampling rate (≈305 Hz)
 # =============================================================================
 
 CONFIG = replace(default_config(), fig_w=FIG_W, fig_h=FIG_H, dpi_save=DPI_SAVE,
@@ -61,7 +62,9 @@ def main(cfg=CONFIG):
     res = champion_results(cfg)
     archs = palette.ordered_archs(cfg)
     s, e, geom = select_trajectory(res["edr"]["traj"], cfg)
-    t = np.arange(e - s)
+    n_samples = e - s
+    # Convert sample indices to time in seconds
+    t = np.arange(n_samples) / SAMPLING_HZ
     nj = len(cfg.joint_names)
 
     fig, axes = plt.subplots(nj, 1, figsize=(cfg.fig_w, cfg.fig_h), sharex=True)
@@ -75,10 +78,11 @@ def main(cfg=CONFIG):
                     alpha=PRED_ALPHA, zorder=palette.zorder(cfg, a))
         ax.set_ylabel(f"{cfg.joint_names[j]} ({cfg.torque_unit})")
         ax.grid(GRID_ON)
-    axes[-1].set_xlabel(f"Sample (test trajectory: {geom})")
+    axes[-1].set_xlabel(r"$t\;(\mathrm{s})$" + f"  —  test trajectory: {geom}",
+                        fontsize=cfg.axes_label_size)
 
     handles = [Line2D([0], [0], color=cfg.truth_color,
-                      lw=cfg.truth_linewidth, label="measured")]
+                      lw=cfg.truth_linewidth, label="Measured")]
     handles += [Line2D([0], [0], color=palette.color(cfg, a), lw=LINE_W,
                        label=palette.label(cfg, a)) for a in archs]
     fig.align_ylabels(axes)

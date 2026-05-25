@@ -1,0 +1,4 @@
+architecture,n_runs,best_test_rmse,mean_test_rmse,std_test_rmse,median_test_rmse
+FNN,60,0.080354,0.086698,0.00393491,0.0865515
+Physics-Reg.,48,0.0814,0.0860955,0.00261801,0.086118
+EDR,72,0.054444,0.0597143,0.00266167,0.0597705
